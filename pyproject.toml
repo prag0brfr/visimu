@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aoeviewer"
+version = "2.0.0"
+description = "Fast viewer for AOE simulation result files"
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [{ name = "Paulo R. A. Gilz" }]
+# No `license` field: this project is not released under an open-source licence.
+# See the Licence section of README.md, and THIRD-PARTY-NOTICES.md for the
+# licences of the dependencies, which are a separate matter.
+dependencies = ["numpy"]
+
+# The GUI extras are optional so the scripting API stays usable with numpy
+# alone -- which matters on machines where Qt cannot be installed.
+[project.optional-dependencies]
+gui = ["PySide6-Essentials", "shiboken6", "pyqtgraph"]
+build = ["PyInstaller"]
+
+[project.scripts]
+aoeviewer = "aoeviewer.__main__:main"
+
+[tool.setuptools]
+package-dir = { "" = "python" }
+packages = ["aoeviewer", "aoeviewer.ui"]

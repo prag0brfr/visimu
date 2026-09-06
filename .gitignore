@@ -1,0 +1,22 @@
+build/
+dist/
+*.o
+*.so
+*.dll
+*.dylib
+*.exe
+__pycache__/
+*.pyc
+*.aoews
+
+# Run-time output. The log records absolute paths, the machine's platform
+# string and the Python build, none of which belong in a shared repository.
+*.log
+# Generated test data. .aoe is the extension the application filters on, so
+# every file holding data to test with uses it.
+*.aoe
+data/
+_archive_/
+
+# Scratch folders that live beside the project on a working machine.
+Claude outputs/

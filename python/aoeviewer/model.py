@@ -1,0 +1,966 @@
+# Author: Paulo R. A. Gilz
+"""Application state: pages, plot tiles, selection and styling.
+
+Deliberately free of Qt imports. Keeping the state model separate from the
+widgets is what lets the workspace be saved, restored and tested without a
+running UI. State that lives next to the draw calls cannot be exercised on its
+own, which puts the parts most worth testing out of reach of every test.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from enum import IntEnum
+from typing import Dict, List, Optional, Sequence, Set, Tuple
+
+MAX_TILES = 25  # a 5x5 grid
+
+# Half-extent of the default 3D view. The normalised cube's half-diagonal is
+# sqrt(3)/2 = 0.866, so 0.95 shows the whole box at any rotation with a small
+# margin -- which is what "fit" has to return to.
+DEFAULT_3D_HALF = 0.95
+
+# How far the projection may be scaled, as a half-extent. The first ceiling was
+# 20 -- barely 21x out from the default, reached in a couple of seconds of
+# scrolling. There is no reason to stop someone pulling right back from a long
+# trajectory; the floor is what stops a fast scroll turning the plot into the
+# inside of a single line.
+MIN_3D_HALF = 1e-3
+MAX_3D_HALF = 5.0e3
+
+
+def clamp_3d_half(value: float) -> float:
+    return max(MIN_3D_HALF, min(MAX_3D_HALF, float(value)))
+
+
+class ColorMode(IntEnum):
+    """What decides a curve's colour."""
+
+    SIMULATION = 0
+    PARAMETER = 1
+    ISO = 2
+
+
+class MouseMode(IntEnum):
+    """What the mouse does over a plot.
+
+    Exactly one is active at a time and the others are genuinely off, not just
+    unbound: in SELECT and CROSSHAIR the view box has mouse interaction disabled
+    entirely, so a stray drag cannot pan the plot out from under you.
+    """
+
+    SELECT = 0      # click to make a tile active; no view manipulation
+    CROSSHAIR = 1   # click a curve to inspect that sample
+    PAN = 2         # drag to move; wheel does nothing
+    ZOOM = 3        # wheel zooms, drag selects a rectangle to zoom into
+
+
+MOUSE_MODE_LABELS = {
+    MouseMode.SELECT: "Select",
+    MouseMode.CROSSHAIR: "Inspect",
+    MouseMode.PAN: "Pan",
+    MouseMode.ZOOM: "Zoom",
+}
+
+MOUSE_MODE_HINTS = {
+    MouseMode.SELECT: "Click a tile to make it active. The view does not move.",
+    MouseMode.CROSSHAIR: "Click a curve to read every channel of that run at that point.",
+    MouseMode.PAN: "Drag to move the view; the wheel is disabled. On a 3D tile: "
+                   "drag turns it, middle-drag or shift-drag slides it, "
+                   "right-drag or the wheel zooms.",
+    MouseMode.ZOOM: "Wheel zooms; drag a rectangle to zoom into it.",
+}
+
+
+# A qualitative palette that stays distinguishable on both dark and light
+# backgrounds. Ordered so the first few are maximally separated, since most
+# plots use only three or four curves.
+PALETTE: Tuple[str, ...] = (
+    "#3fa9f5", "#ff5252", "#3ddc84", "#ffb300",
+    "#e040fb", "#00e5d0", "#ff8a3d", "#8c6cff",
+    "#9ccc65", "#ff80ab", "#5aa9e6", "#c6ff4d",
+)
+
+DASH_STYLES: Tuple[str, ...] = ("solid", "dash", "dot", "dashdot")
+
+# Point markers. The empty string is "no marker", which is the common case for
+# a continuous trace.
+SYMBOLS: Tuple[str, ...] = ("", "o", "s", "t", "t1", "d", "+", "x", "star", "p", "h")
+
+SYMBOL_LABELS = {
+    "": "none", "o": "circle", "s": "square", "t": "triangle down",
+    "t1": "triangle up", "d": "diamond", "+": "plus", "x": "cross",
+    "star": "star", "p": "pentagon", "h": "hexagon",
+}
+
+
+@dataclass(frozen=True)
+class CurveKey:
+    """Identifies one drawn curve: a parameter of a simulation of a file."""
+
+    file_index: int
+    sim_index: int
+    param: str
+
+    def as_tuple(self) -> Tuple[int, int, str]:
+        return (self.file_index, self.sim_index, self.param)
+
+
+@dataclass
+class Marker:
+    """A point in a run, shown differently depending on the tile's x axis.
+
+    A marker is defined against one parameter -- "TIME = 5.0". On a tile plotted
+    against that same parameter it is a vertical line. On any *other* tile it is
+    the sample where that condition holds, drawn as a dot: set TIME = 5 and you
+    see where 5 seconds falls on ALPHA = f(NZ), which is exactly the question
+    people ask when they put a cursor on a time history.
+    """
+
+    x_param: str = "TIME"
+    position: float = 0.0
+    visible: bool = True
+    color: str = "#ff3333"
+    label: str = ""
+    # Size of the dot drawn on tiles whose x axis is a different parameter.
+    dot_size: float = 9.0
+
+    def describe(self) -> str:
+        if self.label:
+            return self.label
+        return "{0} = {1:g}".format(self.x_param or "?", self.position)
+
+
+@dataclass
+class AreaBand:
+    """A shaded x band drawn on every tile sharing the same x parameter."""
+
+    x_param: str = "TIME"
+    x_min: float = 0.0
+    x_max: float = 1.0
+    color: str = "#3380ff"
+    alpha: float = 0.20
+    visible: bool = True
+    # Optional caption, as markers have. A band marking "rotation" or
+    # "second segment climb" is far more use with the phase named on it than
+    # as an anonymous stripe you have to remember the meaning of.
+    label: str = ""
+
+    def describe(self) -> str:
+        if self.label:
+            return self.label
+        return "{0} in [{1:g}, {2:g}]".format(self.x_param or "?",
+                                              self.x_min, self.x_max)
+
+
+# Where a text note sits, as a fraction of the tile. View coordinates rather
+# than data coordinates on purpose: a caption is furniture, and furniture that
+# slides off screen the moment you zoom is not useful. Data-anchored notes are
+# what markers are for.
+@dataclass
+class TextNote:
+    """A caption placed on a tile."""
+
+    text: str = "Note"
+    x: float = 0.05          # 0 = left edge, 1 = right edge
+    y: float = 0.05          # 0 = top edge, 1 = bottom edge
+    size: float = 10.0       # points
+    color: str = "#e6e9ec"
+    bold: bool = False
+    visible: bool = True
+
+    def to_dict(self) -> dict:
+        return {
+            "text": self.text, "x": self.x, "y": self.y, "size": self.size,
+            "color": self.color, "bold": self.bold, "visible": self.visible,
+        }
+
+    @staticmethod
+    def from_dict(data: dict) -> "TextNote":
+        note = TextNote()
+        for key, value in data.items():
+            if hasattr(note, key):
+                setattr(note, key, value)
+        return note
+
+    def describe(self) -> str:
+        first = (self.text or "").splitlines()[0] if self.text else ""
+        return first[:40] or "(empty)"
+
+
+@dataclass
+class TileState:
+    """One plot in the grid."""
+
+    x_param: str = ""
+    y_params: List[str] = field(default_factory=list)
+
+    show_legend: bool = True
+    # One of the four corners, or "custom" -- set automatically when the legend
+    # is dragged somewhere that is not a corner. The custom position is a
+    # fraction of the tile so it survives a resize.
+    legend_position: str = "top-left"
+    legend_x: float = 0.02
+    legend_y: float = 0.02
+
+    # Which parts make up a legend entry.
+    #
+    # The parameter name alone by default. Every other part is off because with
+    # them on, a study of fifty runs produced fifty legend rows that differed
+    # only in a run id, filling the tile and hiding the plot -- and the run is
+    # already identifiable by colour. Turning file and simulation off is also
+    # what collapses an ISO plot down to one row per ISO value, since identical
+    # labels are then deduplicated. Tick what you need back on in STYLE.
+    legend_show_param: bool = True
+    legend_show_iso: bool = False
+    legend_show_file: bool = False
+    legend_show_sim: bool = False
+
+    # Retained so workspaces written before it was withdrawn still load. It was
+    # offered as "Line style marker" and never read by anything that draws: the
+    # legend shows a sample of the curve itself, dash pattern and marker
+    # included, so spelling those out in the text said nothing the row was not
+    # already showing.
+    legend_show_style: bool = False
+
+    # Fixed axis ranges. When locked the tile stops auto-fitting, which is what
+    # you want while comparing several plots on identical scales.
+    lock_x: bool = False
+    lock_y: bool = False
+    x_min: float = 0.0
+    x_max: float = 1.0
+    y_min: float = 0.0
+    y_max: float = 1.0
+
+    # False until the tile has been framed once. The view is the user's, not the
+    # program's: a rebuild happens for all sorts of reasons that have nothing to
+    # do with what is on screen -- restyling a curve, turning the grid on,
+    # dragging a marker, coming back to a page -- and re-fitting on each of them
+    # threw away whatever the user had zoomed in on. So the tile is fitted when
+    # it first acquires data, and after that only when asked: Fit, double-click,
+    # or a change to the SCALE limits.
+    view_initialised: bool = False
+
+    log_y: bool = False
+    show_grid: bool = True
+    show_points: bool = False
+
+    color_mode: ColorMode = ColorMode.SIMULATION
+    color_iso_param: str = ""
+
+    # --- 3D -------------------------------------------------------------
+    # A 3D tile plots z against x and y as a projected wireframe path. It is a
+    # projection drawn with the ordinary 2D machinery rather than an OpenGL
+    # scene: pyqtgraph's GL view needs PyOpenGL, which is one more wheel to get
+    # past a blocked package index, and for trajectories -- which is what these
+    # files hold -- a rotatable projection reads just as well.
+    plot3d: bool = False
+    z_param: str = ""
+    azimuth: float = 45.0     # degrees, rotation about the vertical axis
+    elevation: float = 25.0   # degrees, above the horizontal plane
+    show_3d_axes: bool = True   # the corner orientation triad
+
+    # Grid lines and tick values on the three back walls of the data box. On by
+    # default because an orthographic projection with no reference surface
+    # cannot be read: there is no perspective cue, so depth is guesswork and
+    # the tile carries no numeric scale at all. It is a checkbox rather than a
+    # rule because a dense trajectory is sometimes clearer bare.
+    show_3d_grid: bool = True
+
+    # The visible window onto the projection: centre and half-extent, in the
+    # normalised cube's own coordinates. Kept separately from x_min/x_max
+    # because those describe *data* ranges of a 2D tile and mean nothing here --
+    # and because a 3D tile is rebuilt on every rotation step, so without
+    # somewhere to keep it, any zoom the user applied would be thrown away the
+    # moment they turned the object.
+    view3d_cx: float = 0.0
+    view3d_cy: float = 0.0
+    view3d_half: float = DEFAULT_3D_HALF
+
+    # Captions belong to the tile, not to a parameter: unlike a marker, a note
+    # is about this particular plot, and repeating it across a 5x5 grid because
+    # it happened to be "global" would be noise.
+    texts: List["TextNote"] = field(default_factory=list)
+
+    def reset_3d_view(self) -> None:
+        """Frame the whole cube again. This is what auto-fit does in 3D."""
+        self.view3d_cx = 0.0
+        self.view3d_cy = 0.0
+        self.view3d_half = DEFAULT_3D_HALF
+
+    def is_empty(self) -> bool:
+        if self.plot3d:
+            return not (self.x_param and self.y_params and self.z_param)
+        return not self.x_param or not self.y_params
+
+    def to_dict(self) -> dict:
+        data = {
+            "x_param": self.x_param,
+            "y_params": list(self.y_params),
+            "show_legend": self.show_legend,
+            "legend_position": self.legend_position,
+            "legend_x": self.legend_x,
+            "legend_y": self.legend_y,
+            "legend_show_style": self.legend_show_style,
+            "legend_show_param": self.legend_show_param,
+            "legend_show_iso": self.legend_show_iso,
+            "legend_show_file": self.legend_show_file,
+            "legend_show_sim": self.legend_show_sim,
+            "lock_x": self.lock_x,
+            "lock_y": self.lock_y,
+            "x_min": self.x_min,
+            "x_max": self.x_max,
+            "y_min": self.y_min,
+            "y_max": self.y_max,
+            "view_initialised": self.view_initialised,
+            "log_y": self.log_y,
+            "show_grid": self.show_grid,
+            "show_points": self.show_points,
+            "color_mode": int(self.color_mode),
+            "color_iso_param": self.color_iso_param,
+            "plot3d": self.plot3d,
+            "z_param": self.z_param,
+            "azimuth": self.azimuth,
+            "elevation": self.elevation,
+            "show_3d_axes": self.show_3d_axes,
+            "show_3d_grid": self.show_3d_grid,
+            "view3d_cx": self.view3d_cx,
+            "view3d_cy": self.view3d_cy,
+            "view3d_half": self.view3d_half,
+            "texts": [note.to_dict() for note in self.texts],
+        }
+        return data
+
+    @staticmethod
+    def from_dict(data: dict) -> "TileState":
+        tile = TileState()
+        for key, value in data.items():
+            # Workspaces written before the wireframe cube was replaced by the
+            # corner orientation triad carry the old key. Same intent -- "show
+            # the 3D reference" -- so it is honoured rather than dropped.
+            if key == "show_3d_box":
+                tile.show_3d_axes = bool(value)
+                continue
+            if key == "color_mode":
+                tile.color_mode = ColorMode(int(value))
+            elif key == "y_params":
+                tile.y_params = list(value)
+            elif key == "texts":
+                tile.texts = [TextNote.from_dict(entry) for entry in value]
+            elif hasattr(tile, key):
+                setattr(tile, key, value)
+        return tile
+
+
+def tile_title(tile: "TileState", max_names: int = 4) -> str:
+    """What a tile is plotting, as "ALPHA, NZ = f(TIME)".
+
+    Lives here rather than in the widget so it can be tested without Qt, and so
+    the same wording can be reused by an exporter later.
+    """
+    if tile.plot3d:
+        if not (tile.x_param and tile.y_params and tile.z_param):
+            return "3D tile — choose X, Y and Z"
+        return "{0} = f({1}, {2})".format(tile.z_param, tile.x_param,
+                                          tile.y_params[0])
+
+    if not tile.y_params and not tile.x_param:
+        return "empty tile"
+    if not tile.y_params:
+        return "no parameter selected  (x: {0})".format(tile.x_param)
+    if not tile.x_param:
+        return "{0}  (no x axis selected)".format(", ".join(tile.y_params))
+
+    names = tile.y_params
+    if len(names) > max_names:
+        shown = ", ".join(names[:max_names]) + " +{0} more".format(len(names) - max_names)
+    else:
+        shown = ", ".join(names)
+    return "{0} = f({1})".format(shown, tile.x_param)
+
+
+def y_axis_label(tile: "TileState", max_names: int = 3) -> str:
+    """The y axis caption from names alone.
+
+    The plot widget has a richer version that appends the unit when every
+    parameter on the axis shares one; that needs the session, which this module
+    deliberately does not have. This is the Qt-free, core-free form, used for
+    exports and tests.
+    """
+    if not tile.y_params:
+        return ""
+    shown = ", ".join(tile.y_params[:max_names])
+    return shown + ("..." if len(tile.y_params) > max_names else "")
+
+
+@dataclass
+class PageState:
+    """A grid of tiles, shown one page at a time."""
+
+    name: str = "Page 1"
+    rows: int = 1
+    cols: int = 1
+    tiles: List[TileState] = field(default_factory=lambda: [TileState() for _ in range(MAX_TILES)])
+
+    @property
+    def tile_count(self) -> int:
+        return max(1, min(self.rows * self.cols, MAX_TILES))
+
+    def visible_tiles(self) -> List[TileState]:
+        return self.tiles[: self.tile_count]
+
+    def to_dict(self) -> dict:
+        # Only the tiles the grid actually shows are worth persisting.
+        return {
+            "name": self.name,
+            "rows": self.rows,
+            "cols": self.cols,
+            "tiles": [t.to_dict() for t in self.tiles[: self.tile_count]],
+        }
+
+    @staticmethod
+    def from_dict(data: dict) -> "PageState":
+        page = PageState(
+            name=data.get("name", "Page 1"),
+            rows=int(data.get("rows", 1)),
+            cols=int(data.get("cols", 1)),
+        )
+        tiles = [TileState.from_dict(t) for t in data.get("tiles", [])]
+        while len(tiles) < MAX_TILES:
+            tiles.append(TileState())
+        page.tiles = tiles[:MAX_TILES]
+        return page
+
+
+@dataclass
+class IsoState:
+    """Filtering and grouping configuration for one ISO parameter.
+
+    Several of these can be active at once and they combine with AND: a run is
+    shown only if it passes every active filter. Colouring is separate and keys
+    on exactly one parameter, chosen per tile.
+    """
+
+    param: str = ""
+    active: bool = False
+    grouped: bool = False
+    group_count: int = 3
+    # value -> shown. Ordered ascending by the UI that fills it.
+    value_enabled: Dict[float, bool] = field(default_factory=dict)
+    # Parallel to Session.iso_auto_group() output; stored as plain tuples so the
+    # state model stays free of core types.
+    groups: List[Tuple[str, float, float, bool]] = field(default_factory=list)
+
+    def enabled_values(self) -> List[float]:
+        return [v for v, on in self.value_enabled.items() if on]
+
+
+class StyleRegistry:
+    """Colour, dash style, marker and width per styling key.
+
+    Keys are namespaced by what they describe, so the three colour modes coexist
+    without collisions:
+
+        sim::<simulation unique key>
+        param::<parameter name>
+        iso::<iso parameter>::<value or group label>
+
+    Colours are sticky: once a key has been given a colour it keeps it for the
+    whole session, so a curve does not change colour when an unrelated file is
+    loaded. Deriving palette indices from the current list order instead would
+    mean adding a file could recolour everything already on screen.
+    """
+
+    def __init__(self) -> None:
+        self._colors: Dict[str, str] = {}
+        self._dashes: Dict[str, str] = {}
+        self._symbols: Dict[str, str] = {}
+        self._widths: Dict[str, float] = {}
+        self._next_color = 0
+
+        # Applied to any curve without its own explicit width.
+        self.line_width: float = 1.6
+        self.symbol_size: float = 6.0
+
+    # --------------------------------------------------------------- colour
+
+    def color_for(self, key: str) -> str:
+        if key not in self._colors:
+            self._colors[key] = PALETTE[self._next_color % len(PALETTE)]
+            self._next_color += 1
+        return self._colors[key]
+
+    def has_color(self, key: str) -> bool:
+        return key in self._colors
+
+    def set_color(self, key: str, color: str) -> None:
+        self._colors[key] = color
+
+    # ---------------------------------------------------------- line style
+
+    def dash_for(self, key: str) -> str:
+        return self._dashes.get(key, "solid")
+
+    def set_dash(self, key: str, style: str) -> None:
+        if style in DASH_STYLES:
+            self._dashes[key] = style
+
+    def symbol_for(self, key: str) -> str:
+        return self._symbols.get(key, "")
+
+    def set_symbol(self, key: str, symbol: str) -> None:
+        if symbol in SYMBOLS:
+            self._symbols[key] = symbol
+
+    def width_for(self, key: str) -> float:
+        return self._widths.get(key, self.line_width)
+
+    def set_width(self, key: str, width: float) -> None:
+        self._widths[key] = max(0.1, min(float(width), 10.0))
+
+    def clear_width_overrides(self) -> None:
+        """Drop per-curve widths so every curve follows the global setting."""
+        self._widths.clear()
+
+    def reset(self, key: str) -> None:
+        for table in (self._colors, self._dashes, self._symbols, self._widths):
+            table.pop(key, None)
+
+    # ------------------------------------------------------------ persist
+
+    def to_dict(self) -> dict:
+        return {
+            "colors": dict(self._colors),
+            "dashes": dict(self._dashes),
+            "symbols": dict(self._symbols),
+            "widths": dict(self._widths),
+            "line_width": self.line_width,
+            "symbol_size": self.symbol_size,
+        }
+
+    def load_dict(self, data: dict) -> None:
+        self._colors = dict(data.get("colors", {}))
+        self._dashes = dict(data.get("dashes", {}))
+        self._symbols = dict(data.get("symbols", {}))
+        self._widths = {k: float(v) for k, v in data.get("widths", {}).items()}
+        self.line_width = float(data.get("line_width", 1.6))
+        self.symbol_size = float(data.get("symbol_size", 6.0))
+        self._next_color = len(self._colors)
+
+
+class AppState:
+    """Everything the UI needs that is not owned by the C++ core."""
+
+    def __init__(self) -> None:
+        self.pages: List[PageState] = [PageState()]
+        self.active_page: int = 0
+        self.active_tile: int = 0
+
+        # (file_index, sim_index) pairs currently plotted.
+        self.selected_sims: Set[Tuple[int, int]] = set()
+
+        self.iso_states: Dict[str, IsoState] = {}
+        self.styles = StyleRegistry()
+        self.markers: List[Marker] = []
+        self.areas: List[AreaBand] = []
+
+        # Scale constraints declared for a *variable* rather than for a tile.
+        # "Apply X range to every tile with the same X axis" used to walk the
+        # tiles that existed at that moment and stop there, so a tile filled in
+        # afterwards -- the common case, since you set up the scale first and
+        # then populate the grid -- silently ignored the constraint. Recording
+        # it against the parameter means it applies whenever that parameter
+        # lands on a tile, now or later.
+        self.global_x_limits: Dict[str, Tuple[float, float]] = {}
+        self.global_y_limits: Dict[str, Tuple[float, float]] = {}
+
+        # Tile copy/cut/paste.
+        self.tile_clipboard: Optional[TileState] = None
+        self.clipboard_is_cut: bool = False
+
+        self.dark_mode: bool = True
+        self.workspace_path: Optional[str] = None
+        self.dirty: bool = False
+        self.mouse_mode: MouseMode = MouseMode.SELECT
+
+    # ----------------------------------------------------------------- iso
+
+    def active_iso_filters(self) -> List["IsoState"]:
+        """Every ISO parameter currently filtering, in name order."""
+        return [
+            self.iso_states[name]
+            for name in sorted(self.iso_states)
+            if self.iso_states[name].active
+        ]
+
+    def iso_state(self, param: str) -> "IsoState":
+        if param not in self.iso_states:
+            self.iso_states[param] = IsoState(param=param)
+        return self.iso_states[param]
+
+    # ------------------------------------------------------ global limits
+
+    def set_global_x_limit(self, param: str, low: float, high: float) -> None:
+        if param:
+            self.global_x_limits[param] = (min(low, high), max(low, high))
+            self.dirty = True
+
+    def set_global_y_limit(self, param: str, low: float, high: float) -> None:
+        if param:
+            self.global_y_limits[param] = (min(low, high), max(low, high))
+            self.dirty = True
+
+    def clear_global_limit(self, param: str) -> None:
+        self.global_x_limits.pop(param, None)
+        self.global_y_limits.pop(param, None)
+        self.dirty = True
+
+    def apply_global_limits(self, tile: "TileState") -> bool:
+        """Impose any declared variable limits on one tile. True if it changed.
+
+        Called whenever a tile's parameters change, which is what makes the
+        constraint apply to tiles filled in after it was declared rather than
+        only to the ones that happened to exist at the time.
+        """
+        changed = False
+
+        limit = self.global_x_limits.get(tile.x_param)
+        if limit is not None:
+            if not tile.lock_x or (tile.x_min, tile.x_max) != limit:
+                tile.lock_x = True
+                tile.x_min, tile.x_max = limit
+                changed = True
+
+        # Several y parameters can each carry a limit; the tile has one y axis,
+        # so take the union -- narrowing to just one of them would hide data the
+        # user asked to see.
+        bounds = [self.global_y_limits[p] for p in tile.y_params
+                  if p in self.global_y_limits]
+        if bounds:
+            low = min(b[0] for b in bounds)
+            high = max(b[1] for b in bounds)
+            if not tile.lock_y or (tile.y_min, tile.y_max) != (low, high):
+                tile.lock_y = True
+                tile.y_min, tile.y_max = low, high
+                changed = True
+
+        if changed:
+            self.dirty = True
+        return changed
+
+    def apply_global_limits_everywhere(self) -> None:
+        for page in self.pages:
+            for tile in page.visible_tiles():
+                self.apply_global_limits(tile)
+
+    def default_x_param(self, available: Sequence[str]) -> str:
+        """The x axis to reach for when a tile has not been given one.
+
+        A time-like channel when the files have one, which is the x axis of
+        very nearly every one of these; otherwise the first parameter, so the
+        answer is never empty when anything is loaded.
+        """
+        if not available:
+            return ""
+        return next((p for p in available if p.upper().startswith("TIME")),
+                    available[0])
+
+    def apply_parameter_defaults(self, available: Sequence[str]) -> bool:
+        """Fill in the choices a tile needs but the user has not made.
+
+        A tile starts with no x axis at all. The PARAMS panel shows a sensible
+        default in its combo -- TIME, usually -- but showing is not choosing,
+        and a panel refresh must not edit the tile behind the user's back: that
+        was AOE-14, where the same click left different state depending on
+        which tab happened to be open. So the default has to be committed
+        somewhere deliberate, and this is it: once per redraw, silently,
+        wherever a tile is actually plotting something and still has no x axis.
+
+        Without it a tile showed "no x axis selected" while the panel beside it
+        displayed TIME as the selection -- the display and the state disagreed,
+        and the display was the one telling the truth about what the user
+        thought they had picked.
+
+        Blank tiles are left alone. Giving an x axis to all twenty-five cells
+        of an empty grid would relabel every one of them for no benefit.
+        """
+        if not available:
+            return False
+
+        default_x = self.default_x_param(available)
+        names = set(available)
+        changed = False
+
+        for page in self.pages:
+            for tile in page.tiles:
+                # Only tiles with something to draw. A tile with neither is
+                # empty, not misconfigured.
+                if not tile.x_param and (tile.y_params or tile.z_param):
+                    tile.x_param = default_x
+                    changed = True
+
+                # The same reasoning for colour-by-ISO: the mode is selected,
+                # the parameter it needs never was, and the curves come out one
+                # colour with nothing to say why.
+                if tile.color_mode == ColorMode.ISO and not tile.color_iso_param:
+                    configured = [p for p in self.iso_states if p in names]
+                    if configured or available:
+                        tile.color_iso_param = (configured[0] if configured
+                                                else default_x)
+                        changed = True
+
+        if changed:
+            self.dirty = True
+        return changed
+
+    def resolve_missing_parameters(self, available: Sequence[str]) -> List[str]:
+        """Re-point tiles at channels that exist, once, when the files change.
+
+        A tile can name a channel none of the open files carry: a workspace
+        saved against a different study, or a file removed mid-session. That has
+        to be settled somewhere, and the wrong somewhere is a panel's refresh --
+        those run only when their tab is shown, so the same click left different
+        state behind depending on which tab happened to be open, and nothing
+        marked the workspace dirty.
+
+        Doing it here makes it one deliberate step at a known moment, and
+        returns what changed so the window can say so rather than leaving the
+        user to discover their x axis has moved.
+
+        Only the axis channels are repaired. A y channel that is missing is left
+        named: it plots nothing today and comes back by itself when the file it
+        belongs to is reopened, which is much the friendlier behaviour when a
+        study is loaded a file at a time.
+        """
+        if not available:
+            # No files open. Nothing is missing; everything is simply absent,
+            # and clearing the tiles here would lose the user's layout.
+            return []
+
+        names = set(available)
+        default_x = self.default_x_param(available)
+        notes: List[str] = []
+
+        for page_index, page in enumerate(self.pages):
+            for tile_index, tile in enumerate(page.tiles):
+                where = "page {0}, tile {1}".format(page_index + 1, tile_index + 1)
+
+                if tile.x_param and tile.x_param not in names:
+                    notes.append("{0}: x axis {1} -> {2}".format(
+                        where, tile.x_param, default_x))
+                    tile.x_param = default_x
+
+                if tile.z_param and tile.z_param not in names:
+                    notes.append("{0}: z axis {1} cleared".format(where, tile.z_param))
+                    tile.z_param = ""
+
+                if tile.color_iso_param and tile.color_iso_param not in names:
+                    configured = [p for p in self.iso_states if p in names]
+                    replacement = configured[0] if configured else ""
+                    notes.append("{0}: colour-by {1} -> {2}".format(
+                        where, tile.color_iso_param, replacement or "none"))
+                    tile.color_iso_param = replacement
+
+        if notes:
+            self.dirty = True
+        return notes
+
+    # -------------------------------------------------------------- pages
+
+    @property
+    def page(self) -> PageState:
+        self.active_page = max(0, min(self.active_page, len(self.pages) - 1))
+        return self.pages[self.active_page]
+
+    @property
+    def tile(self) -> TileState:
+        page = self.page
+        index = max(0, min(self.active_tile, page.tile_count - 1))
+        return page.tiles[index]
+
+    def add_page(self) -> PageState:
+        page = PageState(name="Page {0}".format(len(self.pages) + 1))
+        self.pages.append(page)
+        self.active_page = len(self.pages) - 1
+        self.dirty = True
+        return page
+
+    def remove_page(self, index: int) -> None:
+        if len(self.pages) <= 1:
+            return
+        if 0 <= index < len(self.pages):
+            self.pages.pop(index)
+            self.active_page = min(self.active_page, len(self.pages) - 1)
+            self.dirty = True
+
+    def rename_page(self, index: int, name: str) -> None:
+        name = name.strip()
+        if name and 0 <= index < len(self.pages):
+            self.pages[index].name = name
+            self.dirty = True
+
+    def move_page(self, index: int, delta: int) -> int:
+        """Reorder a page. Returns its new index."""
+        target = index + delta
+        if not (0 <= index < len(self.pages)) or not (0 <= target < len(self.pages)):
+            return index
+        self.pages[index], self.pages[target] = self.pages[target], self.pages[index]
+        self.dirty = True
+        return target
+
+    # --------------------------------------------------------------- tiles
+
+    def move_tile(self, direction: str) -> bool:
+        """Swap the active tile with its neighbour. Returns True if it moved.
+
+        Swapping rather than inserting keeps the grid full and means the move is
+        its own inverse, which is what people expect
+        from arrow buttons.
+        """
+        page = self.page
+        cols = max(1, page.cols)
+        index = self.active_tile
+        row, col = divmod(index, cols)
+
+        if direction == "left" and col > 0:
+            target = index - 1
+        elif direction == "right" and col < cols - 1:
+            target = index + 1
+        elif direction == "up" and row > 0:
+            target = index - cols
+        elif direction == "down" and row < page.rows - 1:
+            target = index + cols
+        else:
+            return False
+
+        if not (0 <= target < page.tile_count):
+            return False
+
+        page.tiles[index], page.tiles[target] = page.tiles[target], page.tiles[index]
+        self.active_tile = target
+        self.dirty = True
+        return True
+
+    def copy_tile(self) -> None:
+        self.tile_clipboard = TileState.from_dict(self.tile.to_dict())
+        self.clipboard_is_cut = False
+
+    def cut_tile(self) -> None:
+        self.copy_tile()
+        self.clear_tile()
+        self.clipboard_is_cut = True
+
+    def paste_tile(self) -> bool:
+        if self.tile_clipboard is None:
+            return False
+        page = self.page
+        index = max(0, min(self.active_tile, page.tile_count - 1))
+        page.tiles[index] = TileState.from_dict(self.tile_clipboard.to_dict())
+        self.dirty = True
+        return True
+
+    def clear_tile(self) -> None:
+        page = self.page
+        index = max(0, min(self.active_tile, page.tile_count - 1))
+        page.tiles[index] = TileState()
+        self.dirty = True
+
+    # ---------------------------------------------------------- selection
+
+    def is_selected(self, file_index: int, sim_index: int) -> bool:
+        return (file_index, sim_index) in self.selected_sims
+
+    def set_selected(self, file_index: int, sim_index: int, on: bool) -> None:
+        pair = (file_index, sim_index)
+        if on:
+            self.selected_sims.add(pair)
+        else:
+            self.selected_sims.discard(pair)
+        self.dirty = True
+
+    def selection_for_file(self, file_index: int) -> List[int]:
+        return sorted(s for f, s in self.selected_sims if f == file_index)
+
+    def drop_file(self, file_index: int) -> None:
+        """Forget selections for a removed file and shift higher indices down."""
+        remapped = set()
+        for f, s in self.selected_sims:
+            if f == file_index:
+                continue
+            remapped.add((f - 1, s) if f > file_index else (f, s))
+        self.selected_sims = remapped
+
+    # ---------------------------------------------------------- workspace
+
+    def to_dict(self) -> dict:
+        return {
+            "version": 2,
+            "pages": [p.to_dict() for p in self.pages],
+            "active_page": self.active_page,
+            "selected_sims": sorted(list(self.selected_sims)),
+            "styles": self.styles.to_dict(),
+            "dark_mode": self.dark_mode,
+            "mouse_mode": int(self.mouse_mode),
+            "markers": [
+                {"x_param": m.x_param, "position": m.position,
+                 "visible": m.visible, "color": m.color,
+                 "label": m.label, "dot_size": m.dot_size}
+                for m in self.markers
+            ],
+            "areas": [
+                {"x_param": a.x_param, "x_min": a.x_min, "x_max": a.x_max,
+                 "color": a.color, "alpha": a.alpha, "visible": a.visible,
+                 "label": a.label}
+                for a in self.areas
+            ],
+            "global_x_limits": {k: list(v) for k, v in self.global_x_limits.items()},
+            "global_y_limits": {k: list(v) for k, v in self.global_y_limits.items()},
+        }
+
+    def load_dict(self, data: dict) -> None:
+        pages = [PageState.from_dict(p) for p in data.get("pages", [])]
+        self.pages = pages or [PageState()]
+        self.active_page = int(data.get("active_page", 0))
+        self.selected_sims = {tuple(pair) for pair in data.get("selected_sims", [])}
+        self.styles.load_dict(data.get("styles", {}))
+        self.dark_mode = bool(data.get("dark_mode", True))
+        self.mouse_mode = MouseMode(int(data.get("mouse_mode", int(MouseMode.SELECT))))
+        self.markers = [
+            Marker(**{k: v for k, v in m.items() if k in Marker.__annotations__})
+            for m in data.get("markers", [])
+        ]
+        self.areas = [
+            AreaBand(**{k: v for k, v in a.items() if k in AreaBand.__annotations__})
+            for a in data.get("areas", [])
+        ]
+        self.global_x_limits = {
+            k: (float(v[0]), float(v[1]))
+            for k, v in data.get("global_x_limits", {}).items() if len(v) == 2
+        }
+        self.global_y_limits = {
+            k: (float(v[0]), float(v[1]))
+            for k, v in data.get("global_y_limits", {}).items() if len(v) == 2
+        }
+        self.dirty = False
+
+
+def save_workspace(path: str, state: AppState, files: Sequence[str],
+                   computed: Dict[str, str], aliases: Dict[str, str]) -> None:
+    """Write a workspace as JSON.
+
+    JSON rather than an ad-hoc delimited text format: such a format breaks
+    the moment a file path or parameter name contained the delimiter, and could
+    not be extended without a version bump nobody implemented.
+    """
+    payload = state.to_dict()
+    payload["files"] = list(files)
+    payload["computed"] = dict(computed)
+    payload["aliases"] = dict(aliases)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+
+
+def load_workspace(path: str) -> dict:
+    with open(path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
