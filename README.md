@@ -23,8 +23,9 @@ python/       the application and the scripting API
 packaging/    PyInstaller spec, build script, generated icon
 tools/        data generators, icon generator, benchmark
 tests/        Python tests (the C++ ones live in core/tests)
-Makefile      Linux/macOS build
-build.bat     Windows build (MinGW)
+build.sh      Linux/macOS build (no make needed)
+build.bat     Windows build (MinGW, no make needed)
+Makefile      Linux/macOS build, with header dependency tracking
 CMakeLists.txt   optional alternative to make
 ```
 
@@ -68,11 +69,11 @@ in `data/`, which is also ignored.
 
 ```bash
 # 1. Build the core
-make                      # Linux/macOS
+./build.sh                # Linux/macOS
 build.bat                 # Windows
 
 # 2. Check it works
-make test                 # or: build.bat test
+./build.sh test           # or: build.bat test
 
 # 3. Run
 PYTHONPATH=python python -m aoeviewer            # Linux/macOS
@@ -117,16 +118,36 @@ CMake is **not** required.
 ### Linux and macOS
 
 ```bash
+./build.sh          # builds build/libaoecore.so (or .dylib on macOS)
+./build.sh test     # compiles and runs the C++ self-tests
+./build.sh bench     # parser throughput benchmark
+./build.sh pytest   # the Python tests, building the core first if needed
+./build.sh clean
+```
+
+`g++`, `clang++` or `c++` is found on `PATH`. One that is not is named with the
+`AOE_CXX` environment variable rather than by editing the script — nothing
+machine-specific belongs in a file that is checked in and shared:
+
+```bash
+AOE_CXX=/opt/gcc-13/bin/g++ ./build.sh
+```
+
+It is plain `/bin/sh`, so it runs on a minimal container as readily as on a
+desktop distribution, and it needs neither CMake nor make.
+
+**Once you are editing the core regularly, prefer the Makefile.** `build.sh`
+compiles every source in one command, which is right for a first build and
+immune to stale objects, but it recompiles everything each time. The Makefile
+tracks header dependencies with `-MMD -MP`, so it rebuilds only what a change
+actually affects:
+
+```bash
 make                # builds build/libaoecore.so (or .dylib)
 make test           # compiles and runs the C++ self-tests
 make bench          # parser throughput benchmark
+make CXX=clang++    # override the compiler
 make clean
-```
-
-Override the compiler if needed:
-
-```bash
-make CXX=clang++
 ```
 
 ### Windows
