@@ -54,6 +54,18 @@ MARKER_Z = 10       # marker lines and their dots
 MARKER_LABEL_Z = 11
 GRID_3D_Z = -20     # the back walls of a 3D box, behind everything
 
+# Most rows a legend may have. pyqtgraph builds a QGraphicsGridLayout with two
+# items per row, so a thousand-run study asked Qt to lay out several thousand
+# graphics items in one column -- which is where the application stopped
+# responding rather than merely slowed down. Past this the legend says how many
+# more there are, which is the only useful thing a list that long can say.
+MAX_LEGEND_ROWS = 60
+
+# Ceiling on the points handed to Qt for one tile, across every curve. The
+# per-curve budget is two points per horizontal pixel; this is the second limit,
+# for the case where the curve *count* is what makes the total unreasonable.
+MAX_TILE_POINTS = 1_500_000
+
 _PEN_STYLES = {
     "solid": Qt.PenStyle.SolidLine,
     "dash": Qt.PenStyle.DashLine,
@@ -374,29 +386,54 @@ class TextOverlay(GraphicsWidgetAnchor, pg.GraphicsObject):
 
 
 class CurveEntry:
-    """A drawn curve plus the full-resolution data behind it.
+    """One logical curve: the full-resolution data and how it is styled.
+
+    Deliberately *not* a drawn item. Several hundred curves that share a pen are
+    painted by a single item (see DrawGroup), but each remains its own entry
+    here, because everything other than painting works per curve: the crosshair
+    readout, click-to-inspect, marker dots, area segments and the CSV export all
+    ask "which run and which parameter is this".
 
     The x and y arrays are views over the core's buffers and, since they carry
     their own reference to those buffers, they keep the samples alive for as
     long as the curve is on screen -- which is what makes it safe for the memory
     cap to evict a column at any moment.
-
-    `sampled_for` records the (range, budget) the drawn points were computed
-    for. Anything that redraws the tile without moving the view -- a style
-    change, an overlay update, a marker drag, a resize that does not change the
-    width -- can then leave the points alone instead of re-decimating a million
-    samples per curve for an identical answer.
     """
 
-    __slots__ = ("item", "x", "y", "label", "key", "sampled_for")
+    __slots__ = ("x", "y", "label", "key")
 
-    def __init__(self, item: pg.PlotDataItem, x: np.ndarray, y: np.ndarray,
-                 label: str, key: str):
-        self.item = item
+    def __init__(self, x: np.ndarray, y: np.ndarray, label: str, key: str):
         self.x = x
         self.y = y
         self.label = label
         self.key = key
+
+
+class DrawGroup:
+    """Every curve that shares one pen, painted as a single item.
+
+    This is what makes a study of a thousand runs viewable at all. A tile drew
+    one pyqtgraph item per curve, and 1200 runs of two parameters is 2400 items
+    holding 1.2 million points between them -- which the core produces in 35 ms
+    and Qt then spends minutes on, because the cost is per *item*: a bounding
+    rect, a paint call and a scene-graph node each.
+
+    Curves that share a pen cannot be told apart on screen anyway, so they are
+    concatenated into one polyline with a NaN between consecutive runs. The NaN
+    breaks the line (connect="finite"), so nothing is joined that should not be.
+    Twelve palette colours turn 2400 items into about twelve.
+
+    `sampled_for` records the (range, budget) the drawn points were computed
+    for, so a redraw that does not move the view -- a style change, an overlay
+    update, a marker drag, a resize that does not change the width -- leaves the
+    points alone instead of recomputing an identical answer.
+    """
+
+    __slots__ = ("item", "entries", "sampled_for")
+
+    def __init__(self, item: pg.PlotDataItem):
+        self.item = item
+        self.entries: List[CurveEntry] = []
         self.sampled_for = None
 
 
@@ -427,6 +464,7 @@ class PlotTile(pg.PlotWidget):
     # value instead.
     _redraw_timer = None
     _curves: Dict[str, CurveEntry] = {}
+    _groups: List["DrawGroup"] = []
     _index = -1
     _suppress_range_event = True
     _slope_origin = None
@@ -446,6 +484,7 @@ class PlotTile(pg.PlotWidget):
         self._theme = theme
 
         self._curves = {}
+        self._groups: List[DrawGroup] = []
         self._legend: Optional[pg.LegendItem] = None
         self._overlays: List[pg.GraphicsObject] = []
         self._suppress_range_event = False
@@ -574,8 +613,9 @@ class PlotTile(pg.PlotWidget):
     def show_placeholder(self, message: str) -> None:
         """Replace the plot contents with a message while data is loading."""
         plot = self.getPlotItem()
-        for entry in self._curves.values():
-            plot.removeItem(entry.item)
+        for group in self._groups:
+            plot.removeItem(group.item)
+        self._groups = []
         self._curves = {}
         if self._legend is not None:
             self._legend.clear()
@@ -793,8 +833,9 @@ class PlotTile(pg.PlotWidget):
         """Recreate every curve from the current selection and tile settings."""
         plot = self.getPlotItem()
 
-        for entry in self._curves.values():
-            plot.removeItem(entry.item)
+        for group in self._groups:
+            plot.removeItem(group.item)
+        self._groups = []
         self._curves = {}
 
         for overlay in self._overlays:
@@ -884,6 +925,13 @@ class PlotTile(pg.PlotWidget):
         # ISO value instead of fifty rows saying the same thing.
         deduplicate = not tile.legend_show_file and not tile.legend_show_sim
         seen_labels: Set[str] = set()
+        legend_rows = 0
+        hidden_rows = 0
+
+        # (pen signature, legend name) -> DrawGroup. Curves that look identical
+        # are painted together; see DrawGroup for why that is the difference
+        # between a thousand-run study being viewable and not.
+        groups: Dict[tuple, DrawGroup] = {}
 
         for file_index, sims in sorted(by_file.items()):
             handle = self._session.file(file_index)
@@ -913,11 +961,6 @@ class PlotTile(pg.PlotWidget):
                     symbol = styles.symbol_for(style_key)
                     width = styles.width_for(style_key)
 
-                    pen = QPen(QColor(color))
-                    pen.setWidthF(width)
-                    pen.setStyle(_PEN_STYLES.get(dash, Qt.PenStyle.SolidLine))
-                    pen.setCosmetic(True)
-
                     label = self._legend_label(
                         tile, param, file_name, sim.sim_id, iso_label, dash, symbol
                     )
@@ -928,22 +971,51 @@ class PlotTile(pg.PlotWidget):
                             show_in_legend = False
                         else:
                             seen_labels.add(label)
+                    if show_in_legend:
+                        if legend_rows >= MAX_LEGEND_ROWS:
+                            show_in_legend = False
+                            hidden_rows += 1
+                        else:
+                            legend_rows += 1
 
                     marker = symbol or ("o" if tile.show_points else None)
 
-                    item = pg.PlotDataItem(
-                        pen=pen,
-                        antialias=False,
-                        symbol=marker,
-                        symbolSize=styles.symbol_size,
-                        symbolBrush=color,
-                        symbolPen=pg.mkPen(color),
-                        name=label if show_in_legend else None,
-                    )
-                    plot.addItem(item)
-
                     key = "{0}|{1}|{2}".format(file_index, sim_index, param)
-                    self._curves[key] = CurveEntry(item, x, y, label, style_key)
+                    entry = CurveEntry(x, y, label, style_key)
+                    self._curves[key] = entry
+
+                    # The legend name is part of the grouping key, so a curve
+                    # that owns a legend row is never merged into another
+                    # curve's row -- the legend stays exactly as it was.
+                    group_key = (color, dash, width, marker, styles.symbol_size,
+                                 label if show_in_legend else None)
+                    group = groups.get(group_key)
+                    if group is None:
+                        pen = QPen(QColor(color))
+                        pen.setWidthF(width)
+                        pen.setStyle(_PEN_STYLES.get(dash, Qt.PenStyle.SolidLine))
+                        pen.setCosmetic(True)
+                        item = pg.PlotDataItem(
+                            pen=pen,
+                            antialias=False,
+                            symbol=marker,
+                            symbolSize=styles.symbol_size,
+                            symbolBrush=color,
+                            symbolPen=pg.mkPen(color),
+                            name=label if show_in_legend else None,
+                        )
+                        plot.addItem(item)
+                        group = DrawGroup(item)
+                        groups[group_key] = group
+                        self._groups.append(group)
+                    group.entries.append(entry)
+
+        if hidden_rows and self._legend is not None:
+            # Say what was left out rather than silently truncating.
+            spacer = pg.PlotDataItem(pen=None, name="... and {0} more".format(
+                hidden_rows))
+            plot.addItem(spacer)
+            self._groups.append(DrawGroup(spacer))
 
         # The view is the user's. A rebuild happens for all sorts of reasons
         # that say nothing about what should be on screen -- restyling a curve,
@@ -1062,16 +1134,20 @@ class PlotTile(pg.PlotWidget):
             else {}
         )
 
+        # Grouped by pen exactly as the 2D path is, and for the same reason: a
+        # thousand trajectories is a thousand items otherwise. A 3D tile is
+        # rebuilt on every step of a rotation, so the item count here costs on
+        # every frame of a drag rather than once.
+        groups: Dict[tuple, List[np.ndarray]] = {}
+        pens: Dict[tuple, QPen] = {}
+        gap = np.array([np.nan], dtype=np.float32)
+
         for file_index, sim_index, file_name, sim, x, y, z in series:
             iso_label = iso_labels.get((file_index, sim_index), "")
             style_key = self._style_key(tile, tile.z_param, sim.key, iso_label)
             color = styles.color_for(style_key)
-
-            pen = QPen(QColor(color))
-            pen.setWidthF(styles.width_for(style_key))
-            pen.setStyle(_PEN_STYLES.get(styles.dash_for(style_key),
-                                         Qt.PenStyle.SolidLine))
-            pen.setCosmetic(True)
+            dash = styles.dash_for(style_key)
+            width = styles.width_for(style_key)
 
             sx, sy, _depth = self.project_3d(
                 self._normalise(x, x_bounds),
@@ -1079,16 +1155,38 @@ class PlotTile(pg.PlotWidget):
                 self._normalise(z, z_bounds),
                 tile.azimuth, tile.elevation,
             )
+            sx = np.asarray(sx, dtype=np.float32)
+            sy = np.asarray(sy, dtype=np.float32)
 
-            item = pg.PlotDataItem(sx, sy, pen=pen, antialias=True)
-            plot.addItem(item)
             key = "{0}|{1}|{2}".format(file_index, sim_index, tile.z_param)
             # The stored x/y are the *projected* coordinates, which is what the
             # cursor and inspect code needs to hit-test against what is drawn.
             self._curves[key] = CurveEntry(
-                item, np.asarray(sx), np.asarray(sy),
-                "{0} · {1}".format(sim.sim_id, file_name), style_key
-            )
+                sx, sy, "{0} · {1}".format(sim.sim_id, file_name), style_key)
+
+            group_key = (color, dash, width)
+            if group_key not in groups:
+                groups[group_key] = []
+                pen = QPen(QColor(color))
+                pen.setWidthF(width)
+                pen.setStyle(_PEN_STYLES.get(dash, Qt.PenStyle.SolidLine))
+                pen.setCosmetic(True)
+                pens[group_key] = pen
+            pieces = groups[group_key]
+            if pieces:
+                pieces.append((gap, gap))
+            pieces.append((sx, sy))
+
+        for group_key, pieces in groups.items():
+            cx = np.concatenate([p[0] for p in pieces])
+            cy = np.concatenate([p[1] for p in pieces])
+            item = pg.PlotDataItem(cx, cy, pen=pens[group_key], antialias=True,
+                                   connect="finite")
+            plot.addItem(item)
+            group = DrawGroup(item)
+            # Nothing re-samples a 3D tile -- the thinning happens once, above --
+            # so the group holds only the item, for removal on the next rebuild.
+            self._groups.append(group)
 
         self._apply_3d_view(tile)
 
@@ -1363,19 +1461,54 @@ class PlotTile(pg.PlotWidget):
             key = (round(x_range[0] / scale), round(x_range[1] / scale),
                    target, bool(tile.log_y))
 
-        for entry in self._curves.values():
-            count = min(entry.x.size, entry.y.size)
-            if count == 0:
+        # Second budget, on the total rather than per curve: a thousand runs of
+        # 500 samples each is 600 000 points on a 600-pixel tile, and no amount
+        # of per-curve fidelity is visible at a thousand curves per pixel
+        # column. Only bites when the curve count is what makes the total
+        # unreasonable; an ordinary tile never reaches it.
+        curve_count = sum(len(g.entries) for g in self._groups)
+        if curve_count > 1:
+            total = sum(min(e.x.size, e.y.size)
+                        for g in self._groups for e in g.entries)
+            if total > MAX_TILE_POINTS:
+                target = max(32, int(MAX_TILE_POINTS / curve_count / 2))
+                key = key + (target,)
+
+        gap = np.array([np.nan], dtype=np.float32)
+
+        for group in self._groups:
+            if not force and group.sampled_for == key:
                 continue
-            if not force and entry.sampled_for == key:
-                continue
-            dx, dy = self._session.decimate(entry.x, entry.y, target, x_range)
-            if tile.log_y:
-                # pyqtgraph's log mode cannot show non-positive values; blanking
-                # them keeps the rest of the curve visible instead of dropping it.
-                dy = np.where(dy > 0, dy, np.nan)
-            entry.item.setData(dx, dy, connect="finite")
-            entry.sampled_for = key
+
+            pieces_x: List[np.ndarray] = []
+            pieces_y: List[np.ndarray] = []
+            for entry in group.entries:
+                if min(entry.x.size, entry.y.size) == 0:
+                    continue
+                dx, dy = self._session.decimate(entry.x, entry.y, target, x_range)
+                if dx.size == 0:
+                    continue
+                if pieces_x:
+                    # One NaN between runs. connect="finite" breaks the polyline
+                    # there, so consecutive runs are never joined by a line
+                    # across the plot.
+                    pieces_x.append(gap)
+                    pieces_y.append(gap)
+                pieces_x.append(dx)
+                pieces_y.append(dy)
+
+            if not pieces_x:
+                group.item.setData([], [])
+            else:
+                cx = pieces_x[0] if len(pieces_x) == 1 else np.concatenate(pieces_x)
+                cy = pieces_y[0] if len(pieces_y) == 1 else np.concatenate(pieces_y)
+                if tile.log_y:
+                    # pyqtgraph's log mode cannot show non-positive values;
+                    # blanking them keeps the rest of the curve visible instead
+                    # of dropping it.
+                    cy = np.where(cy > 0, cy, np.nan)
+                group.item.setData(cx, cy, connect="finite")
+            group.sampled_for = key
 
     def _apply_axis_limits(self, tile: TileState) -> None:
         """Stop a locked axis being panned or zoomed out of its range.
@@ -1974,12 +2107,19 @@ class PlotTile(pg.PlotWidget):
             tile.reset_3d_view()
             self._state.dirty = True
             self._apply_3d_view(tile)
+            self.view_changed.emit()
             return
 
         self._autoscale_if_unlocked()
         self._store_view_range()
         tile.view_initialised = True
         self._resample_visible(force=True)
+        # The fit is applied with range events suppressed, so that nothing
+        # reacts to each of the several setXRange/setYRange calls it makes.
+        # That also silenced the one signal the Inspect panel listens to, so
+        # statistics followed a pan or a zoom but sat still after a fit --
+        # showing figures for a window the plot was no longer displaying.
+        self.view_changed.emit()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)

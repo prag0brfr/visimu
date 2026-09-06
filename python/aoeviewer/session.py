@@ -91,17 +91,24 @@ class FileHandle:
 
     @property
     def simulations(self) -> List[SimulationHandle]:
-        return [
-            SimulationHandle(self._session, self.index, i)
-            for i in range(self.simulation_count)
-        ]
+        """Handles for every run, cached on the session.
+
+        Building one handle is three calls across the C boundary, so a file of
+        a thousand runs is three thousand -- and this is read once per file per
+        tile on every redraw, which on a 3x3 grid multiplies by nine. The cache
+        is dropped whenever the set of files or their names change.
+        """
+        return self._session._simulations(self.index)
 
     def rename(self, name: str) -> None:
         """Change the displayed file name. Identity keys are untouched."""
         lib.aoe_set_file_name(self._session._handle, self.index, encode(name))
+        self._session._invalidate_handles()
 
     def reload(self) -> bool:
-        return bool(lib.aoe_reload_file(self._session._handle, self.index))
+        ok = bool(lib.aoe_reload_file(self._session._handle, self.index))
+        self._session._invalidate_handles()
+        return ok
 
     def __repr__(self) -> str:
         return "<File {0!r} sims={1}>".format(self.name, self.simulation_count)
@@ -174,6 +181,8 @@ class Session:
         # panning a plot does not allocate on every frame.
         self._dx: Optional[np.ndarray] = None
         self._dy: Optional[np.ndarray] = None
+        # file index -> run handles. See FileHandle.simulations.
+        self._sim_cache: Dict[int, List[SimulationHandle]] = {}
 
     # ------------------------------------------------------------ lifetime
 
@@ -200,17 +209,35 @@ class Session:
 
     # --------------------------------------------------------------- files
 
+    def _invalidate_handles(self) -> None:
+        """Drop cached run handles. Anything that changes which files exist, or
+        what they are called, has to call this."""
+        self._sim_cache.clear()
+
+    def _simulations(self, file_index: int) -> List[SimulationHandle]:
+        cached = self._sim_cache.get(file_index)
+        if cached is not None:
+            return cached
+        count = int(lib.aoe_sim_count(self._handle, int(file_index)))
+        handles = [SimulationHandle(self, file_index, i) for i in range(count)]
+        self._sim_cache[file_index] = handles
+        return handles
+
     def add_file(self, path: str) -> FileHandle:
         index = lib.aoe_add_file(self._handle, encode(path))
         if index < 0:
             raise CoreError(self.last_error or "could not read {0!r}".format(path))
+        self._invalidate_handles()
         return FileHandle(self, index)
 
     def remove_file(self, index: int) -> None:
         lib.aoe_remove_file(self._handle, int(index))
+        # Removing a file shifts every later index, so the whole cache goes.
+        self._invalidate_handles()
 
     def clear(self) -> None:
         lib.aoe_clear_files(self._handle)
+        self._invalidate_handles()
 
     @property
     def file_count(self) -> int:

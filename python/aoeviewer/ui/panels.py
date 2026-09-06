@@ -128,6 +128,10 @@ class DataPanel(QWidget):
         """Rebuild the tree from the session, preserving check state."""
         self._updating = True
         try:
+            # A study of a thousand runs is a thousand tree items. Without
+            # these, Qt relayouts and repaints the widget on every single one.
+            self.tree.setUpdatesEnabled(False)
+            blocked = self.tree.blockSignals(True)
             self.tree.clear()
             for file_handle in self._session.files:
                 parent = QTreeWidgetItem(self.tree, [file_handle.name])
@@ -152,6 +156,8 @@ class DataPanel(QWidget):
                         Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked,
                     )
         finally:
+            self.tree.blockSignals(blocked)
+            self.tree.setUpdatesEnabled(True)
             self._updating = False
 
     def _on_item_changed(self, item: QTreeWidgetItem, _column: int) -> None:

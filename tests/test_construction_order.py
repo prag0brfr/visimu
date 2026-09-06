@@ -267,6 +267,52 @@ class TestInspectWiring(unittest.TestCase):
         self.assertIn("_show_panel", self._source("MainWindow", "set_mouse_mode"))
 
 
+class TestDrawPathWiring(unittest.TestCase):
+    """Static checks on the parts of the tile that cannot be run here."""
+
+    def _source(self, module: str, class_name: str, method_name: str) -> str:
+        path = os.path.join(_PACKAGE, *module.split("/"))
+        with open(path, encoding="utf-8") as handle:
+            source = handle.read()
+        tree = ast.parse(source, filename=path)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name == class_name:
+                for method in node.body:
+                    if (isinstance(method, ast.FunctionDef)
+                            and method.name == method_name):
+                        return ast.get_source_segment(source, method) or ""
+        self.fail("{0}.{1}() not found".format(class_name, method_name))
+
+    def test_a_fit_reports_that_the_view_moved(self):
+        """Statistics are of the visible window, so they must follow a fit.
+
+        The fit sets the ranges with range events suppressed -- otherwise every
+        intermediate setXRange/setYRange would trigger a redraw -- which also
+        silenced the one signal the Inspect panel listens to. Figures followed a
+        pan and a zoom, then sat still after Fit, describing a window the plot
+        was no longer showing.
+        """
+        body = self._source("ui/plot_tile.py", "PlotTile", "autoscale")
+        self.assertIn("view_changed.emit", body)
+
+    def test_curves_are_grouped_rather_than_drawn_one_by_one(self):
+        """One Qt item per curve does not survive a thousand-run study."""
+        body = self._source("ui/plot_tile.py", "PlotTile", "rebuild")
+        self.assertIn("DrawGroup", body)
+        self.assertIn("group.entries.append", body)
+
+    def test_the_legend_is_capped(self):
+        body = self._source("ui/plot_tile.py", "PlotTile", "rebuild")
+        self.assertIn("MAX_LEGEND_ROWS", body)
+
+    def test_the_resample_path_writes_one_item_per_group(self):
+        body = self._source("ui/plot_tile.py", "PlotTile", "_resample_visible")
+        self.assertIn("group.item.setData", body)
+        # A NaN between runs is what stops the end of one run being joined to
+        # the start of the next by a stroke across the plot.
+        self.assertIn("connect=\"finite\"", body)
+
+
 class TestTheCheckItselfWorks(unittest.TestCase):
     """A checker that silently passes on everything is worse than none."""
 

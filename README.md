@@ -834,6 +834,26 @@ that already has the data in cache. Auto-scaling then asks a question it used to
 answer by rescanning: on a tile of twenty-five curves over 400 000 samples, a
 fit costs 0.08 ms instead of 38 ms.
 
+**Curves that share a pen are drawn as one item.** The cost of a pyqtgraph item
+is a bounding rectangle, a paint call and a scene-graph node, whether it holds
+ten points or a hundred thousand -- so a study of 1200 runs plotted against two
+parameters was 2400 items, which the core fills in 35 ms and Qt then spends
+minutes on. Curves that look identical cannot be told apart on screen anyway, so
+they are concatenated into a single polyline with a NaN between consecutive
+runs, which `connect="finite"` renders as a break rather than a stroke across
+the plot. Twelve palette colours turn 2400 items into twelve.
+
+Each curve remains its own entry in the tile's model: click-to-inspect, the
+crosshair readout, marker dots, area segments and the CSV export all still
+answer "which run, which parameter". Merging is a drawing decision and nothing
+more.
+
+**The legend is capped at 60 rows**, then says how many were left out.
+pyqtgraph builds a `QGraphicsGridLayout` with two items per row, so a
+thousand-run legend asked Qt to lay out several thousand graphics items in one
+column -- which is where the window stopped responding rather than merely
+slowing down.
+
 **Nothing full-resolution reaches Python.** The core decimates every curve to
 roughly two points per horizontal pixel before it crosses the boundary, so a tile
 draws ~1200 points whether the channel holds ten thousand samples or ten million.

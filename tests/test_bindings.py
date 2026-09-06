@@ -1808,3 +1808,170 @@ class TestThreeDGrid(unittest.TestCase):
         data = TileState().to_dict()
         data.pop("show_3d_grid")
         self.assertTrue(TileState.from_dict(data).show_3d_grid)
+
+
+class TestManyRunsScaling(unittest.TestCase):
+    """A study of a thousand runs has to stay usable.
+
+    1200 runs x 32 parameters, 0 to 15 s every 0.03 s, is 19 million samples --
+    which the core handles in milliseconds. What did not scale was the front
+    end: one plot item per curve meant 2400 Qt items for two parameters, and
+    the cost of an item is a bounding rect, a paint call and a scene-graph node
+    each, regardless of how few points it holds.
+    """
+
+    runs = 60
+    params = 4
+    rows = 51
+
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.mkdtemp()
+        cls.path = os.path.join(cls.directory, "many.aoe")
+        names = ["TIME"] + ["P%d" % i for i in range(1, cls.params)]
+        with open(cls.path, "w") as handle:
+            handle.write("*PARAMETRES\n " + " ".join("'%s'" % n for n in names) + "\n")
+            for run in range(cls.runs):
+                handle.write("*TABLEAU : RUN_%03d\n" % run)
+                for row in range(cls.rows):
+                    t = row * 0.03
+                    values = [t] + [math.sin(t * (1 + c)) + run * 0.01
+                                    for c in range(1, cls.params)]
+                    handle.write(" " + " ".join("%.5f" % v for v in values) + "\n")
+
+    def setUp(self):
+        self.session = Session()
+        self.file = self.session.add_file(self.path)
+
+    def tearDown(self):
+        self.session.close()
+
+    def test_the_file_reads_correctly(self):
+        self.assertEqual(self.file.simulation_count, self.runs)
+        values = self.session.channel(0, 0, "TIME")
+        self.assertEqual(values.size, self.rows)
+
+    def test_run_handles_are_cached(self):
+        first = self.file.simulations
+        self.assertIs(first, self.file.simulations)
+        # Building one handle costs three calls across the C boundary, and this
+        # is read once per file per tile on every redraw.
+        self.assertEqual(len(first), self.runs)
+
+    def test_the_cache_is_dropped_when_the_files_change(self):
+        first = self.file.simulations
+        self.session.add_file(self.path)
+        self.assertIsNot(first, self.file.simulations)
+
+    def test_the_cache_is_dropped_on_reload(self):
+        first = self.file.simulations
+        self.file.reload()
+        self.assertIsNot(first, self.file.simulations)
+
+    def test_the_cache_survives_a_rename_of_a_run(self):
+        handles = self.file.simulations
+        handles[0].rename("first run")
+        # Renaming a run updates the handle in place rather than invalidating
+        # every handle of the file.
+        self.assertIs(handles, self.file.simulations)
+        self.assertEqual(self.file.simulations[0].name, "first run")
+
+    def _grouped(self, color_mode):
+        """Curves grouped by pen, the way the tile draws them."""
+        from aoeviewer.model import AppState
+
+        state = AppState()
+        state.tile.color_mode = color_mode
+        styles = state.styles
+        groups = {}
+        for run in self.file.simulations:
+            for param in ("P1", "P2"):
+                key = ("param::%s" % param if color_mode == 1
+                       else "sim::%s::%s" % (run.key, param))
+                pen = (styles.color_for(key), styles.dash_for(key),
+                       styles.width_for(key))
+                groups.setdefault(pen, []).append((run.index, param))
+        return groups
+
+    def test_curves_collapse_to_a_handful_of_pens(self):
+        from aoeviewer.model import ColorMode, PALETTE
+
+        by_sim = self._grouped(ColorMode.SIMULATION)
+        drawn = self.runs * 2
+        # The palette cycles, so a thousand runs cannot produce a thousand pens.
+        self.assertLessEqual(len(by_sim), len(PALETTE) * 4)
+        self.assertLess(len(by_sim), drawn // 4)
+
+    def test_colouring_by_parameter_gives_one_pen_per_parameter(self):
+        from aoeviewer.model import ColorMode
+
+        by_param = self._grouped(ColorMode.PARAMETER)
+        self.assertEqual(len(by_param), 2)
+
+    def test_concatenating_a_group_preserves_every_sample(self):
+        gap = np.array([np.nan], dtype=np.float32)
+        pieces_x, pieces_y = [], []
+        originals = []
+        for index in range(5):
+            x = self.session.channel(0, index, "TIME")
+            y = self.session.channel(0, index, "P1")
+            originals.append((np.array(x), np.array(y)))
+            if pieces_x:
+                pieces_x.append(gap)
+                pieces_y.append(gap)
+            pieces_x.append(x)
+            pieces_y.append(y)
+
+        cx = np.concatenate(pieces_x)
+        cy = np.concatenate(pieces_y)
+
+        # 5 runs, 4 separators.
+        self.assertEqual(cx.size, 5 * self.rows + 4)
+
+        # Each run comes back out intact, and a NaN sits between consecutive
+        # runs so connect="finite" breaks the line rather than drawing a stroke
+        # from the end of one run to the start of the next.
+        position = 0
+        for run_index, (ox, oy) in enumerate(originals):
+            if run_index:
+                self.assertTrue(np.isnan(cx[position]))
+                self.assertTrue(np.isnan(cy[position]))
+                position += 1
+            np.testing.assert_array_equal(cx[position:position + self.rows], ox)
+            np.testing.assert_array_equal(cy[position:position + self.rows], oy)
+            position += self.rows
+
+    def test_every_curve_stays_individually_addressable(self):
+        # Merging is a drawing optimisation only. Click-to-inspect, the
+        # crosshair readout, marker dots and the CSV export all still need to
+        # answer "which run and which parameter is this", so the per-curve
+        # model must survive the merge.
+        keys = set()
+        for run in self.file.simulations:
+            for param in ("P1", "P2"):
+                keys.add("{0}|{1}|{2}".format(0, run.index, param))
+        self.assertEqual(len(keys), self.runs * 2)
+
+    def test_loading_every_run_is_quick(self):
+        import time
+
+        sims = list(range(self.file.simulation_count))
+        start = time.perf_counter()
+        self.session.preload(0, sims, ["TIME", "P1", "P2"])
+        elapsed = time.perf_counter() - start
+        # Generous, because CI machines vary; it is a guard against an
+        # accidental per-run file re-open, which is what this used to be.
+        self.assertLess(elapsed, 5.0)
+
+    def test_decimating_every_curve_is_quick(self):
+        import time
+
+        sims = list(range(self.file.simulation_count))
+        self.session.preload(0, sims, ["TIME", "P1", "P2"])
+        curves = [(self.session.channel(0, i, "TIME"),
+                   self.session.channel(0, i, p))
+                  for i in sims for p in ("P1", "P2")]
+        start = time.perf_counter()
+        for x, y in curves:
+            self.session.decimate(x, y, 600, (0.0, 1.5))
+        self.assertLess(time.perf_counter() - start, 5.0)
