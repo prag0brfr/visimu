@@ -16,11 +16,11 @@ from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QAbstractButton, QSizePolicy, QVBoxLayout, QWidget
 
-from ..theme import Theme
+from ..theme import RAIL_FONT_PT, Theme
 
-RAIL_WIDTH = 28
-MIN_BUTTON_HEIGHT = 52
-TEXT_PADDING = 22
+RAIL_WIDTH = 24
+MIN_BUTTON_HEIGHT = 46
+TEXT_PADDING = 18
 
 
 class VerticalTabButton(QAbstractButton):
@@ -35,8 +35,12 @@ class VerticalTabButton(QAbstractButton):
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.setToolTip(text.title())
 
+        # Set outright rather than derived from self.font(). The application
+        # stylesheet sizes text in pixels, which makes pointSizeF() report -1,
+        # so "a little smaller than the body text" silently became "whatever
+        # the clamp says" -- see the type scale in aoeviewer.theme.
         font = QFont(self.font())
-        font.setPointSizeF(max(7.5, font.pointSizeF() - 0.5))
+        font.setPointSizeF(RAIL_FONT_PT)
         font.setBold(True)
         font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.6)
         self.setFont(font)

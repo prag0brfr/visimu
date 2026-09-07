@@ -11,11 +11,11 @@ from __future__ import annotations
 from typing import Optional, Tuple
 
 from PySide6.QtCore import QRect, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QToolButton, QWidget, QWidgetAction, QMenu
 
 from ..model import MAX_TILES
-from ..theme import Theme
+from ..theme import PLOT_LABEL_PT, Theme, plot_font
 
 MAX_ROWS = 5
 MAX_COLS = 5
@@ -84,9 +84,10 @@ class GridSizeGrid(QWidget):
                 painter.drawRect(rect)
 
         painter.setPen(QPen(QColor(theme.text if self._rows else theme.text_dim)))
-        font = QFont(painter.font())
-        font.setPointSizeF(max(7.5, font.pointSizeF()))
-        painter.setFont(font)
+        # From the type scale, not from the painter's font: the application
+        # stylesheet sizes text in pixels, so pointSizeF() reports -1 here and
+        # the max() below was only ever choosing its own floor.
+        painter.setFont(plot_font(PLOT_LABEL_PT))
         label = (
             "{0} x {1}   ({2} tiles)".format(self._rows, self._cols, self._rows * self._cols)
             if self._rows

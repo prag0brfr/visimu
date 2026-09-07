@@ -73,6 +73,70 @@ def _title(text: str) -> QLabel:
     return label
 
 
+# --------------------------------------------------------------- ISO summaries
+#
+# The ISO tab shows the values of one filter at a time -- whichever row is
+# selected -- so with three filters active there was no way to see what was
+# actually selected without clicking through them and remembering. These build
+# the read-only overview that answers it at a glance.
+#
+# Plain functions over plain lists, deliberately: this is the part with the edge
+# cases (nothing selected, everything selected, more values than will fit) and
+# it is worth testing without a running Qt.
+
+# How many values one line names before it gives up and counts the rest. Eight
+# fits a panel at its narrowest without wrapping to a third line, and past that
+# a reader is counting rather than reading anyway.
+ISO_OVERVIEW_MAX_VALUES = 8
+
+
+def _escape(text: str) -> str:
+    """Make a parameter name or a formatted value safe as rich text.
+
+    Parameter names come out of the user's files, so they are not under this
+    program's control; one containing "<" would otherwise silently swallow the
+    rest of the line as an unknown tag.
+    """
+    return (str(text).replace("&", "&amp;")
+            .replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def iso_selection_badge(total: int, chosen: int) -> str:
+    """The short form that goes beside a parameter in the filter list."""
+    if total <= 0:
+        return ""
+    if chosen == total:
+        return "all {0}".format(total)
+    if chosen == 0:
+        return "none of {0}".format(total)
+    return "{0}/{1}".format(chosen, total)
+
+
+def iso_selection_summary(labels, selected,
+                          max_values: int = ISO_OVERVIEW_MAX_VALUES) -> str:
+    """What is selected for one ISO parameter, in one line.
+
+    `labels` is every value the parameter takes, already formatted; `selected`
+    is the subset that is ticked. Naming the selected values is the useful case
+    -- "which runs am I looking at" -- but all-of-them and none-of-them are both
+    common enough that spelling out forty numbers to say "all" would be worse
+    than saying "all".
+    """
+    total = len(labels)
+    chosen = len(selected)
+    if total == 0:
+        return "no values"
+    if chosen == 0:
+        return "none of {0}".format(total)
+    if chosen == total:
+        return "all {0}".format(total)
+    shown = list(selected)[:max_values]
+    text = ", ".join(shown)
+    if chosen > max_values:
+        text += ", +{0} more".format(chosen - max_values)
+    return "{0}  ({1} of {2})".format(text, chosen, total)
+
+
 class DataPanel(QWidget):
     """Tree of loaded files and their simulations, with plot checkboxes."""
 
@@ -834,6 +898,22 @@ class IsoPanel(QWidget):
         self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
 
+        # Every filter at once, read-only. The list above shows the values of
+        # one parameter -- whichever row is selected -- so with three filters
+        # active there was no way to see what was actually selected without
+        # clicking through them and holding it in your head.
+        layout.addWidget(_title("Every filter"))
+        self.overview = QTextBrowser()
+        # Sized and coloured from the theme like every other panel widget.
+        self.overview.setObjectName("Overview")
+        self.overview.setMaximumHeight(96)
+        self.overview.setOpenExternalLinks(False)
+        # It reports; it is not another place to click. Read-only text with no
+        # focus of its own, and it scrolls when there are more filters than fit
+        # rather than growing and squeezing the value list above it.
+        self.overview.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        layout.addWidget(self.overview)
+
     # ------------------------------------------------------------- refresh
 
     def refresh(self) -> None:
@@ -853,6 +933,9 @@ class IsoPanel(QWidget):
             self.filter_list.clear()
             for name in sorted(self._state.iso_states):
                 iso = self._state.iso_states[name]
+                # Just the name here. The count beside it is filled in by
+                # _refresh_selection_views(), at the end of _show_values() --
+                # see there for why it cannot be done at this point.
                 item = QListWidgetItem(name)
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 item.setCheckState(
@@ -872,7 +955,115 @@ class IsoPanel(QWidget):
         item = self.filter_list.currentItem()
         return item.data(Qt.ItemDataRole.UserRole) if item else None
 
+    def _selection_for(self, param: str):
+        """(every value of `param`, the ones ticked) -- both already formatted.
+
+        Reads the same state the value list is built from and decides nothing:
+        a summary that disagreed with the list above it would be worse than no
+        summary. Grouped mode reports its intervals by name, because those are
+        what the user ticked; the underlying numbers are not what is on screen.
+        """
+        iso = self._state.iso_states.get(param)
+        if iso is None:
+            return [], []
+
+        if iso.grouped and iso.groups:
+            labels = [name for name, _low, _high, _active in iso.groups]
+            selected = [name for name, _low, _high, active in iso.groups if active]
+            return labels, selected
+
+        values = self._session.iso_distinct(param)
+        labels, selected = [], []
+        for value in values:
+            text = self._session.format_value(float(value))
+            labels.append(text)
+            # Absent means on: a value the user has never touched is shown, and
+            # _show_values() fills the dictionary in the same direction.
+            if iso.value_enabled.get(float(value), True):
+                selected.append(text)
+        return labels, selected
+
+    def _refresh_selection_views(self) -> None:
+        """Bring the badges and the overview back in step with the selection.
+
+        In place rather than by rebuilding the filter list: this runs while the
+        user is ticking values, and clearing the list would move the row under
+        their cursor. QListWidgetItem.setText raises itemChanged exactly as a
+        click on the checkbox does, so it is guarded like every other
+        programmatic edit in this panel.
+        """
+        # Read once and used twice. _selection_for() calls into the core for a
+        # parameter's distinct values, and this runs on every tick of a value.
+        selections = {name: self._selection_for(name)
+                      for name in sorted(self._state.iso_states)}
+
+        was_updating = self._updating
+        self._updating = True
+        try:
+            for row in range(self.filter_list.count()):
+                item = self.filter_list.item(row)
+                name = item.data(Qt.ItemDataRole.UserRole)
+                if name not in selections:
+                    continue
+                labels, selected = selections[name]
+                badge = iso_selection_badge(len(labels), len(selected))
+                item.setText(
+                    "{0}   {1}".format(name, badge) if badge else name)
+                item.setToolTip(iso_selection_summary(labels, selected))
+        finally:
+            self._updating = was_updating
+        self._refresh_overview(selections)
+
+    def _refresh_overview(self, selections=None) -> None:
+        """Redraw the read-only "every filter" box.
+
+        `selections` is the already-read {parameter: (labels, selected)} when
+        the caller has it, so that ticking one value does not re-read every
+        filter's distinct values twice over.
+        """
+        if not self._state.iso_states:
+            self.overview.setHtml("")
+            return
+
+        rows = []
+        for name in sorted(self._state.iso_states):
+            iso = self._state.iso_states[name]
+            if selections is not None and name in selections:
+                labels, selected = selections[name]
+            else:
+                labels, selected = self._selection_for(name)
+            summary = iso_selection_summary(labels, selected)
+            # An inactive filter still lists its values -- it is kept precisely
+            # so it can be switched back on -- but it must not read as if it
+            # were narrowing anything right now.
+            state = "" if iso.active else " &middot; off"
+            # Weight, not colour, separates the name from its values. A colour
+            # would have to be named literally -- rich text does not inherit the
+            # stylesheet -- and a literal that reads well on the dark theme is
+            # washed out on the light one. Bold works on both.
+            rows.append(
+                "<div style='margin-bottom:2px'><b>{0}</b>{1}<br/>{2}</div>"
+                .format(_escape(name), state, _escape(summary))
+            )
+        self.overview.setHtml("".join(rows))
+
     def _show_values(self) -> None:
+        """Fill the value list for the selected filter, then restate them all.
+
+        Split in two because _populate_values() returns early in three places --
+        no filter selected, no values, and so on -- and the badges and the
+        overview have to be redrawn on every one of them or they go on
+        describing the filter that was there before.
+
+        Afterwards, not before: grouping generates its intervals lazily in
+        _populate_values(), and a freshly grouped parameter counted ahead of
+        that would be counted in raw values, so the row would disagree with the
+        list underneath it.
+        """
+        self._populate_values()
+        self._refresh_selection_views()
+
+    def _populate_values(self) -> None:
         self._updating = True
         try:
             self.value_list.clear()
@@ -964,6 +1155,7 @@ class IsoPanel(QWidget):
             item.checkState() == Qt.CheckState.Checked
         )
         self._state.dirty = True
+        self._refresh_selection_views()
         self.apply_filter()
 
     def _on_grouping_changed(self, *_args) -> None:
@@ -1000,6 +1192,7 @@ class IsoPanel(QWidget):
             ]
         iso.active = True
         self._state.dirty = True
+        self._refresh_selection_views()
         self.apply_filter()
 
     def _set_all(self, on: bool) -> None:
@@ -1018,6 +1211,7 @@ class IsoPanel(QWidget):
             iso.active = True
         finally:
             self._updating = False
+        self._refresh_selection_views()
         self.apply_filter()
 
     # -------------------------------------------------------------- filter

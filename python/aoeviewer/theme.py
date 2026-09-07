@@ -65,31 +65,86 @@ def theme_for(dark: bool) -> Theme:
     return DARK if dark else LIGHT
 
 
+# ------------------------------------------------------------------ type scale
+#
+# Every size in the interface, in one place, because they only work as a set:
+# shrinking the panels but not the tiles, or the text but not the padding
+# around it, gives you a smaller-looking application that is no less crowded.
+#
+# The sizes below are deliberately compact. This is a tool for comparing plots,
+# so the screen belongs to the plots: on a laptop a full page of tiles plus ten
+# panels of controls was legible but dense, and every pixel spent on chrome is
+# one the data does not get.
+#
+# Qt sizes widget text in *pixels* here rather than points. Points would be the
+# usual choice, but a stylesheet that sets a pixel size makes QFont.pointSizeF()
+# report -1, and code that reads a font back to adjust it -- the tab rail, the
+# tile captions -- then has to guess. Pixels keep one unit throughout, and the
+# constants below are the only places these numbers appear.
+FONT_PX = 11          # body text: menus, panels, buttons, lists, tables
+FONT_SMALL_PX = 10    # hints, section titles, table headers, the status bar
+
+# The plot tiles. pyqtgraph wants CSS-ish strings and QFont point sizes rather
+# than pixels, so these are points -- roughly 0.75 x the pixel figures above at
+# the 96 dpi Qt assumes, which is what keeps a tile title in step with a panel
+# heading instead of shouting over it.
+PLOT_TITLE_PT = 8.0     # the tile title
+PLOT_AXIS_PT = 7.5      # axis names and their tick numbers
+PLOT_LEGEND_PT = 7.5    # legend rows
+PLOT_LABEL_PT = 7.0     # crosshair readout, slope figure, marker and area names
+
+# The vertical tab rail down the left edge, whose text is drawn rotated.
+RAIL_FONT_PT = 7.0
+
+
+def plot_font(size_pt: float, bold: bool = False):
+    """A QFont at one of the sizes above.
+
+    Here rather than in the drawing code so that the tiles cannot drift away
+    from the panels: everything that paints text on a plot asks for it by name.
+    """
+    from PySide6.QtGui import QFont
+
+    font = QFont()
+    font.setPointSizeF(float(size_pt))
+    font.setBold(bold)
+    return font
+
+
 def stylesheet(theme: Theme) -> str:
-    """Application-wide Qt stylesheet for the given theme."""
+    """Application-wide Qt stylesheet for the given theme.
+
+    Sizes come from the type scale above rather than being written in here, so
+    that the tiles and the panels stay in step. The padding figures are part of
+    the same decision: text set two pixels smaller inside unchanged padding
+    looks shrunken rather than roomier.
+    """
     return """
     QWidget {{
         background: {window};
         color: {text};
-        font-size: 12px;
+        font-size: {font_px}px;
     }}
     QMainWindow::separator {{ background: {border}; width: 3px; height: 3px; }}
 
     QFrame#Panel, QWidget#Panel {{ background: {panel}; }}
     QLabel#SectionTitle {{
         color: {text_dim};
+        font-size: {small_px}px;
         font-weight: 600;
-        padding: 6px 4px 2px 4px;
+        padding: 5px 4px 1px 4px;
         text-transform: uppercase;
     }}
-    QLabel#Hint {{ color: {text_dim}; }}
-    QLabel#Error {{ color: #ff6b6b; }}
+    /* Hints are read once and then skipped over for the rest of the session,
+       so they are the first thing that should give up space. */
+    QLabel#Hint {{ color: {text_dim}; font-size: {small_px}px; }}
+    QLabel#Error {{ color: #ff6b6b; font-size: {small_px}px; }}
 
     QPushButton {{
         background: {surface};
         border: 1px solid {border};
         border-radius: 3px;
-        padding: 5px 10px;
+        padding: 4px 9px;
     }}
     QPushButton:hover {{ border-color: {accent}; }}
     QPushButton:pressed {{ background: {selection}; }}
@@ -100,7 +155,7 @@ def stylesheet(theme: Theme) -> str:
         background: transparent;
         border: 1px solid transparent;
         border-radius: 3px;
-        padding: 4px;
+        padding: 3px;
     }}
     QToolButton:hover {{ background: {surface}; border-color: {border}; }}
     QToolButton:checked {{ background: {accent}; color: {accent_text}; }}
@@ -113,7 +168,7 @@ def stylesheet(theme: Theme) -> str:
         background: {surface};
         border: 1px solid {border};
         border-radius: 3px;
-        padding: 4px 6px;
+        padding: 3px 5px;
         selection-background-color: {accent};
         selection-color: {accent_text};
     }}
@@ -131,7 +186,7 @@ def stylesheet(theme: Theme) -> str:
         border: 1px solid {border};
         alternate-background-color: {panel};
     }}
-    QTreeWidget::item, QListWidget::item {{ padding: 3px 2px; }}
+    QTreeWidget::item, QListWidget::item {{ padding: 2px 2px; }}
     QTreeWidget::item:selected, QListWidget::item:selected {{
         background: {selection};
         color: {text};
@@ -140,15 +195,25 @@ def stylesheet(theme: Theme) -> str:
         background: {panel};
         border: none;
         border-bottom: 1px solid {border};
-        padding: 4px;
+        padding: 3px;
+        font-size: {small_px}px;
         color: {text_dim};
+    }}
+
+    /* The ISO tab's read-only "every filter" box. Panel-coloured rather than
+       surface-coloured, so it reads as a report rather than as another list
+       you could click in. */
+    QTextBrowser#Overview {{
+        background: {panel};
+        border: 1px solid {border};
+        font-size: {small_px}px;
     }}
 
     QTabWidget::pane {{ border: 1px solid {border}; }}
     QTabBar::tab {{
         background: {panel};
         border: 1px solid {border};
-        padding: 5px 12px;
+        padding: 4px 9px;
         margin-right: 2px;
     }}
     QTabBar::tab:selected {{ background: {surface}; border-bottom-color: {surface}; }}
@@ -165,7 +230,11 @@ def stylesheet(theme: Theme) -> str:
     QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
     QScrollBar::add-page, QScrollBar::sub-page {{ background: none; }}
 
-    QStatusBar {{ background: {panel}; color: {text_dim}; }}
+    QStatusBar {{
+        background: {panel};
+        color: {text_dim};
+        font-size: {small_px}px;
+    }}
     QMenuBar {{ background: {panel}; }}
     QMenuBar::item:selected {{ background: {accent}; color: {accent_text}; }}
     QMenu {{ background: {surface}; border: 1px solid {border}; }}
@@ -178,15 +247,15 @@ def stylesheet(theme: Theme) -> str:
        ground and there was no way to tell which of Simulation / Parameter /
        ISO was active. These rules make the checked state a filled accent
        colour, which is unambiguous in both themes. */
-    QCheckBox, QRadioButton {{ spacing: 6px; color: {text}; }}
+    QCheckBox, QRadioButton {{ spacing: 5px; color: {text}; }}
     QCheckBox::indicator, QRadioButton::indicator {{
-        width: 14px;
-        height: 14px;
+        width: 12px;
+        height: 12px;
         border: 1px solid {border};
         background: {surface};
     }}
     QCheckBox::indicator {{ border-radius: 3px; }}
-    QRadioButton::indicator {{ border-radius: 8px; }}
+    QRadioButton::indicator {{ border-radius: 7px; }}
     QCheckBox::indicator:hover, QRadioButton::indicator:hover {{
         border: 1px solid {accent};
     }}
@@ -210,11 +279,16 @@ def stylesheet(theme: Theme) -> str:
     QGroupBox {{
         border: 1px solid {border};
         border-radius: 3px;
-        margin-top: 10px;
-        padding-top: 8px;
+        margin-top: 9px;
+        padding-top: 6px;
     }}
-    QGroupBox::title {{ subcontrol-origin: margin; left: 8px; color: {text_dim}; }}
-    """.format(**theme.__dict__)
+    QGroupBox::title {{
+        subcontrol-origin: margin;
+        left: 8px;
+        font-size: {small_px}px;
+        color: {text_dim};
+    }}
+    """.format(font_px=FONT_PX, small_px=FONT_SMALL_PX, **theme.__dict__)
 
 
 def apply_pyqtgraph_theme(theme: Theme) -> None:

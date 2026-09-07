@@ -1,14 +1,19 @@
 # Author: Paulo R. A. Gilz
-"""What a redraw is allowed to cost.
+"""The presentation layer, tested without a display.
 
-Every test here is about work *not* done. The application's responsiveness is
-not decided by how fast a curve is drawn -- that was solved by decimation and by
-grouping curves that share a pen -- but by how often the code decides to draw a
-curve that is already on screen, and by how much of the widget tree it disturbs
-to answer a click that changed nothing.
+Two kinds of thing live here, and they have the same reason to exist: PySide6 is
+a large binary wheel and a plot widget needs a screen, so none of this could be
+tested at all until qt_stubs stood in for PySide6 and pyqtgraph.
 
-Those decisions are pure logic and can be tested without a display. See
-qt_stubs, which stands in for PySide6 and pyqtgraph.
+**What a redraw is allowed to cost.** Responsiveness is not decided by how fast
+a curve is drawn -- decimation and per-pen grouping settled that -- but by how
+often the code decides to draw a curve that is already on screen, and how much
+of the widget tree it disturbs to answer a click that changed nothing. Those are
+decisions, and a decision can be checked without drawing anything.
+
+**What the interface says.** Summaries, badges and the sizes everything is set
+in: the arithmetic of "5 of 12 selected, and here are the first eight" has more
+edge cases than the drawing does.
 
     python -m unittest tests.test_redraw -v
 """
@@ -26,8 +31,10 @@ sys.path.insert(0, os.path.join(
 import numpy as np
 
 import qt_stubs  # noqa: F401  (installs the stub modules; must precede the ui import)
+from PySide6.QtCore import Qt  # noqa: E402  (the stub installed above)
 
 from aoeviewer import scales
+from aoeviewer import theme as theme_module
 from aoeviewer.model import MAX_TILES, AppState
 from aoeviewer.scales import resample_key
 from aoeviewer.ui import panels
@@ -644,6 +651,232 @@ class TestApplyLegendToAll(unittest.TestCase):
         # button must still say something, or it reads as broken.
         self.panel._apply_legend_to_all()
         self.assertEqual(self.order, [0])
+
+
+class TestIsoSelectionSummary(unittest.TestCase):
+    """The one-line answer to "what is this filter letting through".
+
+    The ISO tab shows the values of one filter at a time, so with three active
+    there was no way to see what was selected without clicking through them.
+    These lines are what the overview and the row badges are built from, and
+    every interesting case here is an edge: nothing selected, everything
+    selected, and more values than will fit on a line.
+    """
+
+    def test_it_names_the_selected_values(self):
+        self.assertEqual(
+            panels.iso_selection_summary(["0.70", "0.75", "0.80"],
+                                         ["0.70", "0.80"]),
+            "0.70, 0.80  (2 of 3)")
+
+    def test_all_of_them_is_said_rather_than_listed(self):
+        # Forty numbers to say "all forty" is worse than saying "all forty".
+        labels = ["{0}".format(i) for i in range(40)]
+        self.assertEqual(panels.iso_selection_summary(labels, labels), "all 40")
+
+    def test_none_of_them_says_how_many_there_were(self):
+        self.assertEqual(
+            panels.iso_selection_summary(["a", "b", "c"], []), "none of 3")
+
+    def test_a_long_selection_is_truncated_and_counted(self):
+        labels = ["v{0}".format(i) for i in range(30)]
+        summary = panels.iso_selection_summary(labels, labels[:20], max_values=8)
+        self.assertTrue(summary.startswith("v0, v1, v2, v3, v4, v5, v6, v7, +12 more"))
+        self.assertIn("(20 of 30)", summary)
+
+    def test_exactly_the_limit_is_not_truncated(self):
+        labels = ["v{0}".format(i) for i in range(10)]
+        summary = panels.iso_selection_summary(labels, labels[:8], max_values=8)
+        self.assertNotIn("more", summary)
+        self.assertIn("(8 of 10)", summary)
+
+    def test_a_parameter_with_no_values_says_so(self):
+        self.assertEqual(panels.iso_selection_summary([], []), "no values")
+
+    def test_the_badge_is_short_enough_for_a_list_row(self):
+        self.assertEqual(panels.iso_selection_badge(12, 3), "3/12")
+        self.assertEqual(panels.iso_selection_badge(5, 5), "all 5")
+        self.assertEqual(panels.iso_selection_badge(4, 0), "none of 4")
+        self.assertEqual(panels.iso_selection_badge(0, 0), "")
+
+    def test_names_from_a_file_cannot_break_the_rich_text(self):
+        # Parameter names come out of the user's files, so one containing "<"
+        # would otherwise swallow the rest of the line as an unknown tag.
+        self.assertEqual(panels._escape("A<B & C>D"), "A&lt;B &amp; C&gt;D")
+
+
+class _IsoSession:
+    """Just the two calls the ISO overview makes of a session."""
+
+    def __init__(self, values):
+        self._values = {k: np.array(v, dtype=np.float32)
+                        for k, v in values.items()}
+        self.parameters = sorted(self._values)
+
+    def iso_distinct(self, name):
+        return self._values.get(name, np.empty(0, dtype=np.float32))
+
+    def format_value(self, value):
+        return "{0:g}".format(value)
+
+
+class TestIsoOverview(unittest.TestCase):
+    """Reading the selection back out of the panel's state."""
+
+    def setUp(self):
+        self.panel = object.__new__(panels.IsoPanel)
+        self.panel._session = _IsoSession({
+            "MACH": [0.7, 0.75, 0.8],
+            "WEIGHT": [180.0, 200.0],
+        })
+        self.panel._state = AppState()
+
+    def test_untouched_values_count_as_selected(self):
+        # Absent from value_enabled means on, which is how a freshly added
+        # filter behaves; a summary that called them off would contradict the
+        # list beside it.
+        self.panel._state.iso_state("MACH")
+        labels, selected = self.panel._selection_for("MACH")
+        self.assertEqual(labels, ["0.7", "0.75", "0.8"])
+        self.assertEqual(selected, labels)
+
+    def test_it_follows_what_was_unticked(self):
+        iso = self.panel._state.iso_state("MACH")
+        iso.value_enabled[0.75] = False
+        labels, selected = self.panel._selection_for("MACH")
+        self.assertEqual(labels, ["0.7", "0.75", "0.8"])
+        self.assertEqual(selected, ["0.7", "0.8"])
+
+    def test_grouped_mode_reports_the_intervals(self):
+        # Grouped, the user ticks named intervals; the underlying numbers are
+        # not what is on screen, so they are not what is reported.
+        iso = self.panel._state.iso_state("MACH")
+        iso.grouped = True
+        iso.groups = [("low", 0.0, 0.75, True), ("high", 0.75, 1.0, False)]
+        labels, selected = self.panel._selection_for("MACH")
+        self.assertEqual(labels, ["low", "high"])
+        self.assertEqual(selected, ["low"])
+
+    def test_a_parameter_with_no_filter_is_empty(self):
+        self.assertEqual(self.panel._selection_for("MACH"), ([], []))
+
+    def _wire_lists(self):
+        """The two list widgets and the box, as __init__ would leave them."""
+        self.panel._updating = False
+        self.panel.filter_list = qt_stubs.QListWidget()
+        self.panel.overview = qt_stubs.QTextBrowser()
+        self.panel.filter_list.itemChanged.connect(self.panel._on_filter_toggled)
+        for name in sorted(self.panel._state.iso_states):
+            item = qt_stubs.QListWidgetItem(name)
+            item.setData(Qt.ItemDataRole.UserRole, name)
+            self.panel.filter_list.addItem(item)
+
+    def test_the_badge_reaches_the_row(self):
+        iso = self.panel._state.iso_state("MACH")
+        iso.value_enabled[0.75] = False
+        self._wire_lists()
+
+        self.panel._refresh_selection_views()
+
+        row = self.panel.filter_list.item(0)
+        self.assertIn("MACH", row.text())
+        self.assertIn("2/3", row.text())
+        self.assertIn("0.7, 0.8", row.toolTip())
+
+    def test_filling_a_badge_does_not_toggle_the_filter(self):
+        # setText raises itemChanged exactly as ticking the checkbox does. The
+        # handler reads the check state and writes it to iso.active, so without
+        # the guard, restating a row would switch its filter off.
+        iso = self.panel._state.iso_state("MACH")
+        iso.active = True
+        self._wire_lists()
+        # No check state was ever set on these stub rows, so an unguarded
+        # handler would read None and turn the filter off.
+        self.panel._refresh_selection_views()
+        self.assertTrue(iso.active)
+
+    def test_every_filter_reaches_the_overview(self):
+        self.panel._state.iso_state("MACH")
+        weight = self.panel._state.iso_state("WEIGHT")
+        weight.value_enabled[180.0] = False
+        self._wire_lists()
+
+        self.panel._refresh_selection_views()
+
+        html = self.panel.overview.html
+        self.assertIn("MACH", html)
+        self.assertIn("WEIGHT", html)
+        self.assertIn("all 3", html)      # MACH, untouched
+        self.assertIn("200", html)        # WEIGHT, the one still ticked
+
+    def test_an_inactive_filter_is_marked_but_still_listed(self):
+        # It is kept precisely so it can be switched back on, so it still shows
+        # its values -- but it must not read as if it were narrowing anything.
+        iso = self.panel._state.iso_state("MACH")
+        iso.active = False
+        self._wire_lists()
+
+        self.panel._refresh_selection_views()
+
+        self.assertIn("off", self.panel.overview.html)
+        self.assertIn("MACH", self.panel.overview.html)
+
+    def test_no_filters_leaves_the_box_empty(self):
+        self._wire_lists()
+        self.panel._refresh_selection_views()
+        self.assertEqual(self.panel.overview.html, "")
+
+    def test_grouping_with_no_groups_yet_falls_back_to_values(self):
+        # iso.grouped is set before the intervals are generated; reporting an
+        # empty list there would say "no values" about a full parameter.
+        iso = self.panel._state.iso_state("MACH")
+        iso.grouped = True
+        iso.groups = []
+        labels, _selected = self.panel._selection_for("MACH")
+        self.assertEqual(labels, ["0.7", "0.75", "0.8"])
+
+
+class TestTypeScale(unittest.TestCase):
+    """The stylesheet is a format string, and a mistake in one is silent.
+
+    An unknown placeholder raises only when a theme is applied -- during window
+    construction, or the moment someone toggles light and dark -- and takes the
+    window down with it. Formatting both themes here costs nothing and turns
+    that into a test failure.
+    """
+
+    def test_both_themes_format(self):
+        # Calling it is most of the test: a brace that should have been doubled,
+        # or a placeholder naming a key the theme does not have, raises here.
+        for theme in (theme_module.DARK, theme_module.LIGHT):
+            css = theme_module.stylesheet(theme)
+            self.assertIn(theme.window, css)
+            self.assertIn(theme.accent, css)
+
+    def test_the_scale_reaches_the_stylesheet(self):
+        css = theme_module.stylesheet(theme_module.DARK)
+        self.assertIn("font-size: {0}px".format(theme_module.FONT_PX), css)
+        self.assertIn("font-size: {0}px".format(theme_module.FONT_SMALL_PX), css)
+
+    def test_small_is_smaller_than_body(self):
+        self.assertLess(theme_module.FONT_SMALL_PX, theme_module.FONT_PX)
+
+    def test_the_tiles_stay_in_step_with_the_panels(self):
+        # Points, not pixels, and roughly 0.75x at the 96 dpi Qt assumes. A tile
+        # title larger than a panel heading is the thing this guards against:
+        # the plots are the content, but their furniture is not.
+        as_px = theme_module.PLOT_TITLE_PT * 4.0 / 3.0
+        self.assertLessEqual(as_px, theme_module.FONT_PX)
+        for smaller in (theme_module.PLOT_AXIS_PT, theme_module.PLOT_LEGEND_PT,
+                        theme_module.PLOT_LABEL_PT):
+            self.assertLessEqual(smaller, theme_module.PLOT_TITLE_PT)
+
+    def test_plot_font_is_asked_for_by_size_not_read_back(self):
+        # The whole reason plot_font() exists: the stylesheet sizes text in
+        # pixels, so a QFont read back off a widget reports pointSizeF() == -1
+        # and the drawing code was left guessing a fallback.
+        font = theme_module.plot_font(theme_module.PLOT_LABEL_PT)
+        self.assertGreater(font.pointSizeF(), 0)
 
 
 if __name__ == "__main__":

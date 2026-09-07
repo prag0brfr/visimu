@@ -370,6 +370,163 @@ class QTableWidgetItem:
         return self._flags
 
 
+class QFont:
+    """Real enough to check that a size was actually asked for.
+
+    The point of the type scale is that sizes are stated rather than read back
+    off a widget, so a stub whose pointSizeF() returned a dummy would not be
+    able to tell the difference.
+    """
+
+    class SpacingType:
+        AbsoluteSpacing = "absolute"
+        PercentageSpacing = "percentage"
+
+    def __init__(self, other=None):
+        self._point_size = getattr(other, "_point_size", -1.0)
+        self._bold = getattr(other, "_bold", False)
+        self._spacing = None
+
+    def setPointSizeF(self, size):
+        self._point_size = float(size)
+
+    def setPointSize(self, size):
+        self._point_size = float(size)
+
+    def pointSizeF(self):
+        return self._point_size
+
+    def pointSize(self):
+        return int(self._point_size)
+
+    def setBold(self, bold):
+        self._bold = bool(bold)
+
+    def bold(self):
+        return self._bold
+
+    def setLetterSpacing(self, kind, spacing):
+        self._spacing = (kind, spacing)
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return _Any()
+
+
+class QListWidgetItem:
+    """A row of text with a check state, some data and a tooltip.
+
+    setText raises itemChanged in Qt exactly as a click on the checkbox does,
+    which is the trap the ISO panel's badges have to avoid; the stub emits it
+    for the same reason.
+    """
+
+    def __init__(self, text=""):
+        self._text = text
+        self._tooltip = ""
+        self._flags = 0
+        self._check = None
+        self._data = {}
+        self.list = None
+
+    def _changed(self):
+        if self.list is not None:
+            self.list.itemChanged.emit(self)
+
+    def setText(self, text):
+        self._text = text
+        self._changed()
+
+    def text(self):
+        return self._text
+
+    def setToolTip(self, text):
+        self._tooltip = text
+
+    def toolTip(self):
+        return self._tooltip
+
+    def setFlags(self, flags):
+        self._flags = flags
+
+    def flags(self):
+        return self._flags
+
+    def setCheckState(self, state):
+        self._check = state
+        self._changed()
+
+    def checkState(self):
+        return self._check
+
+    def setData(self, role, value):
+        self._data[role] = value
+
+    def data(self, role):
+        return self._data.get(role)
+
+
+class QListWidget:
+    def __init__(self, *args, **kwargs):
+        self._items = []
+        self._current = -1
+        self.itemChanged = _BoundSignal()
+        self.currentRowChanged = _BoundSignal()
+
+    def addItem(self, item):
+        if not isinstance(item, QListWidgetItem):
+            item = QListWidgetItem(str(item))
+        item.list = self
+        self._items.append(item)
+        return item
+
+    def clear(self):
+        for item in self._items:
+            item.list = None
+        self._items = []
+        self._current = -1
+
+    def count(self):
+        return len(self._items)
+
+    def item(self, row):
+        return self._items[row] if 0 <= row < len(self._items) else None
+
+    def currentRow(self):
+        return self._current
+
+    def setCurrentRow(self, row):
+        self._current = row
+        self.currentRowChanged.emit(row)
+
+    def currentItem(self):
+        return self.item(self._current)
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return _Any()
+
+
+class QTextBrowser:
+    """Records the rich text it was given, which is what the tests read back."""
+
+    def __init__(self, *args, **kwargs):
+        self.html = ""
+
+    def setHtml(self, html):
+        self.html = html
+
+    def toHtml(self):
+        return self.html
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return _Any()
+
+
 class _AutoModule(types.ModuleType):
     """Hands out a permissive class for any name nobody has faked.
 
@@ -407,14 +564,18 @@ def install() -> None:
         setattr(core, name, type(name, (_Any,), {}))
 
     gui = _AutoModule("PySide6.QtGui")
-    for name in ("QBrush", "QColor", "QPainter", "QPen", "QPolygonF", "QFont"):
+    for name in ("QBrush", "QColor", "QPainter", "QPen", "QPolygonF"):
         setattr(gui, name, type(name, (_Any,), {}))
+    gui.QFont = QFont
 
     widgets = _AutoModule("PySide6.QtWidgets")
     widgets.QWidget = QWidget
     widgets.QComboBox = QComboBox
     widgets.QTableWidget = QTableWidget
     widgets.QTableWidgetItem = QTableWidgetItem
+    widgets.QListWidget = QListWidget
+    widgets.QListWidgetItem = QListWidgetItem
+    widgets.QTextBrowser = QTextBrowser
 
     pyside = types.ModuleType("PySide6")
     pyside._aoe_stub = True

@@ -38,7 +38,14 @@ from ..model import (
 )
 from .. import projection, scales
 from ..session import Session
-from ..theme import Theme
+from ..theme import (
+    PLOT_AXIS_PT,
+    PLOT_LABEL_PT,
+    PLOT_LEGEND_PT,
+    PLOT_TITLE_PT,
+    Theme,
+    plot_font,
+)
 
 # The drawing budget lives in aoeviewer.scales, which imports no Qt, so the
 # arithmetic behind it can be tested without a running application -- which is
@@ -66,6 +73,11 @@ GRID_3D_Z = -20     # the back walls of a 3D box, behind everything
 # responding rather than merely slowed down. Past this the legend says how many
 # more there are, which is the only useful thing a list that long can say.
 MAX_LEGEND_ROWS = 60
+
+# pyqtgraph takes axis label styling as CSS-ish keyword arguments. Named here so
+# every setLabel call is styled the same way; a label left unstyled falls back to
+# the widget font, which is sized for the panels and looms over a small tile.
+_AXIS_LABEL_STYLE = {"font-size": "{0}pt".format(PLOT_AXIS_PT)}
 
 _PEN_STYLES = {
     "solid": Qt.PenStyle.SolidLine,
@@ -213,13 +225,12 @@ class Axis3DGizmo(GraphicsWidgetAnchor, pg.GraphicsObject):
     def paint(self, painter, *_args):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
-        font = painter.font()
-        # A stylesheet that sizes fonts in pixels makes pointSizeF() report -1;
-        # feeding that back to Qt is what produces the "Point size <= 0"
-        # warning, so it is checked rather than assumed.
-        font.setPointSizeF(font.pointSizeF() if font.pointSizeF() > 0 else 8.0)
-        font.setBold(True)
-        painter.setFont(font)
+        # Sized from the type scale rather than from the painter's font. The
+        # application stylesheet sizes text in pixels, which makes pointSizeF()
+        # report -1, and feeding that back to Qt is what produced the
+        # "Point size <= 0" warning -- so the previous code had to guess a
+        # fallback. Asking for the size by name removes the guess.
+        painter.setFont(plot_font(PLOT_LABEL_PT, bold=True))
         metrics = painter.fontMetrics()
 
         for entry in projection.triad_layout(
@@ -574,6 +585,7 @@ class PlotTile(pg.PlotWidget):
         self.sigRangeChanged.connect(self._on_range_changed)
 
         self._crosshair_label = pg.TextItem(anchor=(0, 1))
+        self._crosshair_label.setFont(plot_font(PLOT_LABEL_PT))
         self._crosshair_label.setVisible(False)
         plot.addItem(self._crosshair_label, ignoreBounds=True)
 
@@ -589,6 +601,7 @@ class PlotTile(pg.PlotWidget):
         plot.addItem(self._slope_item, ignoreBounds=True)
 
         self._slope_text = pg.TextItem(anchor=(0, 1), color="#ffb300")
+        self._slope_text.setFont(plot_font(PLOT_LABEL_PT))
         self._slope_text.setZValue(31)
         self._slope_text.setVisible(False)
         plot.addItem(self._slope_text, ignoreBounds=True)
@@ -630,6 +643,10 @@ class PlotTile(pg.PlotWidget):
             axis = plot.getAxis(axis_name)
             axis.setPen(pg.mkPen(theme.plot_grid))
             axis.setTextPen(pg.mkPen(theme.plot_foreground))
+            # Tick numbers default to the widget font, which is set for the
+            # panels; on a page of tiles they then take more room than the
+            # curves they are labelling.
+            axis.setStyle(tickFont=plot_font(PLOT_AXIS_PT))
         self._crosshair_label.setColor(theme.plot_foreground)
         self.rebuild()
 
@@ -693,7 +710,8 @@ class PlotTile(pg.PlotWidget):
         if self._legend is not None:
             self._legend.clear()
             self._legend.setVisible(False)
-        plot.setTitle(message, color=self._theme.text_dim, size="9pt")
+        plot.setTitle(message, color=self._theme.text_dim,
+                      size="{0}pt".format(PLOT_TITLE_PT))
 
     # -------------------------------------------------------- mouse modes
 
@@ -877,7 +895,8 @@ class PlotTile(pg.PlotWidget):
                 scene.removeItem(plot.legend)
             plot.legend = None
 
-        legend = DraggableLegend(self._on_legend_moved, offset=(10, 10))
+        legend = DraggableLegend(self._on_legend_moved, offset=(10, 10),
+                                 labelTextSize="{0}pt".format(PLOT_LEGEND_PT))
         legend.setParentItem(plot.getViewBox())
         plot.legend = legend
         self._legend = legend
@@ -971,19 +990,21 @@ class PlotTile(pg.PlotWidget):
             # The axes of a projection are not either data axis, so labelling
             # them with parameter names would be a lie. The title carries the
             # three names instead.
-            plot.setLabel("bottom", "")
-            plot.setLabel("left", "")
+            plot.setLabel("bottom", "", **_AXIS_LABEL_STYLE)
+            plot.setLabel("left", "", **_AXIS_LABEL_STYLE)
             plot.showGrid(x=False, y=False)
         else:
             # Axis labels carry the unit the file declared, which is the one
             # place it genuinely belongs: "TIME" tells you nothing about
             # whether the axis is seconds or minutes.
-            plot.setLabel("bottom", self._axis_label(tile.x_param))
-            plot.setLabel("left", self._y_axis_label(tile))
+            plot.setLabel("bottom", self._axis_label(tile.x_param),
+                          **_AXIS_LABEL_STYLE)
+            plot.setLabel("left", self._y_axis_label(tile),
+                          **_AXIS_LABEL_STYLE)
         # Rebuilt every time, so the title tracks parameters being added and
         # removed rather than going stale.
         plot.setTitle(tile_title(tile), color=self._theme.plot_foreground,
-                      size="9pt")
+                      size="{0}pt".format(PLOT_TITLE_PT))
 
         if tile.plot3d:
             # A projection stores screen coordinates, not samples, so nothing
@@ -1455,6 +1476,7 @@ class PlotTile(pg.PlotWidget):
             for index, value in enumerate(values):
                 text = pg.TextItem(projection.format_tick(value, step),
                                    color=label_colour, anchor=(0.5, 0.5))
+                text.setFont(plot_font(PLOT_LABEL_PT))
                 text.setPos(float(label_x[index]), float(label_y[index]))
                 text.setZValue(GRID_3D_Z + 1)
                 plot.addItem(text, ignoreBounds=True)
@@ -1835,7 +1857,8 @@ class PlotTile(pg.PlotWidget):
                     angle=90,
                     pen=pg.mkPen(marker.color, width=1.5, style=Qt.PenStyle.DashLine),
                     label=marker.label or None,
-                    labelOpts={"color": marker.color, "position": 0.92},
+                    labelOpts={"color": marker.color, "position": 0.92,
+                               "font-size": "{0}pt".format(PLOT_LABEL_PT)},
                     movable=movable,
                     hoverPen=pg.mkPen(marker.color, width=3.0),
                 )
@@ -1880,6 +1903,7 @@ class PlotTile(pg.PlotWidget):
                 if area.label:
                     caption = pg.TextItem(area.label, color=area.color,
                                           anchor=(0.5, 0.0))
+                    caption.setFont(plot_font(PLOT_LABEL_PT))
                     caption.setPos((area.x_min + area.x_max) * 0.5,
                                    self._view_top())
                     caption.setZValue(AREA_LABEL_Z)

@@ -129,7 +129,7 @@ class MainWindow(QMainWindow):
         self.toolbar.setObjectName("MainToolBar")
         self.toolbar.setMovable(False)
         self.toolbar.setFloatable(False)
-        self.toolbar.setIconSize(QSize(20, 20))
+        self.toolbar.setIconSize(QSize(18, 18))
         self.toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         # Right-clicking the bar (or any empty part of the frame) would offer
         # "Main" as a checkbox and hide it for good; there is no menu bar to

@@ -441,6 +441,14 @@ individually, or group them into intervals when a sweep has more distinct values
 than you want to read. Colouring is a separate choice, made per tile in STYLE,
 and keys on exactly one parameter — named in the legend so it is unambiguous.
 
+The value list shows one filter at a time — whichever row is selected — so two
+things restate the rest. Each row in the filter list carries a count (`MACH
+3/12`, `WEIGHT all 5`), and the read-only **Every filter** box at the bottom
+names what each one is letting through: the selected values, up to eight of
+them, then `+N more`. All of them is reported as "all 12" rather than listed,
+none as "none of 12", and a filter switched off is still shown, marked, because
+it is kept precisely so it can be switched back on.
+
 **STYLE** — how the tile and its curves look:
 
 - *Tile display* — legend, grid, log Y and point markers. These used to be at
@@ -1178,7 +1186,7 @@ the fingerprint, which is capped, while the parse it replaces is not.
 
 ```bash
 make test                                  # 1666 C++ checks
-python -m unittest discover -s tests -v    # 314 Python tests
+python -m unittest discover -s tests -v    # 337 Python tests
 make bench                                 # parser microbenchmark
 python tools/bench_app.py FILE...          # end-to-end, on real files
 ```
@@ -1215,6 +1223,22 @@ whether the machine running the suite happens to have Qt.
 `tests/test_construction_order.py` complements both by *parsing* the GUI rather
 than importing it, which is how the wiring is checked on a machine with no Qt at
 all.
+
+### Sizes
+
+Every size in the interface is in `aoeviewer/theme.py`, because they only work
+as a set: shrinking the panels but not the tiles, or the text but not the
+padding around it, gives you a smaller-looking application that is no less
+crowded. Widget text is sized in pixels (`FONT_PX`, `FONT_SMALL_PX`) and the
+plots in points (`PLOT_TITLE_PT` and friends, roughly 0.75x at the 96 dpi Qt
+assumes) because that is what each side wants; `plot_font()` is how the drawing
+code asks for one.
+
+Sizing widget text in pixels has one consequence worth knowing about: it makes
+`QFont.pointSizeF()` report **-1**. Two places used to read a font back off a
+widget and adjust it — the tab rail wanting "a little smaller", a caption
+wanting "the default" — and both were silently getting whatever their own
+fallback said instead. That is why the sizes are stated rather than derived.
 
 Indicative benchmark figures (4-core container, 3 worker threads):
 
