@@ -28,18 +28,63 @@ std::string interval_name(float lo, float hi) {
     return iso_format_value(lo) + " - " + iso_format_value(hi);
 }
 
+// Drop the zeros a fixed-point conversion pads the end with: 0.750000 reads as
+// 0.75 and 3.00 as 3. Only for text that already contains a decimal point.
+void trim_trailing_zeros(std::string& text) {
+    if (text.find('.') == std::string::npos) return;
+    std::size_t last = text.find_last_not_of('0');
+    if (last != std::string::npos && text[last] == '.') --last;
+    text.erase(last + 1);
+}
+
+// "1.20e+06" -> "1.2e6". printf's exponent form is padded for alignment in
+// tables of numbers, which is exactly what these are not: they are labels on a
+// tree row and inside a plot legend, where every character is one the data does
+// not get. The information is identical; three characters of padding are not.
+std::string compact_exponent(const char* formatted) {
+    std::string text(formatted);
+    const std::size_t marker = text.find('e');
+    if (marker == std::string::npos) return text;
+
+    std::string mantissa = text.substr(0, marker);
+    trim_trailing_zeros(mantissa);
+
+    std::string exponent = text.substr(marker + 1);
+    bool negative = false;
+    if (!exponent.empty() && (exponent[0] == '+' || exponent[0] == '-')) {
+        negative = exponent[0] == '-';
+        exponent.erase(0, 1);
+    }
+    const std::size_t first = exponent.find_first_not_of('0');
+    exponent = (first == std::string::npos) ? "0" : exponent.substr(first);
+
+    return mantissa + "e" + (negative ? "-" : "") + exponent;
+}
+
 }  // namespace
 
 std::string iso_format_value(float value) {
-    char buffer[64];
-    std::snprintf(buffer, sizeof(buffer), "%.6f", static_cast<double>(value));
-    std::string text(buffer);
+    const double v = static_cast<double>(value);
+    if (std::isnan(v)) return "nan";
+    if (std::isinf(v)) return v > 0.0 ? "inf" : "-inf";
+    if (v == 0.0) return "0";
 
-    if (text.find('.') != std::string::npos) {
-        std::size_t last = text.find_last_not_of('0');
-        if (last != std::string::npos && text[last] == '.') --last;
-        text.erase(last + 1);
+    char buffer[64];
+
+    // Round to what will be shown, then ask whether anything survived. See
+    // iso.hpp for why this is not a comparison against a small constant.
+    const double shown = std::round(v * ISO_ROUND_SCALE) / ISO_ROUND_SCALE;
+    if (shown == 0.0 || std::fabs(v) >= ISO_FIXED_MAX) {
+        std::snprintf(buffer, sizeof(buffer), "%.*e", ISO_DECIMALS, v);
+        return compact_exponent(buffer);
     }
+
+    std::snprintf(buffer, sizeof(buffer), "%.*f", ISO_DECIMALS, v);
+    std::string text(buffer);
+    trim_trailing_zeros(text);
+    // "-0.001" rounds to "-0.00", and a minus sign on a zero is noise. Only
+    // reachable from the fixed branch, since anything that small goes to the
+    // scientific one -- but the branch above can move, and this is cheap.
     if (text == "-0") text = "0";
     return text;
 }

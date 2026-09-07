@@ -46,8 +46,29 @@ int iso_group_index(float value, const std::vector<IsoGroup>& groups);
 void iso_reevaluate(int mode, int group_count, std::vector<IsoGroup>& groups,
                     const std::vector<float>& values);
 
-// Formats a value the way the ISO lists display it: trailing zeros trimmed, so
-// 0.750000 reads as 0.75 and 3.000000 as 3.
+// How an ISO value is written wherever one is shown: a row of the ISO tree, a
+// legend entry, an interval's generated name.
+//
+// Two decimals, trailing zeros trimmed -- 0.750000 reads as 0.75 and 3.000000
+// as 3 -- and scientific notation at both ends of the range where two decimals
+// stop being honest.
+//
+// The small end is decided by rounding rather than by a threshold, because the
+// threshold is the subtle part: a value arrives as a float32, so the literal
+// 0.01 is stored as 0.00999999978, and comparing *that* against 1e-2 sends
+// 0.01 itself to "1e-2" -- the one value a Mach or tolerance sweep is most
+// likely to contain. Asking instead whether the rounded form is still non-zero
+// puts the boundary where it belongs: fixed for as long as two decimals say
+// something, scientific once they would say "0".
+//
+// The large end is a threshold, and it is about the label rather than the
+// number: past a million the integer part alone is longer than the whole value
+// written as a power of ten. These appear on a tree row and inside a plot
+// legend, where every character is one the data does not get.
+constexpr int ISO_DECIMALS = 2;
+constexpr double ISO_ROUND_SCALE = 100.0;   // 10^ISO_DECIMALS
+constexpr double ISO_FIXED_MAX = 1e6;
+
 std::string iso_format_value(float value);
 
 }  // namespace aoe

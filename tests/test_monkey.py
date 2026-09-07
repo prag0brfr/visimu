@@ -53,6 +53,7 @@ from aoeviewer.model import (
     save_workspace,
     tile_title,
 )
+from aoeviewer import isogroups
 from aoeviewer import projection
 from aoeviewer.scales import MAX_TILE_POINTS, resample_target
 from gen_sample import generate
@@ -936,6 +937,89 @@ class TestLegendEverywhere(unittest.TestCase):
                 self.assertEqual(tile.legend_position, "custom")
                 self.assertTrue(tile.legend_show_iso)
                 self.assertAlmostEqual(tile.legend_x, 0.25)
+
+
+class TestIsoGroupEditingMonkey(unittest.TestCase):
+    """No sequence of boundary edits may produce an unusable grouping.
+
+    The reason the editor works on edges rather than on intervals: independent
+    intervals can be made to overlap, or to leave a gap that silently drops
+    every run in it, and neither shows up until a plot comes back short. Stated
+    as an invariant, that is "whatever you type, the groups stay ordered and
+    touching" -- which is exactly the kind of claim a few thousand random edits
+    are good at refuting.
+    """
+
+    OPERATIONS = 3000
+
+    def test_edits_keep_the_groups_ordered_and_touching(self):
+        for seed in range(6):
+            rng = random.Random(seed)
+            values = sorted(rng.uniform(-500, 500) for _ in range(20))
+            count = rng.randint(1, len(values))
+            groups = isogroups.groups_from_edges(
+                isogroups.even_edges(values, count))
+
+            for step in range(self.OPERATIONS // 6):
+                context = "seed={0} step={1}".format(seed, step)
+                edges = isogroups.edges_of(groups)
+                index = rng.randrange(len(edges))
+                target = rng.choice([
+                    rng.uniform(-1000, 1000),   # anywhere
+                    rng.uniform(-1e9, 1e9),     # far outside
+                    edges[max(0, index - 1)],   # exactly onto a neighbour
+                    edges[min(len(edges) - 1, index + 1)],
+                    float("nan"), float("inf"), None, "typo",
+                ])
+                edges = isogroups.move_edge(edges, index, target)
+                groups = isogroups.groups_from_edges(
+                    edges, [g[0] for g in groups], [g[3] for g in groups])
+
+                self.assertTrue(isogroups.is_contiguous(groups), context)
+                self.assertEqual(len(groups), count, context)
+                for _name, low, high, _active in groups:
+                    self.assertLessEqual(low, high, context)
+                # No value falls inside two intervals, whatever was typed --
+                # which is what "no overlap" means once the bounds are
+                # inclusive at both ends and the intervals touch. A value
+                # sitting exactly on a shared edge is claimed by the pair that
+                # share it, and the filter takes the first; that is the one
+                # ambiguity the representation allows, and it is resolved
+                # deterministically rather than left to the ordering.
+                # Clamping an edge onto its neighbour is allowed -- that is how
+                # an interval is squeezed out of the way -- so a run of zero
+                # width intervals can share one number, and all of them claim
+                # it. What must hold is that they are consecutive and meet
+                # exactly at the value: anything else is a genuine overlap.
+                for value in values:
+                    claiming = [index for index, (_n, lo, hi, _a)
+                                in enumerate(groups) if lo <= value <= hi]
+                    if len(claiming) > 1:
+                        self.assertEqual(
+                            claiming,
+                            list(range(claiming[0], claiming[-1] + 1)), context)
+                        for index in claiming[:-1]:
+                            self.assertEqual(groups[index][2], value, context)
+                        for index in claiming[1:]:
+                            self.assertEqual(groups[index][1], value, context)
+
+    def test_counts_and_the_outside_list_always_add_up(self):
+        for seed in range(6):
+            rng = random.Random(100 + seed)
+            values = [rng.uniform(-50, 50) for _ in range(40)]
+            groups = isogroups.groups_from_edges(
+                isogroups.even_edges(values, rng.randint(1, 8)))
+            for step in range(80):
+                edges = isogroups.move_edge(
+                    isogroups.edges_of(groups),
+                    rng.randrange(len(groups) + 1),
+                    rng.uniform(-80, 80))
+                groups = isogroups.groups_from_edges(edges)
+
+                counted = sum(isogroups.counts_per_group(groups, values))
+                outside = len(isogroups.values_outside(groups, values))
+                self.assertEqual(counted + outside, len(values),
+                                 "seed={0} step={1}".format(seed, step))
 
 
 class TestLegendFields(unittest.TestCase):

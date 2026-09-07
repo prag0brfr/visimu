@@ -434,6 +434,19 @@ tile *looks* — legend, grid, log-y, markers — is all in STYLE.
 
 **COMPUTE** — define derived channels. See below.
 
+**ISO values** are written the same way everywhere they appear — a tree row, a
+legend entry, a generated interval name — because every character there is one
+the data does not get: two decimals with trailing zeros trimmed (`0.75`, `3`,
+`180`, `1234.57`), and a power of ten at either end of the range where two
+decimals stop saying anything (`1.23e-3`, `5e-5`, `1.23e6`, `-2.5e8`). The
+rules, and the reason the small end is decided by rounding rather than by a
+threshold, are at the top of `core/include/aoe/iso.hpp`; `ISO_DECIMALS` there is
+the one place to change if you want more.
+
+Two decimals cannot tell `1.1701` from `1.1703`, so a parameter whose values are
+that close shows repeated rows. Each still ticks independently — a row carries
+the value it stands for, not its label — but they read alike.
+
 **ISO** — filter runs by parameters that are constant within a run (Mach number,
 mass, altitude). **Several filters can be active at once and they combine with
 AND**, so adding one narrows the set: Mach 0.75 *and* 180 t. Tick values
@@ -441,13 +454,44 @@ individually, or group them into intervals when a sweep has more distinct values
 than you want to read. Colouring is a separate choice, made per tile in STYLE,
 and keys on exactly one parameter — named in the legend so it is unambiguous.
 
-The value list shows one filter at a time — whichever row is selected — so two
-things restate the rest. Each row in the filter list carries a count (`MACH
-3/12`, `WEIGHT all 5`), and the read-only **Every filter** box at the bottom
-names what each one is letting through: the selected values, up to eight of
-them, then `+N more`. All of them is reported as "all 12" rather than listed,
-none as "none of 12", and a filter switched off is still shown, marked, because
-it is kept precisely so it can be switched back on.
+The tab is a **tree**: one collapsible node per parameter over its own values,
+so every filter and everything selected in it is on screen at once. It replaced
+a list of parameters above a list of the selected one's values, which could only
+ever show one filter's values at a time — with three active there was no way to
+see what was selected without clicking through them and remembering.
+
+```
+ v MACH      3/12
+     0.70
+     0.75
+     0.80
+ > WEIGHT    all 5   grouped
+```
+
+A parameter's checkbox is the filter's on/off switch — off keeps the values you
+ticked, which is what makes "with and without this" a two-click comparison. Its
+row carries a count (`3/12`, `all 5`, `none of 8`) and hovering names the
+selected values. Nodes stay open across refreshes, and one that no longer
+appears in any loaded file says so rather than showing an empty node that looks
+broken.
+
+**Group…** opens the interval editor for the selected parameter (also on the
+right-click menu, along with select-all/none and remove). Choose the number of
+groups — never more than there are values — and it splits the observed range
+evenly; then edit any boundary and the rest follow. Editing moves an *edge*, not
+an interval: a row's From and the row above's To are the same number, so
+overlaps and gaps are not something to validate but something that cannot be
+expressed. Pulling an outer edge inwards is how you deliberately exclude an
+outlier. The **Values** column counts what each interval actually claims, the
+same way the filter will, so an interval that catches nothing says so before you
+close the dialog rather than after.
+
+When data changes under a grouping — a file loaded whose values fall outside
+intervals set up for the old ones — the parameter's row says how many values
+fall outside every group. Those runs are being filtered out, and without the
+note the plot simply comes back short. The grouping is reported, not silently
+redrawn: rewriting boundaries someone edited by hand, because a file was opened,
+would be worse. **Distribute evenly** is the one-click fix.
 
 **STYLE** — how the tile and its curves look:
 
@@ -1185,8 +1229,8 @@ the fingerprint, which is capped, while the parse it replaces is not.
 ## Testing and benchmarking
 
 ```bash
-make test                                  # 1666 C++ checks
-python -m unittest discover -s tests -v    # 337 Python tests
+make test                                  # 1687 C++ checks
+python -m unittest discover -s tests -v    # 394 Python tests
 make bench                                 # parser microbenchmark
 python tools/bench_app.py FILE...          # end-to-end, on real files
 ```
@@ -1223,6 +1267,13 @@ whether the machine running the suite happens to have Qt.
 `tests/test_construction_order.py` complements both by *parsing* the GUI rather
 than importing it, which is how the wiring is checked on a machine with no Qt at
 all.
+
+Arithmetic that a mistake could hide in lives in its own Qt-free module, so it
+can be tested directly: `aoeviewer/scales.py` for the draw budget and the
+log-axis conversion, `aoeviewer/isogroups.py` for editing ISO intervals. The
+second is checked twice over — case by case in `test_redraw.py`, and by a few
+thousand random boundary edits in `test_monkey.py` asserting that the intervals
+come out ordered and touching whatever was typed into them.
 
 ### Sizes
 

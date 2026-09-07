@@ -70,6 +70,10 @@ class _BoundSignal:
     def __init__(self):
         self.emitted = []
         self._slots = []
+        # QWidget.blockSignals is how the panels build a list without their own
+        # handlers firing on every item, so a stub that ignored it would test a
+        # path the application never takes.
+        self.blocked = False
 
     def connect(self, slot):
         self._slots.append(slot)
@@ -78,6 +82,8 @@ class _BoundSignal:
         self._slots = []
 
     def emit(self, *args):
+        if self.blocked:
+            return
         self.emitted.append(args)
         for slot in list(self._slots):
             slot(*args)
@@ -327,6 +333,8 @@ class QTableWidget:
         return self._rows
 
     def setItem(self, row, column, item):
+        item._row, item._column = row, column
+        item.table = self
         self._items[(row, column)] = item
 
     def item(self, row, column):
@@ -353,6 +361,17 @@ class QTableWidgetItem:
         self._text = text
         self._tooltip = ""
         self._flags = None
+        # Filled in by QTableWidget.setItem. Qt's items know where they sit,
+        # and the dialog's itemChanged handler asks them.
+        self._row = -1
+        self._column = -1
+        self.table = None
+
+    def row(self):
+        return self._row
+
+    def column(self):
+        return self._column
 
     def setText(self, text):
         self._text = text
@@ -527,6 +546,228 @@ class QTextBrowser:
         return _Any()
 
 
+class QTreeWidgetItem:
+    """A node with per-column text, a check state, data and children.
+
+    Constructed the way Qt allows it: `QTreeWidgetItem(parent, ["text"])`, where
+    the parent is either the tree (a top-level row) or another item. That is how
+    the ISO panel builds its parameter nodes, and getting the two cases right is
+    the point of having this at all.
+    """
+
+    def __init__(self, parent=None, texts=None):
+        self._texts = list(texts or [])
+        self._tooltips = {}
+        self._flags = 0
+        self._checks = {}
+        self._data = {}
+        self._children = []
+        self._parent = None
+        self.tree = None
+        self._expanded = False
+
+        if isinstance(parent, QTreeWidget):
+            parent.addTopLevelItem(self)
+        elif isinstance(parent, QTreeWidgetItem):
+            parent.addChild(self)
+
+    # --- structure
+    def addChild(self, child):
+        child._parent = self
+        child.tree = self.tree
+        self._children.append(child)
+
+    def child(self, index):
+        return self._children[index] if 0 <= index < len(self._children) else None
+
+    def childCount(self):
+        return len(self._children)
+
+    def parent(self):
+        return self._parent
+
+    def setExpanded(self, expanded):
+        self._expanded = bool(expanded)
+        if self.tree is not None:
+            signal = (self.tree.itemExpanded if self._expanded
+                      else self.tree.itemCollapsed)
+            signal.emit(self)
+
+    def isExpanded(self):
+        return self._expanded
+
+    # --- content
+    def _changed(self):
+        if self.tree is not None:
+            self.tree.itemChanged.emit(self, 0)
+
+    def setText(self, column, text):
+        while len(self._texts) <= column:
+            self._texts.append("")
+        self._texts[column] = text
+        self._changed()
+
+    def text(self, column=0):
+        return self._texts[column] if column < len(self._texts) else ""
+
+    def setToolTip(self, column, text):
+        self._tooltips[column] = text
+
+    def toolTip(self, column=0):
+        return self._tooltips.get(column, "")
+
+    def setFlags(self, flags):
+        self._flags = flags
+
+    def flags(self):
+        return self._flags
+
+    def setCheckState(self, column, state):
+        self._checks[column] = state
+        self._changed()
+
+    def checkState(self, column=0):
+        return self._checks.get(column)
+
+    def setData(self, column, role, value):
+        self._data[(column, role)] = value
+
+    def data(self, column, role):
+        return self._data.get((column, role))
+
+
+class QTreeWidget:
+    def __init__(self, *args, **kwargs):
+        self._items = []
+        self._current = None
+        self.itemChanged = _BoundSignal()
+        self.itemExpanded = _BoundSignal()
+        self.itemCollapsed = _BoundSignal()
+        self.customContextMenuRequested = _BoundSignal()
+        self.updates_enabled = True
+        self.signals_blocked = False
+
+    def addTopLevelItem(self, item):
+        item.tree = self
+        item._parent = None
+        for child in item._children:
+            child.tree = self
+        self._items.append(item)
+
+    def topLevelItem(self, index):
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def topLevelItemCount(self):
+        return len(self._items)
+
+    def clear(self):
+        for item in self._items:
+            item.tree = None
+        self._items = []
+        self._current = None
+
+    def setCurrentItem(self, item):
+        self._current = item
+
+    def currentItem(self):
+        return self._current
+
+    def setUpdatesEnabled(self, enabled):
+        self.updates_enabled = bool(enabled)
+
+    def blockSignals(self, blocked):
+        was = self.signals_blocked
+        self.signals_blocked = bool(blocked)
+        self.itemChanged.blocked = self.signals_blocked
+        self.itemExpanded.blocked = self.signals_blocked
+        self.itemCollapsed.blocked = self.signals_blocked
+        return was
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return _Any()
+
+
+class QLabel:
+    """Records the text it was set to; the panels report through these."""
+
+    def __init__(self, text="", *args, **kwargs):
+        self._text = text
+
+    def setText(self, text):
+        self._text = text
+
+    def text(self):
+        return self._text
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return _Any()
+
+
+class QSpinBox:
+    def __init__(self, *args, **kwargs):
+        self._value = 0
+        self._min, self._max = 0, 99
+        self.valueChanged = _BoundSignal()
+
+    def setRange(self, low, high):
+        self._min, self._max = int(low), int(high)
+
+    def minimum(self):
+        return self._min
+
+    def maximum(self):
+        return self._max
+
+    def setValue(self, value):
+        value = max(self._min, min(self._max, int(value)))
+        if value != self._value:
+            self._value = value
+            self.valueChanged.emit(value)
+
+    def value(self):
+        return self._value
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return _Any()
+
+
+class _Enum:
+    """A namespace of distinct integers, which is what Qt's enums are here.
+
+    Item flags are combined with `|` and check states are compared for
+    equality, so the one thing the stubs cannot do is hand back an opaque
+    object: `flags() | Qt.ItemFlag.ItemIsUserCheckable` has to be arithmetic.
+    """
+
+    def __init__(self, **names):
+        for index, (name, value) in enumerate(sorted(names.items())):
+            setattr(self, name, value)
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        # Anything not named above is a flag nobody in the code inspects; a
+        # distinct bit keeps `|` working and comparisons meaningful.
+        value = 1 << (16 + len(self.__dict__))
+        object.__setattr__(self, name, value)
+        return value
+
+
+def _make_qt():
+    qt = _Any()
+    qt.ItemFlag = _Enum(NoItemFlags=0, ItemIsEnabled=1, ItemIsSelectable=2,
+                        ItemIsEditable=4, ItemIsUserCheckable=8)
+    qt.CheckState = _Enum(Unchecked=0, PartiallyChecked=1, Checked=2)
+    qt.ItemDataRole = _Enum(DisplayRole=0, UserRole=256, ToolTipRole=3)
+    return qt
+
+
 class _AutoModule(types.ModuleType):
     """Hands out a permissive class for any name nobody has faked.
 
@@ -559,7 +800,7 @@ def install() -> None:
     """
     core = _AutoModule("PySide6.QtCore")
     core.Signal = Signal
-    core.Qt = _Any()
+    core.Qt = _make_qt()
     for name in ("QPointF", "QRectF", "QTimer", "QObject", "QThread"):
         setattr(core, name, type(name, (_Any,), {}))
 
@@ -576,6 +817,10 @@ def install() -> None:
     widgets.QListWidget = QListWidget
     widgets.QListWidgetItem = QListWidgetItem
     widgets.QTextBrowser = QTextBrowser
+    widgets.QTreeWidget = QTreeWidget
+    widgets.QTreeWidgetItem = QTreeWidgetItem
+    widgets.QLabel = QLabel
+    widgets.QSpinBox = QSpinBox
 
     pyside = types.ModuleType("PySide6")
     pyside._aoe_stub = True

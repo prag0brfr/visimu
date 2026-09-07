@@ -12,6 +12,8 @@ from contextlib import contextmanager
 
 from typing import Dict, List, Optional
 
+import numpy as np
+
 from PySide6.QtCore import QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
@@ -50,6 +52,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import isogroups
 from ..model import (
     DASH_STYLES,
     SYMBOL_LABELS,
@@ -89,16 +92,12 @@ def _title(text: str) -> QLabel:
 # a reader is counting rather than reading anyway.
 ISO_OVERVIEW_MAX_VALUES = 8
 
-
-def _escape(text: str) -> str:
-    """Make a parameter name or a formatted value safe as rich text.
-
-    Parameter names come out of the user's files, so they are not under this
-    program's control; one containing "<" would otherwise silently swallow the
-    rest of the line as an unknown tag.
-    """
-    return (str(text).replace("&", "&amp;")
-            .replace("<", "&lt;").replace(">", "&gt;"))
+# How many children one parameter contributes to the tree. A sweep has tens of
+# distinct values and never comes near this; a parameter that is not really
+# constant within a run has thousands, and building a widget item for each is
+# what makes a panel feel broken. Everything past the cap is still filtered on
+# -- the ticks live in the state, not in the tree -- and the node says so.
+ISO_TREE_MAX_CHILDREN = 400
 
 
 def iso_selection_badge(total: int, chosen: int) -> str:
@@ -824,6 +823,270 @@ class ComputePanel(QWidget):
         self.parameters_changed.emit()
 
 
+class IsoGroupDialog(QDialog):
+    """Choose how one ISO parameter's values are split into intervals.
+
+    Two ways to arrive at a grouping and the dialog offers both without asking
+    which you want. Pick the number of groups and it splits the observed range
+    evenly, which is the answer nine times out of ten; then edit any boundary in
+    the table and the rest follow.
+
+    Editing moves an *edge*, never an interval: the From cell of a row and the
+    To cell of the row above it are the same number, and changing either moves
+    both. Independent intervals could overlap, or leave a gap that silently
+    drops every run in it, and neither mistake shows up until a plot comes back
+    short. See aoeviewer.isogroups for the arithmetic.
+
+    The Values column is the feedback that makes manual editing usable: it
+    counts the distinct values each interval actually claims, the same way the
+    filter will, so an interval that catches nothing says so before you close
+    the dialog rather than after.
+    """
+
+    NAME, FROM, TO, COUNT = range(4)
+
+    # A class-level default so the flag exists however the dialog is reached.
+    # QDialog forwards unknown attributes, so a missing one surfaces as
+    # something truthy rather than as an error -- and "did the user ask to
+    # ungroup" is not a question to get wrong quietly.
+    ungrouped = False
+
+    def __init__(self, param: str, values, format_value, groups,
+                 auto_groups, parent=None):
+        """`auto_groups(count)` returns the core's even split, so the dialog
+        does not reimplement it and cannot disagree with it."""
+        super().__init__(parent)
+        self._param = param
+        self._values = [float(v) for v in values]
+        self._format = format_value
+        self._auto = auto_groups
+        self._updating = False
+        # Which names the user typed. rename_defaults() rewrites the rest when
+        # bounds move; a name someone chose is theirs and is left alone.
+        self._custom_names = set()
+
+        self.setWindowTitle("Group {0}".format(param))
+        self.setMinimumWidth(420)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(6)
+
+        span = ""
+        if self._values:
+            span = "  ({0} to {1})".format(self._format(min(self._values)),
+                                           self._format(max(self._values)))
+        header = QLabel("{0} — {1} distinct value{2}{3}".format(
+            param, len(self._values),
+            "" if len(self._values) == 1 else "s", span))
+        header.setWordWrap(True)
+        layout.addWidget(header)
+
+        count_row = QHBoxLayout()
+        count_row.addWidget(QLabel("Groups"))
+        self.count_spin = QSpinBox()
+        # Never more groups than values: past that the extra intervals are empty
+        # by construction, and an empty interval is a filter row that can never
+        # match anything.
+        self.count_spin.setRange(1, max(1, len(self._values)))
+        self.count_spin.valueChanged.connect(self._on_count_changed)
+        count_row.addWidget(self.count_spin)
+        self.even_button = QPushButton("Distribute evenly")
+        self.even_button.setToolTip(
+            "Split the observed range into equal intervals, discarding any "
+            "boundaries edited by hand")
+        self.even_button.clicked.connect(self._distribute_evenly)
+        count_row.addWidget(self.even_button)
+        count_row.addStretch(1)
+        layout.addLayout(count_row)
+
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["Name", "From", "To", "Values"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        head = self.table.horizontalHeader()
+        head.setSectionResizeMode(self.NAME, QHeaderView.ResizeMode.Stretch)
+        for column in (self.FROM, self.TO, self.COUNT):
+            head.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.itemChanged.connect(self._on_item_changed)
+        layout.addWidget(self.table, 1)
+
+        self.note = QLabel("")
+        self.note.setObjectName("Hint")
+        self.note.setWordWrap(True)
+        layout.addWidget(self.note)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        # Ungrouping belongs here, in the place you come to when you are
+        # thinking about grouping, rather than only in a context menu nobody
+        # finds. It leaves the intervals in the state: switching grouping back
+        # on should return to what was set up, not to a fresh even split.
+        drop = buttons.addButton("Remove grouping",
+                                 QDialogButtonBox.ButtonRole.DestructiveRole)
+        drop.setToolTip("Go back to ticking values one by one")
+        drop.clicked.connect(self._drop_grouping)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        # Start from whatever the parameter already has, so opening the dialog
+        # on a grouping edited last week shows that grouping rather than
+        # replacing it with a fresh even split.
+        self._groups = [tuple(g) for g in groups] if groups else []
+        if not self._groups:
+            self._groups = self._even(min(3, max(1, len(self._values))))
+        self._updating = True
+        self.count_spin.setValue(len(self._groups) or 1)
+        self._updating = False
+        self._fill_table()
+
+    # ------------------------------------------------------------- results
+
+    def groups(self):
+        """The edited grouping, in the (name, low, high, active) form stored."""
+        return [tuple(g) for g in self._groups]
+
+    def _drop_grouping(self) -> None:
+        self.ungrouped = True
+        self.accept()
+
+    # ------------------------------------------------------------- building
+
+    def _even(self, count):
+        """The core's even split, falling back to ours if it declines.
+
+        The core answers with nothing when there is nothing to split -- no
+        values at all -- and the fallback keeps the table from being empty in
+        that case, which would leave no row to edit and no way back.
+        """
+        count = isogroups.clamp_group_count(count, len(self._values))
+        proposed = self._auto(count) if self._values else []
+        if proposed:
+            return [(g.name, float(g.low), float(g.high), True) for g in proposed]
+        edges = isogroups.even_edges(self._values, count)
+        if not edges:
+            return [(isogroups.default_name(0.0, 0.0, self._format),
+                     0.0, 0.0, True)]
+        return isogroups.groups_from_edges(edges, format_value=self._format)
+
+    def _fill_table(self) -> None:
+        self._updating = True
+        self.table.setUpdatesEnabled(False)
+        try:
+            counts = isogroups.counts_per_group(self._groups, self._values)
+            self.table.setRowCount(len(self._groups))
+            for row, (name, low, high, _active) in enumerate(self._groups):
+                self._set_cell(row, self.NAME, name, editable=True)
+                self._set_cell(row, self.FROM, self._format(low), editable=True)
+                self._set_cell(row, self.TO, self._format(high), editable=True)
+                self._set_cell(row, self.COUNT, str(counts[row]), editable=False)
+        finally:
+            self.table.setUpdatesEnabled(True)
+            self._updating = False
+        self._update_note()
+
+    def _set_cell(self, row: int, column: int, text: str,
+                  editable: bool) -> None:
+        item = self.table.item(row, column)
+        if item is None:
+            item = QTableWidgetItem()
+            self.table.setItem(row, column, item)
+        flags = Qt.ItemFlag.ItemIsEnabled
+        if editable:
+            flags |= Qt.ItemFlag.ItemIsEditable
+        item.setFlags(flags)
+        item.setText(text)
+
+    def _update_note(self) -> None:
+        outside = isogroups.values_outside(self._groups, self._values)
+        empty = [name for name, count in
+                 zip([g[0] for g in self._groups],
+                     isogroups.counts_per_group(self._groups, self._values))
+                 if count == 0]
+        parts = []
+        if outside:
+            # Runs at these values will be filtered out. Worth saying: the
+            # usual way to get here is loading a file whose values fall outside
+            # a grouping set up for the old ones, and the plot just comes back
+            # short.
+            parts.append("{0} value{1} fall outside every group and will be "
+                         "hidden".format(len(outside),
+                                         "" if len(outside) == 1 else "s"))
+        if empty:
+            parts.append("{0} empty".format(
+                "group is" if len(empty) == 1 else "groups are"))
+        self.note.setText(
+            ". ".join(parts) + "." if parts
+            else "Every value falls in exactly one group."
+        )
+
+    # -------------------------------------------------------------- actions
+
+    def _on_count_changed(self, count: int) -> None:
+        if self._updating:
+            return
+        # A new number of groups has no correspondence with the old boundaries,
+        # so there is nothing to preserve and an even split is the only sensible
+        # answer. Names the user typed go with the rows they were typed for.
+        self._custom_names.clear()
+        self._groups = self._even(count)
+        self._fill_table()
+
+    def _distribute_evenly(self) -> None:
+        self._custom_names.clear()
+        self._groups = self._even(self.count_spin.value())
+        self._fill_table()
+
+    def _on_item_changed(self, item: QTableWidgetItem) -> None:
+        if self._updating:
+            return
+        row, column = item.row(), item.column()
+        if not (0 <= row < len(self._groups)):
+            return
+
+        if column == self.NAME:
+            name = item.text().strip()
+            if not name:
+                name = isogroups.default_name(
+                    self._groups[row][1], self._groups[row][2], self._format)
+                self._custom_names.discard(row)
+            else:
+                self._custom_names.add(row)
+            _old, low, high, active = self._groups[row]
+            self._groups[row] = (name, low, high, active)
+            self._fill_table()
+            return
+
+        # A boundary. The From of a row and the To of the row above are one
+        # edge; move_edge() clamps it between its neighbours, so the groups stay
+        # ordered and touching whatever is typed.
+        try:
+            value = float(item.text().replace(",", "."))
+        except ValueError:
+            # Not a number. Put back what was there rather than guessing.
+            self._fill_table()
+            return
+
+        edge = row if column == self.FROM else row + 1
+        edges = isogroups.move_edge(isogroups.edges_of(self._groups), edge, value)
+        names = [g[0] for g in self._groups]
+        active = [g[3] for g in self._groups]
+        moved = isogroups.groups_from_edges(edges, names, active, self._format)
+        # Regenerate the labels of every group whose name is still the default:
+        # a group called "0.7 - 0.8" that now spans 0.7 to 0.9 is worse than no
+        # name at all.
+        self._groups = [
+            group if index in self._custom_names else
+            (isogroups.default_name(group[1], group[2], self._format),
+             group[1], group[2], group[3])
+            for index, group in enumerate(moved)
+        ]
+        self._fill_table()
+
+
 class IsoPanel(QWidget):
     """Filter runs by one or more constant (ISO) parameters.
 
@@ -845,52 +1108,65 @@ class IsoPanel(QWidget):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(4)
 
+        # Set up before the widgets, because the signals connected below can
+        # reach the handlers that read them.
+        #
+        # Which parameters are open, kept across rebuilds: a tree that closed
+        # every node whenever a file was loaded would be unusable. What the tree
+        # last drew, so a refresh that would produce the same rows can skip the
+        # rebuild. And the values of each parameter, read once per refresh.
+        self._expanded = set()
+        self._tree_state = None
+        self._values_cache = {}
+
         layout.addWidget(_title("Filter by"))
 
         add_row = QHBoxLayout()
         self.param_combo = QComboBox()
-        add = QPushButton("Add filter")
+        add = QPushButton("Add")
+        add.setToolTip("Filter runs by this parameter as well")
         add.clicked.connect(self._add_filter)
         add_row.addWidget(self.param_combo, 1)
         add_row.addWidget(add)
         layout.addLayout(add_row)
 
-        # Active filters. The checkbox turns one off without losing its value
-        # selection, which matters when comparing "with and without this."
-        self.filter_list = QListWidget()
-        self.filter_list.setMaximumHeight(120)
-        self.filter_list.currentRowChanged.connect(lambda _r: self._show_values())
-        self.filter_list.itemChanged.connect(self._on_filter_toggled)
-        layout.addWidget(self.filter_list)
+        layout.addWidget(_title("Parameters and values"))
 
-        remove = QPushButton("Remove selected filter")
-        remove.clicked.connect(self._remove_filter)
-        layout.addWidget(remove)
-
-        layout.addWidget(_title("Values"))
-
-        group_row = QHBoxLayout()
-        self.group_check = QCheckBox("Group into")
-        self.group_check.toggled.connect(self._on_grouping_changed)
-        self.group_spin = QSpinBox()
-        self.group_spin.setRange(1, 20)
-        self.group_spin.setValue(3)
-        self.group_spin.valueChanged.connect(self._on_grouping_changed)
-        group_row.addWidget(self.group_check)
-        group_row.addWidget(self.group_spin)
-        group_row.addWidget(QLabel("intervals"))
-        group_row.addStretch(1)
-        layout.addLayout(group_row)
-
-        self.value_list = QListWidget()
-        self.value_list.itemChanged.connect(self._on_value_toggled)
-        layout.addWidget(self.value_list, 1)
+        # One tree instead of a list of parameters above a list of the selected
+        # one's values. The two-list arrangement could only ever show the values
+        # of whichever row was selected, so with three filters active there was
+        # no way to see what was actually selected without clicking through them
+        # and holding it in your head. Here every parameter is a collapsible
+        # node over its own values, and the answer is on screen at once.
+        self.tree = QTreeWidget()
+        self.tree.setHeaderHidden(True)
+        self.tree.setColumnCount(1)
+        self.tree.setUniformRowHeights(True)
+        self.tree.setExpandsOnDoubleClick(True)
+        self.tree.itemChanged.connect(self._on_item_changed)
+        self.tree.itemExpanded.connect(self._on_expanded)
+        self.tree.itemCollapsed.connect(self._on_collapsed)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._show_menu)
+        layout.addWidget(self.tree, 1)
 
         buttons = QHBoxLayout()
+        self.group_button = QPushButton("Group...")
+        self.group_button.setToolTip(
+            "Split the selected parameter's values into intervals")
+        self.group_button.clicked.connect(self._edit_groups)
+        buttons.addWidget(self.group_button)
         for text, on in (("All", True), ("None", False)):
             button = QPushButton(text)
+            button.setToolTip(
+                "{0} every value of the selected parameter".format(
+                    "Tick" if on else "Untick"))
             button.clicked.connect(lambda _c=False, v=on: self._set_all(v))
             buttons.addWidget(button)
+        self.remove_button = QPushButton("Remove")
+        self.remove_button.setToolTip("Stop filtering by the selected parameter")
+        self.remove_button.clicked.connect(self._remove_filter)
+        buttons.addWidget(self.remove_button)
         layout.addLayout(buttons)
 
         self.summary = QLabel("")
@@ -898,25 +1174,12 @@ class IsoPanel(QWidget):
         self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
 
-        # Every filter at once, read-only. The list above shows the values of
-        # one parameter -- whichever row is selected -- so with three filters
-        # active there was no way to see what was actually selected without
-        # clicking through them and holding it in your head.
-        layout.addWidget(_title("Every filter"))
-        self.overview = QTextBrowser()
-        # Sized and coloured from the theme like every other panel widget.
-        self.overview.setObjectName("Overview")
-        self.overview.setMaximumHeight(96)
-        self.overview.setOpenExternalLinks(False)
-        # It reports; it is not another place to click. Read-only text with no
-        # focus of its own, and it scrolls when there are more filters than fit
-        # rather than growing and squeezing the value list above it.
-        self.overview.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        layout.addWidget(self.overview)
-
     # ------------------------------------------------------------- refresh
 
     def refresh(self) -> None:
+        """Rebuild from the session. The entry point for a file being added or
+        removed, so it is also the one thing that can invalidate the cache."""
+        self._values_cache = {}
         self._updating = True
         try:
             current = self.param_combo.currentText()
@@ -928,40 +1191,39 @@ class IsoPanel(QWidget):
             self.param_combo.addItems(available)
             if current in available:
                 self.param_combo.setCurrentText(current)
-
-            row = self.filter_list.currentRow()
-            self.filter_list.clear()
-            for name in sorted(self._state.iso_states):
-                iso = self._state.iso_states[name]
-                # Just the name here. The count beside it is filled in by
-                # _refresh_selection_views(), at the end of _show_values() --
-                # see there for why it cannot be done at this point.
-                item = QListWidgetItem(name)
-                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                item.setCheckState(
-                    Qt.CheckState.Checked if iso.active else Qt.CheckState.Unchecked
-                )
-                item.setData(Qt.ItemDataRole.UserRole, name)
-                self.filter_list.addItem(item)
-            if 0 <= row < self.filter_list.count():
-                self.filter_list.setCurrentRow(row)
-            elif self.filter_list.count():
-                self.filter_list.setCurrentRow(0)
         finally:
             self._updating = False
-        self._show_values()
+        self._rebuild_tree()
 
-    def _current_param(self) -> Optional[str]:
-        item = self.filter_list.currentItem()
-        return item.data(Qt.ItemDataRole.UserRole) if item else None
+    def _read(self, param: str):
+        """(distinct values, their formatted labels) for one parameter.
 
-    def _selection_for(self, param: str):
-        """(every value of `param`, the ones ticked) -- both already formatted.
+        Cached for the life of a refresh, and both halves together because both
+        are per-value core calls: iso_distinct scans every block header of every
+        open file, and format_value crosses the ABI once per value. The tree,
+        the badges and the summary all want them, and reading them per question
+        turned ticking one checkbox into a few thousand calls.
 
-        Reads the same state the value list is built from and decides nothing:
-        a summary that disagreed with the list above it would be worse than no
-        summary. Grouped mode reports its intervals by name, because those are
-        what the user ticked; the underlying numbers are not what is on screen.
+        Only refresh() may invalidate this, because only a change to the loaded
+        files can change the answer -- which is exactly what refresh() runs for.
+        """
+        cached = self._values_cache.get(param)
+        if cached is None:
+            values = [float(v) for v in self._session.iso_distinct(param)]
+            cached = (values, [self._session.format_value(v) for v in values])
+            self._values_cache[param] = cached
+        return cached
+
+    def _distinct(self, param: str):
+        return self._read(param)[0]
+
+    def _labels_for(self, param: str):
+        """(every entry of `param`, the ones ticked) -- both already formatted.
+
+        Entries are the intervals when the parameter is grouped and the values
+        when it is not, because those are what the user ticks. Reads the same
+        state the tree is built from and decides nothing: a summary that
+        disagreed with the rows under it would be worse than no summary.
         """
         iso = self._state.iso_states.get(param)
         if iso is None:
@@ -972,153 +1234,221 @@ class IsoPanel(QWidget):
             selected = [name for name, _low, _high, active in iso.groups if active]
             return labels, selected
 
-        values = self._session.iso_distinct(param)
-        labels, selected = [], []
-        for value in values:
-            text = self._session.format_value(float(value))
-            labels.append(text)
-            # Absent means on: a value the user has never touched is shown, and
-            # _show_values() fills the dictionary in the same direction.
-            if iso.value_enabled.get(float(value), True):
-                selected.append(text)
-        return labels, selected
+        values, texts = self._read(param)
+        # Absent means on: a value the user has never touched is shown.
+        return texts, [text for value, text in zip(values, texts)
+                       if iso.value_enabled.get(value, True)]
 
-    def _refresh_selection_views(self) -> None:
-        """Bring the badges and the overview back in step with the selection.
+    def _ensure_groups(self, param: str) -> None:
+        """Generate the intervals of a grouped parameter that has none yet.
 
-        In place rather than by rebuilding the filter list: this runs while the
-        user is ticking values, and clearing the list would move the row under
-        their cursor. QListWidgetItem.setText raises itemChanged exactly as a
-        click on the checkbox does, so it is guarded like every other
-        programmatic edit in this panel.
+        Grouping is switched on before there is anything to switch it on to --
+        by the dialog's Cancel path, by a workspace saved mid-edit -- and a
+        grouped parameter with no intervals matches nothing at all.
         """
-        # Read once and used twice. _selection_for() calls into the core for a
-        # parameter's distinct values, and this runs on every tick of a value.
-        selections = {name: self._selection_for(name)
-                      for name in sorted(self._state.iso_states)}
-
-        was_updating = self._updating
-        self._updating = True
-        try:
-            for row in range(self.filter_list.count()):
-                item = self.filter_list.item(row)
-                name = item.data(Qt.ItemDataRole.UserRole)
-                if name not in selections:
-                    continue
-                labels, selected = selections[name]
-                badge = iso_selection_badge(len(labels), len(selected))
-                item.setText(
-                    "{0}   {1}".format(name, badge) if badge else name)
-                item.setToolTip(iso_selection_summary(labels, selected))
-        finally:
-            self._updating = was_updating
-        self._refresh_overview(selections)
-
-    def _refresh_overview(self, selections=None) -> None:
-        """Redraw the read-only "every filter" box.
-
-        `selections` is the already-read {parameter: (labels, selected)} when
-        the caller has it, so that ticking one value does not re-read every
-        filter's distinct values twice over.
-        """
-        if not self._state.iso_states:
-            self.overview.setHtml("")
+        iso = self._state.iso_states.get(param)
+        if iso is None or not iso.grouped or iso.groups:
             return
+        values = self._distinct(param)
+        if not values:
+            return
+        count = isogroups.clamp_group_count(iso.group_count, len(values))
+        proposed = self._session.iso_auto_group(np.asarray(values, dtype=np.float32),
+                                                count)
+        iso.groups = [(g.name, float(g.low), float(g.high), True)
+                      for g in proposed]
 
+    # ---------------------------------------------------------------- tree
+
+    def _tree_signature(self):
+        """Everything the tree draws, in a form two refreshes can compare.
+
+        A rebuild throws away and recreates one widget item per value, and a
+        refresh arrives for reasons that change none of them -- a page switched,
+        a tile restyled, the panel simply shown again. Comparing first is what
+        keeps a sweep of several hundred values from rebuilding on each.
+        """
         rows = []
         for name in sorted(self._state.iso_states):
             iso = self._state.iso_states[name]
-            if selections is not None and name in selections:
-                labels, selected = selections[name]
+            # Each entry carries the thing it stands for as well as its
+            # label. Matching a click back to a value by its text was always
+            # indirect, and two decimals make it wrong: 0.751 and 0.752 both
+            # read "0.75", and ticking one would have toggled whichever came
+            # first. The label is for the reader; the key is for the code.
+            if iso.grouped and iso.groups:
+                entries = tuple(
+                    (label, bool(active), ("group", index))
+                    for index, (label, _lo, _hi, active) in enumerate(iso.groups)
+                )
+                outside = len(isogroups.values_outside(iso.groups,
+                                                       self._distinct(name)))
             else:
-                labels, selected = self._selection_for(name)
-            summary = iso_selection_summary(labels, selected)
-            # An inactive filter still lists its values -- it is kept precisely
-            # so it can be switched back on -- but it must not read as if it
-            # were narrowing anything right now.
-            state = "" if iso.active else " &middot; off"
-            # Weight, not colour, separates the name from its values. A colour
-            # would have to be named literally -- rich text does not inherit the
-            # stylesheet -- and a literal that reads well on the dark theme is
-            # washed out on the light one. Bold works on both.
-            rows.append(
-                "<div style='margin-bottom:2px'><b>{0}</b>{1}<br/>{2}</div>"
-                .format(_escape(name), state, _escape(summary))
-            )
-        self.overview.setHtml("".join(rows))
+                values, texts = self._read(name)
+                entries = tuple(
+                    (text, bool(iso.value_enabled.get(value, True)),
+                     ("value", value))
+                    for value, text in zip(values, texts)
+                )
+                outside = 0
+            rows.append((name, bool(iso.active), bool(iso.grouped),
+                         len(self._distinct(name)), outside, entries,
+                         name in self._expanded))
+        return tuple(rows)
 
-    def _show_values(self) -> None:
-        """Fill the value list for the selected filter, then restate them all.
+    def _rebuild_tree(self, force: bool = False) -> None:
+        # Generating the intervals of a grouped parameter changes what the
+        # signature describes, so it happens first and separately -- a signature
+        # function that edited the thing it was measuring would be its own bug.
+        for name in list(self._state.iso_states):
+            self._ensure_groups(name)
+        signature = self._tree_signature()
+        if not force and signature == getattr(self, "_tree_state", None):
+            self._update_summary()
+            return
+        self._tree_state = signature
 
-        Split in two because _populate_values() returns early in three places --
-        no filter selected, no values, and so on -- and the badges and the
-        overview have to be redrawn on every one of them or they go on
-        describing the filter that was there before.
-
-        Afterwards, not before: grouping generates its intervals lazily in
-        _populate_values(), and a freshly grouped parameter counted ahead of
-        that would be counted in raw values, so the row would disagree with the
-        list underneath it.
-        """
-        self._populate_values()
-        self._refresh_selection_views()
-
-    def _populate_values(self) -> None:
+        selected = self._selected_param()
         self._updating = True
+        # Without these Qt relayouts and repaints the tree on every single item,
+        # and one parameter can carry several hundred.
+        self.tree.setUpdatesEnabled(False)
+        blocked = self.tree.blockSignals(True)
         try:
-            self.value_list.clear()
-            param = self._current_param()
-            if param is None:
-                self.summary.setText("Add a parameter to filter by.")
-                self.group_check.setEnabled(False)
-                self.group_spin.setEnabled(False)
-                return
-
-            self.group_check.setEnabled(True)
-            self.group_spin.setEnabled(True)
-
-            iso = self._state.iso_state(param)
-            self.group_check.setChecked(iso.grouped)
-            self.group_spin.setValue(iso.group_count)
-
-            values = self._session.iso_distinct(param)
-            if values.size == 0:
-                self.summary.setText("No values found for {0}.".format(param))
-                return
-
-            if iso.grouped:
-                if not iso.groups:
-                    groups = self._session.iso_auto_group(values, iso.group_count)
-                    iso.groups = [(g.name, g.low, g.high, True) for g in groups]
-                for name, low, high, active in iso.groups:
-                    item = QListWidgetItem(name)
-                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                    item.setCheckState(
-                        Qt.CheckState.Checked if active else Qt.CheckState.Unchecked
-                    )
-                    item.setData(Qt.ItemDataRole.UserRole, ("group", low, high))
-                    self.value_list.addItem(item)
-                self.summary.setText(
-                    "{0}: {1} values in {2} intervals.".format(
-                        param, values.size, len(iso.groups))
-                )
-            else:
-                for value in values:
-                    text = self._session.format_value(float(value))
-                    enabled = iso.value_enabled.get(float(value), True)
-                    iso.value_enabled[float(value)] = enabled
-                    item = QListWidgetItem(text)
-                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                    item.setCheckState(
-                        Qt.CheckState.Checked if enabled else Qt.CheckState.Unchecked
-                    )
-                    item.setData(Qt.ItemDataRole.UserRole, ("value", float(value)))
-                    self.value_list.addItem(item)
-                self.summary.setText(
-                    "{0}: {1} distinct values.".format(param, values.size)
-                )
+            self.tree.clear()
+            for row in signature:
+                self._add_param_node(*row)
         finally:
+            self.tree.blockSignals(blocked)
+            self.tree.setUpdatesEnabled(True)
             self._updating = False
+
+        self._select_param(selected)
+        self._update_summary()
+
+    def _add_param_node(self, name, active, grouped, value_count, outside,
+                        entries, expanded) -> None:
+        iso = self._state.iso_states[name]
+        badge = iso_selection_badge(
+            len(entries), sum(1 for _label, on, _key in entries if on))
+        parts = [name]
+        if badge:
+            parts.append(badge)
+        if grouped:
+            parts.append("grouped")
+        if value_count == 0:
+            # The parameter is still configured -- removing it is the user's
+            # call -- but nothing loaded has it, so say so rather than showing
+            # an empty node that looks broken.
+            parts.append("not in the loaded files")
+        elif outside:
+            # Loading a file whose values fall outside a grouping set up for the
+            # old ones is the usual way here, and the plot just comes back short
+            # with nothing to explain it.
+            parts.append("{0} outside the groups".format(outside))
+
+        node = QTreeWidgetItem(self.tree, ["   ".join(parts)])
+        node.setFlags(node.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        node.setCheckState(
+            0, Qt.CheckState.Checked if active else Qt.CheckState.Unchecked)
+        node.setData(0, Qt.ItemDataRole.UserRole, ("param", name))
+        node.setToolTip(0, iso_selection_summary(
+            [label for label, _on, _key in entries],
+            [label for label, on, _key in entries if on]))
+
+        # Only what will be looked at. Everything past the cap is still
+        # filtered on -- its ticks are in the state, not in the tree -- and
+        # the note says so; building three thousand widget items to be
+        # scrolled past is what makes a panel feel broken.
+        shown = entries[:ISO_TREE_MAX_CHILDREN]
+        for label, on, key in shown:
+            child = QTreeWidgetItem(node, [label])
+            child.setFlags(child.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            child.setCheckState(
+                0, Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
+            child.setData(0, Qt.ItemDataRole.UserRole, ("entry", name, key))
+        if len(entries) > len(shown):
+            note = QTreeWidgetItem(
+                node, ["... and {0} more, still filtered on".format(
+                    len(entries) - len(shown))])
+            note.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            note.setData(0, Qt.ItemDataRole.UserRole, ("note", name, ""))
+
+        node.setExpanded(expanded)
+
+    def _update_summary(self) -> None:
+        states = self._state.iso_states
+        if not states:
+            self.summary.setText(
+                "Add a parameter to filter runs by the value it holds constant.")
+            return
+        active = sum(1 for iso in states.values() if iso.active)
+        self.summary.setText(
+            "{0} filter{1}, {2} active. Filters combine with AND, so each one "
+            "narrows the set.".format(
+                len(states), "" if len(states) == 1 else "s", active)
+        )
+
+    # ------------------------------------------------------------ selection
+
+    def _selected_param(self) -> Optional[str]:
+        """The parameter the buttons act on: the selected row, or its parent."""
+        item = self.tree.currentItem()
+        while item is not None:
+            data = item.data(0, Qt.ItemDataRole.UserRole)
+            if data and data[0] == "param":
+                return data[1]
+            if data and len(data) > 1:
+                return data[1]
+            item = item.parent()
+        # One filter and nothing selected is unambiguous, and demanding a click
+        # first would be pedantry.
+        names = sorted(self._state.iso_states)
+        return names[0] if len(names) == 1 else None
+
+    def _select_param(self, param: Optional[str]) -> None:
+        if param is None:
+            return
+        for index in range(self.tree.topLevelItemCount()):
+            node = self.tree.topLevelItem(index)
+            data = node.data(0, Qt.ItemDataRole.UserRole)
+            if data and data[1] == param:
+                self.tree.setCurrentItem(node)
+                return
+
+    def _on_expanded(self, item: QTreeWidgetItem) -> None:
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if data and data[0] == "param":
+            self._expanded.add(data[1])
+            self._tree_state = None   # the signature carries expansion
+
+    def _on_collapsed(self, item: QTreeWidgetItem) -> None:
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if data and data[0] == "param":
+            self._expanded.discard(data[1])
+            self._tree_state = None
+
+    def _show_menu(self, position) -> None:
+        param = self._selected_param()
+        item = self.tree.itemAt(position)
+        if item is not None:
+            data = item.data(0, Qt.ItemDataRole.UserRole)
+            if data and len(data) > 1:
+                param = data[1]
+        if param is None:
+            return
+
+        iso = self._state.iso_states.get(param)
+        menu = QMenu(self)
+        menu.addAction("Group...", lambda: self._edit_groups(param))
+        if iso is not None and iso.grouped:
+            menu.addAction("Ungroup", lambda: self._set_grouped(param, False))
+        menu.addSeparator()
+        menu.addAction("Select all", lambda: self._set_all(True, param))
+        menu.addAction("Select none", lambda: self._set_all(False, param))
+        menu.addSeparator()
+        menu.addAction("Remove filter", lambda: self._remove_filter(param))
+        menu.exec(self.tree.viewport().mapToGlobal(position))
 
     # ------------------------------------------------------------- actions
 
@@ -1129,92 +1459,171 @@ class IsoPanel(QWidget):
         iso = self._state.iso_state(name)
         iso.active = True
         self._state.dirty = True
+        # Open it: the point of adding a filter is to choose values, and a node
+        # that arrives closed hides the thing you came for.
+        self._expanded.add(name)
         self.refresh()
-        for row in range(self.filter_list.count()):
-            if self.filter_list.item(row).data(Qt.ItemDataRole.UserRole) == name:
-                self.filter_list.setCurrentRow(row)
-                break
+        self._select_param(name)
         self.apply_filter()
 
-    def _remove_filter(self) -> None:
-        param = self._current_param()
+    def _remove_filter(self, param: Optional[str] = None) -> None:
+        param = param or self._selected_param()
         if param is None:
             return
         self._state.iso_states.pop(param, None)
+        self._expanded.discard(param)
         self._state.dirty = True
         self.refresh()
         self.apply_filter()
 
-    def _on_filter_toggled(self, item: QListWidgetItem) -> None:
-        if self._updating:
+    def _set_grouped(self, param: str, grouped: bool) -> None:
+        iso = self._state.iso_states.get(param)
+        if iso is None:
             return
-        param = item.data(Qt.ItemDataRole.UserRole)
+        # The intervals are kept either way, not cleared: switching grouping
+        # back on should return to what was set up rather than to a fresh even
+        # split, and _ensure_groups() only fills in a grouping that has none.
+        iso.grouped = bool(grouped)
+        self._state.dirty = True
+        self._rebuild_tree(force=True)
+        self.apply_filter()
+
+    def _edit_groups(self, param: Optional[str] = None) -> None:
+        param = param or self._selected_param()
         if param is None:
+            self.summary.setText("Select a parameter in the tree first.")
             return
-        self._state.iso_state(param).active = (
-            item.checkState() == Qt.CheckState.Checked
+        values = self._distinct(param)
+        if not values:
+            self.summary.setText(
+                "{0} has no values in the loaded files.".format(param))
+            return
+
+        iso = self._state.iso_state(param)
+        dialog = IsoGroupDialog(
+            param, values, self._session.format_value, iso.groups,
+            lambda count: self._session.iso_auto_group(
+                np.asarray(values, dtype=np.float32), count),
+            self,
         )
-        self._state.dirty = True
-        self._refresh_selection_views()
-        self.apply_filter()
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
 
-    def _on_grouping_changed(self, *_args) -> None:
-        if self._updating:
+        if dialog.ungrouped:
+            self._set_grouped(param, False)
             return
-        param = self._current_param()
-        if param is None:
-            return
-        iso = self._state.iso_state(param)
-        iso.grouped = self.group_check.isChecked()
-        iso.group_count = self.group_spin.value()
-        # Regenerate: the interval count changed, so the old bounds are wrong.
-        iso.groups = []
-        self._state.dirty = True
-        self._show_values()
-        self.apply_filter()
 
-    def _on_value_toggled(self, item: QListWidgetItem) -> None:
-        if self._updating:
-            return
-        param = self._current_param()
-        if param is None:
-            return
-        iso = self._state.iso_state(param)
-        data = item.data(Qt.ItemDataRole.UserRole)
-        checked = item.checkState() == Qt.CheckState.Checked
-        if data[0] == "value":
-            iso.value_enabled[data[1]] = checked
-        else:
-            _kind, low, high = data
-            iso.groups = [
-                (name, lo, hi, checked if (lo == low and hi == high) else active)
-                for name, lo, hi, active in iso.groups
-            ]
+        iso.groups = dialog.groups()
+        iso.group_count = len(iso.groups)
+        iso.grouped = True
         iso.active = True
         self._state.dirty = True
-        self._refresh_selection_views()
+        self._expanded.add(param)
+        self._rebuild_tree(force=True)
         self.apply_filter()
 
-    def _set_all(self, on: bool) -> None:
-        param = self._current_param()
-        if param is None:
+    def _on_item_changed(self, item: QTreeWidgetItem) -> None:
+        """A checkbox was clicked -- on a parameter, or on one of its values."""
+        if self._updating:
             return
-        iso = self._state.iso_state(param)
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if not data:
+            return
+        checked = item.checkState(0) == Qt.CheckState.Checked
+
+        if data[0] == "param":
+            self._state.iso_state(data[1]).active = checked
+        elif data[0] == "entry":
+            _kind, param, key = data
+            iso = self._state.iso_states.get(param)
+            if iso is None:
+                return
+            kind, which = key
+            if kind == "group":
+                # By position, not by name: two intervals may legitimately be
+                # called the same thing, and the row knows which one it is.
+                if 0 <= which < len(iso.groups):
+                    name, low, high, _was = iso.groups[which]
+                    iso.groups = list(iso.groups)
+                    iso.groups[which] = (name, low, high, checked)
+            else:
+                iso.value_enabled[which] = checked
+            # Ticking a value is a statement about what to show, which is
+            # meaningless while the filter is off.
+            iso.active = True
+        else:
+            return
+
+        self._state.dirty = True
+        self._refresh_labels()
+        self.apply_filter()
+
+    def _refresh_labels(self) -> None:
+        """Restate the parameter rows without rebuilding the tree.
+
+        In place because this runs while the user is ticking values, and
+        clearing the tree would collapse it and move the row under their cursor.
+        setText raises itemChanged exactly as a click on the checkbox does, so
+        it is guarded like every other programmatic edit here.
+        """
+        was_updating = self._updating
         self._updating = True
         try:
-            for i in range(self.value_list.count()):
-                self.value_list.item(i).setCheckState(
-                    Qt.CheckState.Checked if on else Qt.CheckState.Unchecked
-                )
-            iso.value_enabled = {k: on for k in iso.value_enabled}
-            iso.groups = [(n, lo, hi, on) for n, lo, hi, _ in iso.groups]
-            iso.active = True
+            for index in range(self.tree.topLevelItemCount()):
+                node = self.tree.topLevelItem(index)
+                data = node.data(0, Qt.ItemDataRole.UserRole)
+                if not data or data[0] != "param":
+                    continue
+                param = data[1]
+                iso = self._state.iso_states.get(param)
+                if iso is None:
+                    continue
+                labels, selected = self._labels_for(param)
+                badge = iso_selection_badge(len(labels), len(selected))
+                parts = [param]
+                if badge:
+                    parts.append(badge)
+                if iso.grouped:
+                    parts.append("grouped")
+                if not self._distinct(param):
+                    parts.append("not in the loaded files")
+                else:
+                    outside = len(isogroups.values_outside(
+                        iso.groups, self._distinct(param))) if (
+                        iso.grouped and iso.groups) else 0
+                    if outside:
+                        parts.append("{0} outside the groups".format(outside))
+                node.setText(0, "   ".join(parts))
+                node.setToolTip(0, iso_selection_summary(labels, selected))
+                node.setCheckState(
+                    0, Qt.CheckState.Checked if iso.active
+                    else Qt.CheckState.Unchecked)
         finally:
-            self._updating = False
-        self._refresh_selection_views()
-        self.apply_filter()
+            self._updating = was_updating
+        # The rows now say something the stored signature does not, so the next
+        # refresh has to rebuild rather than recognise itself.
+        self._tree_state = None
+        self._update_summary()
 
-    # -------------------------------------------------------------- filter
+    def _set_all(self, on: bool, param: Optional[str] = None) -> None:
+        param = param or self._selected_param()
+        if param is None:
+            return
+        iso = self._state.iso_states.get(param)
+        if iso is None:
+            return
+        if iso.grouped and iso.groups:
+            iso.groups = [(n, lo, hi, on) for n, lo, hi, _a in iso.groups]
+        else:
+            # Every value the files actually hold, not just the ones already in
+            # the dictionary: a value never ticked is absent from it, and "None"
+            # has to turn those off too.
+            for value in self._distinct(param):
+                iso.value_enabled[value] = on
+        iso.active = True
+        self._state.dirty = True
+        self._rebuild_tree(force=True)
+        self.apply_filter()
 
     def _passes(self, iso: IsoState, value: float) -> bool:
         if value != value:      # NaN: the run has no value for this parameter

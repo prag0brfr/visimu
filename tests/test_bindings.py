@@ -270,8 +270,18 @@ class TestIso(SampleFileMixin, unittest.TestCase):
         self.assertGreaterEqual(self.session.iso_group_index(float(values[-1]), groups), 0)
 
     def test_format_trims_trailing_zeros(self):
+        # Two decimals, trailing zeros trimmed, and a power of ten at either
+        # end of the range where two decimals stop saying anything. These are
+        # labels on a tree row and inside a plot legend, so every character is
+        # one the data does not get. The rules are in core/include/aoe/iso.hpp.
         self.assertEqual(self.session.format_value(0.75), "0.75")
         self.assertEqual(self.session.format_value(3.0), "3")
+        self.assertEqual(self.session.format_value(0.756), "0.76")
+        self.assertEqual(self.session.format_value(0.01), "0.01")
+        self.assertEqual(self.session.format_value(0.0012345), "1.23e-3")
+        self.assertEqual(self.session.format_value(1234567.0), "1.23e6")
+        self.assertEqual(self.session.format_value(-0.001), "-1e-3")
+        self.assertEqual(self.session.format_value(0.0), "0")
 
 
 class TestPreload(SampleFileMixin, unittest.TestCase):

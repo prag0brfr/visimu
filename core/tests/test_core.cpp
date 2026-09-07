@@ -369,9 +369,55 @@ void test_iso() {
     std::vector<float> flat{1.0f, 1.0f, 1.0f};
     CHECK(aoe::iso_auto_group(flat, 4).size() == 1);
 
+    // These labels sit on a tree row and inside a plot legend, so every
+    // character is one the data does not get: two decimals, trailing zeros
+    // trimmed, and a power of ten where two decimals stop saying anything.
     CHECK(aoe::iso_format_value(0.75f) == "0.75");
     CHECK(aoe::iso_format_value(3.0f) == "3");
     CHECK(aoe::iso_format_value(-0.0f) == "0");
+    CHECK(aoe::iso_format_value(0.0f) == "0");
+    CHECK(aoe::iso_format_value(180.0f) == "180");
+    CHECK(aoe::iso_format_value(0.756f) == "0.76");
+    CHECK(aoe::iso_format_value(1234.567f) == "1234.57");
+
+    // 0.01 is stored as 0.00999999978, and a threshold comparison against 1e-2
+    // sent it to "1e-2" -- the one value a Mach or tolerance sweep is most
+    // likely to contain. The branch rounds first for exactly this case.
+    CHECK(aoe::iso_format_value(0.01f) == "0.01");
+    CHECK(aoe::iso_format_value(0.1f) == "0.1");
+
+    // Small enough that two decimals would read "0", so it becomes a power of
+    // ten instead -- which is the difference between two distinct sweep points
+    // and two rows that both say nothing.
+    CHECK(aoe::iso_format_value(0.005f) == "5e-3");
+    CHECK(aoe::iso_format_value(0.0012345f) == "1.23e-3");
+    CHECK(aoe::iso_format_value(5e-5f) == "5e-5");
+    CHECK(aoe::iso_format_value(-0.001f) == "-1e-3");
+
+    // Large enough that the integer part alone is longer than the power of ten.
+    CHECK(aoe::iso_format_value(999999.0f) == "999999");
+    CHECK(aoe::iso_format_value(1000000.0f) == "1e6");
+    CHECK(aoe::iso_format_value(1234567.0f) == "1.23e6");
+    CHECK(aoe::iso_format_value(-2.5e8f) == "-2.5e8");
+
+    // The exponent carries no padding and the mantissa no trailing zeros:
+    // printf writes "1.00e+06" for alignment in a table of numbers, which is
+    // precisely what a legend entry is not.
+    CHECK(aoe::iso_format_value(1e30f) == "1e30");
+    CHECK(aoe::iso_format_value(1e-30f) == "1e-30");
+
+    // Not numbers. A run with no value for the parameter reaches here as NaN,
+    // and "nan" beats whatever %f would have printed.
+    CHECK(aoe::iso_format_value(std::numeric_limits<float>::quiet_NaN()) == "nan");
+    CHECK(aoe::iso_format_value(std::numeric_limits<float>::infinity()) == "inf");
+    CHECK(aoe::iso_format_value(-std::numeric_limits<float>::infinity()) == "-inf");
+
+    // A generated interval name is two of these with a dash between them, so
+    // it inherits all of the above rather than having its own rules.
+    std::vector<float> tiny{1e-4f, 5e-4f, 1e-3f};
+    const auto tiny_groups = aoe::iso_auto_group(tiny, 1);
+    CHECK(tiny_groups.size() == 1);
+    CHECK(tiny_groups[0].name.find('e') != std::string::npos);
 }
 
 // --------------------------------------------------------- decimation

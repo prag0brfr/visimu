@@ -370,6 +370,40 @@ class TestDrawPathWiring(unittest.TestCase):
         self.assertIn("_border_active", body)
         self.assertIn("return", body)
 
+    def test_the_iso_tree_is_built_with_its_signals_off(self):
+        """Every setCheckState during a build raises itemChanged exactly as a
+        click does. Unguarded, building the tree writes every box it draws back
+        into the state and switches on every filter it drew -- and the tree
+        draws one item per value, so a sweep does it hundreds of times.
+
+        setUpdatesEnabled is the other half: without it Qt relayouts and
+        repaints the widget on every single item.
+        """
+        body = self._source("ui/panels.py", "IsoPanel", "_rebuild_tree")
+        self.assertIn("blockSignals", body)
+        self.assertIn("setUpdatesEnabled(False)", body)
+
+    def test_the_iso_tree_skips_a_rebuild_that_would_change_nothing(self):
+        """A refresh arrives for reasons that change none of the tree -- a page
+        switched, the panel simply shown again -- and a rebuild throws away and
+        recreates one widget item per value."""
+        body = self._source("ui/panels.py", "IsoPanel", "_rebuild_tree")
+        self.assertIn("_tree_signature", body)
+        self.assertIn("_tree_state", body)
+
+    def test_only_a_refresh_invalidates_the_iso_value_cache(self):
+        """Reading a parameter's distinct values scans every block header of
+        every open file, and formatting them crosses the ABI once per value. The
+        cache is only sound because refresh() is the one thing that runs when
+        the loaded files change -- so it must be the one thing that clears it,
+        and it must actually do so."""
+        body = self._source("ui/panels.py", "IsoPanel", "refresh")
+        self.assertIn("_values_cache = {}", body)
+        for method in ("_rebuild_tree", "_on_item_changed", "_set_all"):
+            other = self._source("ui/panels.py", "IsoPanel", method)
+            self.assertNotIn("_values_cache = {}", other,
+                             "{0}() must not clear the cache".format(method))
+
     def test_the_resample_path_writes_one_item_per_group(self):
         body = self._source("ui/plot_tile.py", "PlotTile", "_resample_visible")
         self.assertIn("group.item.setData", body)
