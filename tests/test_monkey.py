@@ -53,6 +53,7 @@ from aoeviewer.model import (
     tile_title,
 )
 from aoeviewer import projection
+from aoeviewer.scales import MAX_TILE_POINTS, resample_target
 from gen_sample import generate
 
 # Kept small deliberately: the point is the number of *operations*, not the
@@ -829,3 +830,69 @@ class TestIsoMonkey(MonkeyBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDrawBudget(unittest.TestCase):
+    """The per-tile point budget, which decides how fast a pan feels.
+
+    This was a real defect, not a hypothetical: three 550 MB files of 25 runs
+    each, plotted against one parameter, is 75 curves -- and the budget meant
+    to protect the draw path was raising the per-curve target from 1 800 to
+    10 000, so every pan pushed 1.5 M points into pyqtgraph instead of 270 k.
+    The arithmetic lives in `scales` precisely so it can be checked here,
+    without Qt, which is the only reason a test can exist for it at all.
+    """
+
+    WIDTH = 1800   # a ~900 px tile at two points per pixel
+
+    def test_a_small_tile_keeps_the_width_target(self):
+        self.assertEqual(resample_target(self.WIDTH, 4, 100_000), self.WIDTH)
+
+    def test_a_single_curve_is_never_budgeted(self):
+        # One curve cannot be "too many curves", however long it is.
+        self.assertEqual(
+            resample_target(self.WIDTH, 1, 50_000_000), self.WIDTH)
+
+    def test_the_budget_never_raises_the_target(self):
+        """The regression. 75 curves must not get more points than 4 do."""
+        self.assertEqual(
+            resample_target(self.WIDTH, 75, 5_300_000), self.WIDTH)
+
+    def test_the_budget_still_bites_at_a_thousand_curves(self):
+        """And must keep doing the job it was written for."""
+        target = resample_target(1200, 1000, 2_400_000)
+        self.assertLess(target, 1200)
+        self.assertEqual(target, 750)
+
+    def test_the_total_is_bounded_once_the_budget_applies(self):
+        # Two points per bucket, so buckets * curves * 2 is what Qt receives.
+        for curves in (500, 1000, 5000, 20000):
+            target = resample_target(1200, curves, 10_000_000)
+            drawn = target * curves * 2
+            self.assertLessEqual(drawn, MAX_TILE_POINTS * 1.05,
+                                 "{0} curves would draw {1} points".format(
+                                     curves, drawn))
+
+    def test_the_target_never_collapses_to_nothing(self):
+        # A floor of 32 buckets: past this the curve stops being a shape.
+        self.assertGreaterEqual(resample_target(1200, 10_000_000, 10 ** 12), 32)
+
+    def test_it_is_monotonic_in_the_curve_count(self):
+        """More curves may never earn more points each."""
+        previous = None
+        for curves in range(2, 4000, 37):
+            target = resample_target(self.WIDTH, curves, 50_000_000)
+            if previous is not None:
+                self.assertLessEqual(target, previous)
+            previous = target
+
+    def test_it_matches_a_direct_reading_of_the_two_limits(self):
+        for curves in (2, 10, 75, 300, 400, 401, 1000, 9999):
+            for total in (1000, MAX_TILE_POINTS, MAX_TILE_POINTS + 1, 10 ** 8):
+                got = resample_target(self.WIDTH, curves, total)
+                if total <= MAX_TILE_POINTS:
+                    want = self.WIDTH
+                else:
+                    want = min(self.WIDTH,
+                               max(32, int(MAX_TILE_POINTS / curves / 2)))
+                self.assertEqual(got, want, (curves, total))

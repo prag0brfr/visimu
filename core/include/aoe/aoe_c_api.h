@@ -212,6 +212,40 @@ AOE_API size_t aoe_resident_bytes(aoe_session* session);
  * on demand, so this trades time for memory. */
 AOE_API size_t aoe_trim_memory(aoe_session* session, size_t keep_bytes);
 
+/* ----------------------------------------------------------------- cache */
+
+/* A .aoec sidecar stores a file's numbers the way this program reads them:
+ * parameter-major float32, with the run offsets and each block's minimum and
+ * maximum in a header. With one present, opening does not scan the file and
+ * loading a column does not parse anything.
+ *
+ * It is never required and never written behind the caller's back. Everything
+ * still works with no cache; it is simply slower. A sidecar is only used when
+ * the source file's length, modification time and a hash of its contents all
+ * still match what was recorded, so a file that changed is re-read rather than
+ * served from stale data. */
+
+/* 0 when the AOE_CACHE environment variable switches caching off. */
+AOE_API int aoe_cache_enabled(void);
+
+/* 1 when a valid sidecar is attached to this file and serving its reads. */
+AOE_API int aoe_cache_active(aoe_session* session, int file);
+
+/* Path of the attached sidecar, or "" when there is none. Valid until the next
+ * call that returns a string from this session. */
+AOE_API const char* aoe_cache_path(aoe_session* session, int file);
+
+/* Parses the file once and writes its sidecar, then attaches it. Returns 1 on
+ * success, 0 with aoe_last_error() set otherwise.
+ *
+ * This costs a full parse, so call it off the UI thread -- typically once,
+ * after a file has been opened the slow way. Memory stays bounded to one
+ * parameter across every run however large the file is. */
+AOE_API int aoe_build_cache(aoe_session* session, int file);
+
+/* Detaches and deletes this file's sidecar. Returns 1 when none remains. */
+AOE_API int aoe_discard_cache(aoe_session* session, int file);
+
 /* ------------------------------------------------------------------ iso */
 
 /* Value of an ISO parameter for each simulation of a file (NaN when absent).

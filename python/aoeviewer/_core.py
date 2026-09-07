@@ -224,6 +224,12 @@ _PROTOTYPES = [
     ("aoe_resident_bytes", [c_void_p], c_size_t),
     ("aoe_trim_memory", [c_void_p, c_size_t], c_size_t),
 
+    ("aoe_cache_enabled", [], c_int),
+    ("aoe_cache_active", [c_void_p, c_int], c_int),
+    ("aoe_cache_path", [c_void_p, c_int], c_char_p),
+    ("aoe_build_cache", [c_void_p, c_int], c_int),
+    ("aoe_discard_cache", [c_void_p, c_int], c_int),
+
     ("aoe_iso_values", [c_void_p, c_int, c_char_p, _FLOAT_P, c_int], c_int),
     ("aoe_iso_distinct", [c_void_p, c_char_p, _FLOAT_P, c_int], c_int),
     ("aoe_iso_auto_group", [_FLOAT_P, c_int, c_int, _FLOAT_P, c_int], c_int),

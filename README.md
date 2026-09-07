@@ -35,7 +35,9 @@ the build and are in `.gitignore`.
 
 **Test data uses the `.aoe` extension**, which is what the file dialog filters
 on and what the generators and both test suites now write. Generated data lands
-in `data/`, which is also ignored.
+in `data/`, which is also ignored. So is `*.aoec`, the binary sidecar written
+beside a result file the first time it is opened -- derived data, rebuilt in
+seconds, and megabytes apiece.
 
 ---
 
@@ -58,6 +60,7 @@ in `data/`, which is also ignored.
 - [The AOE file format](#the-aoe-file-format)
 - [Scripting without the GUI](#scripting-without-the-gui)
 - [Performance](#performance)
+- [The `.aoec` sidecar](#the-aoec-sidecar)
 - [Testing and benchmarking](#testing-and-benchmarking)
 - [Architecture](#architecture)
 - [When something goes wrong](#when-something-goes-wrong)
@@ -177,9 +180,31 @@ The DLL is linked with `-static-libgcc -static-libstdc++` so it does not need
 MSVC works too, if you prefer it:
 
 ```bat
-cl /std:c++17 /O2 /EHsc /LD /DAOE_BUILD_SHARED /Icore\include ^
-   core\src\*.cpp /Fe:build\aoecore.dll
+cl /std:c++17 /O2 /EHsc /LD /DAOE_BUILD_SHARED /D_WIN32_WINNT=0x0A00 ^
+   /Icore\include core\src\*.cpp /Fe:build\aoecore.dll
 ```
+
+#### `_WIN32_WINNT`
+
+Windows headers gate every declaration on `_WIN32_WINNT`, and MinGW-w64's
+default for it differs between distributions. Too low, and the build fails with
+errors that look like broken source rather than a missing setting:
+
+```
+error: 'SRWLOCK' does not name a type
+error: 'AcquireSRWLockShared' was not declared in this scope
+```
+
+`core/include/aoe/win32.hpp` sets it to `0x0A00` (Windows 10) if nothing else
+has, so this cannot bite whichever way you build — the flag above and in the
+Makefile, `build.bat` and `CMakeLists.txt` is there to document the requirement,
+not to carry it alone.
+
+`0x0600` (Vista) is the real floor, set by the `SRWLOCK` and
+`SleepConditionVariableSRW` calls in `platform_thread.hpp`; going below it gives
+a plain `#error` saying so. `0x0A00` is what is used because the GUI already
+requires Windows 10 through PySide6. To target something older, define
+`_WIN32_WINNT` yourself — the header defers to it.
 
 ### With CMake (optional)
 
@@ -879,6 +904,19 @@ slowing down.
 roughly two points per horizontal pixel before it crosses the boundary, so a tile
 draws ~1200 points whether the channel holds ten thousand samples or ten million.
 
+**A file opened once is opened fast afterwards.** An AOE file stores one record
+per line — every parameter of one time step, side by side — and this program
+reads the transpose of that: one parameter, every run. So plotting a single
+channel makes the parser walk the whole file and run a float parser over every
+value it then throws away.
+
+The first time a file over 8 MB is opened, a `.aoec` sidecar is written beside
+it holding the same numbers the other way round: all runs of TIME, then all runs
+of the next channel, as raw `float32`, with each run's offset and each block's
+minimum and maximum in a header. Opening then maps that file instead of scanning
+the source, and loading a column is a copy out of the mapping rather than a
+parse. See [The `.aoec` sidecar](#the-aoec-sidecar) below.
+
 Measured on three 550 MB files of **simulated flight data** (1.66 GB, 75 runs,
 38 channels each) on a small container with three worker threads:
 
@@ -963,6 +1001,133 @@ per-run constants (`INITIAL_MASS`, `CG_REF`, `CL_ALPHA`, `THRUST_RATING`,
 `CONFIGURATION`) for the ISO tab to key on.
 
 ---
+
+## The `.aoec` sidecar
+
+A sidecar is a binary rewrite of an AOE file in the order this program reads it.
+It is written automatically the first time a file over 8 MB is opened, lands
+beside the source as `run.aoe.aoec`, and is used on every open after that.
+
+Nothing depends on it. Delete one and the file opens exactly as it always did,
+only slower. It is never the only copy of anything: every number in it came out
+of the `.aoe`, and every path that reads it falls back to parsing the text.
+
+### What it holds
+
+```
+Header            128 bytes: the format version, the source's fingerprint,
+                  and where each section below begins
+Column records    one per parameter: its name and unit
+Run records       one per run: its id, and the byte range it occupied
+                  in the source, so a fallback needs no fresh index scan
+Block records     one per (parameter, run): where its samples are, how
+                  many, and their minimum, maximum, and whether they
+                  contain gaps or are monotonic
+Samples           float32, parameter-major:
+                    parameter 0: run 0, run 1, ... run N-1
+                    parameter 1: run 0, run 1, ... run N-1
+```
+
+Three of those earn their place:
+
+- **Parameter-major** means the samples for "this channel, every run" are one
+  contiguous region. Reading a channel is one sequential read instead of a walk
+  over the whole file with 31 values discarded for every one kept.
+- **Run offsets in the header** mean opening does not scan. On a 1200-run file
+  the index scan was two thirds of the time between choosing a file and seeing
+  a plot.
+- **Minimum and maximum per block** are computed once, when the sidecar is
+  written. Auto-scaling asks for them on every redraw and now never rescans.
+
+### How staleness is caught
+
+A sidecar that disagrees with its source would put numbers on screen that are
+not in the file any more, so three independent properties of the source are
+recorded and **all three** must match before a byte of it is trusted:
+
+| | catches | missed by itself |
+|---|---|---|
+| Length | truncation, extension, an append | an in-place rewrite of the same length |
+| Modification time | an in-place rewrite | anything that restores timestamps — `rsync --times`, a restore from backup |
+| Content hash | a rewrite that preserves both of the above | nothing relevant; it is the backstop |
+
+The hash covers the whole file below 4 MB. Above that it covers 64 evenly
+spaced 64 KB windows, always including the first and last — a fixed 4 MB of
+reading however large the file is, which costs about 6 ms and does not grow.
+Hashing half a gigabyte in full would cost more than the parse the sidecar
+exists to avoid.
+
+The check is deliberately strict in the direction that only ever wastes time: a
+false negative rebuilds the sidecar, a false positive shows wrong data. A file
+copied to another machine gets a new modification time and so is re-cached, even
+though its contents are identical. That is the intended trade.
+
+A sidecar is also refused outright if it is truncated, if its header hash does
+not match, if any of its offsets fall outside it, if it was written by a
+different format version, or if it was written on a machine of the opposite byte
+order.
+
+### Where it goes
+
+Beside the source first, so copying a results directory copies its caches and
+deleting the results deletes them. Solver output often sits on a read-only
+share, so a per-user directory is tried second:
+
+| | |
+|---|---|
+| Windows | `%LOCALAPPDATA%\aoeViewer\cache\` |
+| macOS | `~/Library/Caches/aoeviewer/` |
+| Linux | `$XDG_CACHE_HOME/aoeviewer/`, else `~/.cache/aoeviewer/` |
+
+The source's full path is hashed into the name there, so two files called
+`results.aoe` in different directories do not share one.
+
+Failing to write a sidecar is never reported. It is an optimisation nobody
+asked for; the file has already opened and works.
+
+### Controlling it
+
+| | |
+|---|---|
+| `AOE_CACHE=0` | never read or write sidecars |
+| `AOE_CACHE_DIR=<path>` | use this instead of the per-user directory |
+
+From a script:
+
+```python
+from aoeviewer import Session
+
+session = Session()
+session.add_file("results/run_042.aoe")
+
+session.cache_active(0)     # is this file being served from a sidecar?
+session.cache_path(0)       # where it is, or ""
+session.build_cache(0)      # parse once and write one (costs a full parse)
+session.discard_cache(0)    # delete it and go back to reading the text
+```
+
+`build_cache` holds one parameter across every run in memory at a time,
+whatever the file's size, so it is safe to call on the largest files this is
+meant for.
+
+### What it is worth
+
+A generated 73 MB file, 1200 runs of 1000 rows over six channels, opened and
+then plotted against two parameters with an ISO scan:
+
+| | text | sidecar |
+|---|---|---|
+| Open (index) | 213 ms | 22 ms |
+| Preload 2 channels x 1200 runs | 81 ms | 7 ms |
+| Fetch 1200 curves | 6 ms | 5 ms |
+| ISO scan | 7 ms | 0.3 ms |
+| **Total** | **306 ms** | **32 ms** |
+
+Writing the sidecar took 0.24 s once. It is 27.7 MB against the source's
+73.1 MB — `float32` is more compact than the decimal text it came from.
+
+The advantage widens with file size: the sidecar's open cost is dominated by
+the fingerprint, which is capped, while the parse it replaces is not.
 
 ## Testing and benchmarking
 

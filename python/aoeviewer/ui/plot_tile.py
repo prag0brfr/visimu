@@ -40,9 +40,10 @@ from .. import projection, scales
 from ..session import Session
 from ..theme import Theme
 
-# Target points per horizontal pixel. Two is the minimum that preserves a
-# min/max envelope without visible loss; more just costs time.
-POINTS_PER_PIXEL = 2
+# The drawing budget lives in aoeviewer.scales, which imports no Qt, so the
+# arithmetic behind it can be tested without a running application -- which is
+# exactly where the last mistake in it hid.
+from ..scales import MAX_TILE_POINTS, POINTS_PER_PIXEL, resample_target  # noqa: F401
 
 # Stacking order of the things drawn on a tile. pyqtgraph puts plot curves at
 # z = 0, so anything meant to be read *over* the data has to be above that.
@@ -60,11 +61,6 @@ GRID_3D_Z = -20     # the back walls of a 3D box, behind everything
 # responding rather than merely slowed down. Past this the legend says how many
 # more there are, which is the only useful thing a list that long can say.
 MAX_LEGEND_ROWS = 60
-
-# Ceiling on the points handed to Qt for one tile, across every curve. The
-# per-curve budget is two points per horizontal pixel; this is the second limit,
-# for the case where the curve *count* is what makes the total unreasonable.
-MAX_TILE_POINTS = 1_500_000
 
 _PEN_STYLES = {
     "solid": Qt.PenStyle.SolidLine,
@@ -1439,7 +1435,11 @@ class PlotTile(pg.PlotWidget):
 
         view_range = self.getPlotItem().vb.viewRange()
         x_low, x_high = float(view_range[0][0]), float(view_range[0][1])
-        target = self._target_points()
+        curve_count = sum(len(g.entries) for g in self._groups)
+        total_points = sum(min(e.x.size, e.y.size)
+                           for g in self._groups for e in g.entries)
+        target = resample_target(self._target_points(), curve_count,
+                                 total_points)
 
         # A zero-width or inverted range means "everything"; the core treats
         # x_min >= x_max as the whole-series case.
@@ -1453,6 +1453,9 @@ class PlotTile(pg.PlotWidget):
         # Quantise the range before comparing: pyqtgraph reports a view range
         # that wobbles in the last bits as the mouse moves, which would defeat
         # the check without changing a single drawn pixel.
+        #
+        # Built from the final target, after the budget above has had its say,
+        # so the key can never describe a resampling that did not happen.
         if x_range is None:
             key = (None, target, bool(tile.log_y))
         else:
@@ -1460,19 +1463,6 @@ class PlotTile(pg.PlotWidget):
             scale = span / max(1, target) if span > 0 else 1.0
             key = (round(x_range[0] / scale), round(x_range[1] / scale),
                    target, bool(tile.log_y))
-
-        # Second budget, on the total rather than per curve: a thousand runs of
-        # 500 samples each is 600 000 points on a 600-pixel tile, and no amount
-        # of per-curve fidelity is visible at a thousand curves per pixel
-        # column. Only bites when the curve count is what makes the total
-        # unreasonable; an ordinary tile never reaches it.
-        curve_count = sum(len(g.entries) for g in self._groups)
-        if curve_count > 1:
-            total = sum(min(e.x.size, e.y.size)
-                        for g in self._groups for e in g.entries)
-            if total > MAX_TILE_POINTS:
-                target = max(32, int(MAX_TILE_POINTS / curve_count / 2))
-                key = key + (target,)
 
         gap = np.array([np.nan], dtype=np.float32)
 

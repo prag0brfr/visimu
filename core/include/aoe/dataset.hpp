@@ -37,6 +37,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "aoe/cache.hpp"
 #include "aoe/mapped_file.hpp"
 #include "aoe/platform_thread.hpp"
 
@@ -223,8 +224,56 @@ public:
     // automatically; call it directly only when bypassing that path.
     void touch(std::size_t sim_index, int column) const;
 
+    // ------------------------------------------------------------ cache
+    //
+    // A .aoec sidecar holds the same numbers laid out the way this program
+    // reads them: parameter-major, float32, with the run offsets and each
+    // block's extent in the header. When one is present and matches the source,
+    // open() takes its index from there instead of scanning the file, and
+    // loading a column becomes a copy out of a mapping rather than a parse.
+    //
+    // Nothing above this class has to care: every path falls back to parsing
+    // the text when there is no cache, when it does not match, or when it turns
+    // out to be damaged. The cache is a shortcut, never the only route.
+
+    // True when a valid sidecar is attached and serving reads.
+    bool cache_active() const noexcept { return cache_ && cache_->is_open(); }
+
+    // Path of the attached sidecar, or empty.
+    std::string cache_file() const {
+        return cache_ ? cache_->path() : std::string();
+    }
+
+    // Parses the whole file once and writes a sidecar, then attaches it.
+    //
+    // Deliberately not called on open(): it costs a full parse, so it is the
+    // caller's decision when to spend that -- typically once, in the
+    // background, after a file has been opened the slow way. Returns false if
+    // the file cannot be parsed or no candidate location is writable.
+    //
+    // Memory is bounded to one parameter across every run: each column is
+    // loaded, written and released before the next is touched.
+    bool write_cache(std::string* out_path = nullptr);
+
+    // Detaches and deletes the sidecar. Returns true if none remains.
+    bool discard_cache();
+
+    // Looks for a sidecar matching the file as it is now and attaches it.
+    // Called by open(); public so a caller that has just written one, or that
+    // suspects the file changed, can retry without reopening.
+    bool attach_cache();
+
 private:
     void build_index(const MappedFile& file);
+
+    // Shared tail of the two open() routes: fills in the lookup table, squares
+    // up the units vector, and gives every run its column slots.
+    void finish_open();
+
+    // Fills `pending` straight from the sidecar. Returns false when there is no
+    // usable cache, in which case the caller parses instead.
+    bool load_from_cache(const std::vector<int>& columns,
+                         const std::vector<int>& sim_indices);
 
     // Parses the byte range [begin, end) of the mapping, appending the requested
     // columns into `out` (one vector per entry of `cols`, in the same order).
@@ -245,6 +294,13 @@ private:
     std::vector<std::string> units_;
     std::unordered_map<std::string, int> header_index_;
     std::vector<std::unique_ptr<Simulation>> sims_;
+
+    // The sidecar, when one matched. Read-only and internally immutable once
+    // open, so the parallel loads below share it without locking.
+    std::unique_ptr<CacheFile> cache_;
+    // What the source looked like when the sidecar was accepted -- and what a
+    // sidecar written from here records, so the next open can check it.
+    SourceFingerprint fingerprint_;
 
     // Values found on the first data line. When this equals column_count() the
     // file is one-record-per-line and byte ranges can be split at any newline.

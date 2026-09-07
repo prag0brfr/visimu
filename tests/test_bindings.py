@@ -1975,3 +1975,119 @@ class TestManyRunsScaling(unittest.TestCase):
         for x, y in curves:
             self.session.decimate(x, y, 600, (0.0, 1.5))
         self.assertLess(time.perf_counter() - start, 5.0)
+
+
+class TestCache(unittest.TestCase):
+    """The `.aoec` sidecar, through the bindings the front end actually uses.
+
+    The C++ suite covers the format itself in detail. What is worth checking
+    from here is that the four entry points are wired up, that a cached session
+    hands back the same numbers as an uncached one, and -- the part that would
+    hurt a user -- that editing the file makes the cache stop being used.
+    """
+
+    sims = 4
+    rows = 400
+
+    def setUp(self):
+        handle, self.path = tempfile.mkstemp(suffix=".aoe", prefix="aoe_cache_")
+        os.close(handle)
+        generate(self.path, self.sims, self.rows)
+        self.sidecar = self.path + ".aoec"
+        self._sessions = []
+
+    def tearDown(self):
+        for session in self._sessions:
+            session.close()
+        for path in (self.path, self.sidecar):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+    def _open(self):
+        session = Session()
+        self._sessions.append(session)
+        session.add_file(self.path)
+        return session
+
+    def _read_all(self, session):
+        """Every sample of every channel, as a flat list of tuples."""
+        out = []
+        for sim in range(session.file(0).simulation_count):
+            for name in session.parameters:
+                values = session.channel(0, sim, name)
+                out.append((sim, name, None if values is None else values.tolist()))
+        return out
+
+    def test_no_cache_until_one_is_built(self):
+        session = self._open()
+        self.assertFalse(session.cache_active(0))
+        self.assertEqual(session.cache_path(0), "")
+        self.assertFalse(os.path.exists(self.sidecar))
+
+    def test_building_a_cache_makes_the_next_open_use_it(self):
+        first = self._open()
+        self.assertTrue(first.build_cache(0), first.last_error)
+        self.assertTrue(first.cache_active(0))
+        self.assertTrue(os.path.exists(self.sidecar))
+        self.assertEqual(first.cache_path(0), self.sidecar)
+
+        second = self._open()
+        self.assertTrue(second.cache_active(0))
+
+    def test_cached_values_are_identical(self):
+        plain = self._open()
+        before = self._read_all(plain)
+        self.assertTrue(plain.build_cache(0), plain.last_error)
+
+        cached = self._open()
+        self.assertTrue(cached.cache_active(0))
+        self.assertEqual(before, self._read_all(cached))
+
+    def test_editing_the_file_retires_the_cache(self):
+        session = self._open()
+        self.assertTrue(session.build_cache(0), session.last_error)
+
+        # Same length, one digit different: the case a size check alone misses.
+        with open(self.path, "r+b") as handle:
+            raw = bytearray(handle.read())
+            for index in range(len(raw) // 2, len(raw)):
+                if 0x30 <= raw[index] <= 0x38:
+                    raw[index] += 1
+                    break
+            else:
+                self.fail("no digit to edit in the sample file")
+            handle.seek(0)
+            handle.write(raw)
+            handle.truncate()
+
+        after = self._open()
+        self.assertFalse(after.cache_active(0))
+        # And it still reads, from the text, with the new value in place.
+        self.assertIsNotNone(after.channel(0, 0, "TIME"))
+
+    def test_truncated_sidecar_is_ignored(self):
+        session = self._open()
+        self.assertTrue(session.build_cache(0), session.last_error)
+
+        with open(self.sidecar, "r+b") as handle:
+            handle.truncate(os.path.getsize(self.sidecar) // 3)
+
+        after = self._open()
+        self.assertFalse(after.cache_active(0))
+        self.assertIsNotNone(after.channel(0, 0, "ALPHA"))
+
+    def test_discarding_removes_the_file(self):
+        session = self._open()
+        self.assertTrue(session.build_cache(0), session.last_error)
+        self.assertTrue(os.path.exists(self.sidecar))
+
+        self.assertTrue(session.discard_cache(0))
+        self.assertFalse(session.cache_active(0))
+        self.assertFalse(os.path.exists(self.sidecar))
+        # Still perfectly usable without one.
+        self.assertIsNotNone(session.channel(0, 0, "TIME"))
+
+    def test_cache_enabled_is_reported(self):
+        self.assertIsInstance(self._open().cache_enabled, bool)

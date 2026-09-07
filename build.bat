@@ -47,8 +47,16 @@ if not "%COMPILER%"=="" (
     )
 )
 
-set SOURCES=core\src\mapped_file.cpp core\src\dataset.cpp core\src\formula.cpp core\src\iso.cpp core\src\decimate.cpp core\src\session.cpp core\src\c_api.cpp
-set CXXFLAGS=-std=c++17 -O3 -DNDEBUG -Wall -Wextra -fno-math-errno
+set SOURCES=core\src\mapped_file.cpp core\src\cache.cpp core\src\dataset.cpp core\src\formula.cpp core\src\iso.cpp core\src\decimate.cpp core\src\session.cpp core\src\c_api.cpp
+REM -D_WIN32_WINNT=0x0A00 targets the Windows 10 API. Windows headers gate every
+REM declaration on this, and MinGW-w64's default varies between distributions --
+REM which is why this once built on one machine and failed on another with no
+REM source change, on errors like "'SRWLOCK' does not name a type" from
+REM platform_thread.hpp. 0x0600 (Vista) is the real floor, set by SRWLOCK and
+REM SleepConditionVariableSRW; 0x0A00 matches what the GUI already needs through
+REM PySide6. core\include\aoe\win32.hpp sets the same value when a build does
+REM not, so this flag is insurance rather than the only line of defence.
+set CXXFLAGS=-std=c++17 -O3 -DNDEBUG -Wall -Wextra -fno-math-errno -D_WIN32_WINNT=0x0A00
 set INCLUDES=-Icore\include
 
 REM -static-libgcc/-static-libstdc++ matter here: without them the DLL needs

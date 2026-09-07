@@ -466,6 +466,57 @@ size_t aoe_trim_memory(aoe_session* s, size_t keep_bytes) {
     return guarded(s, [&] { return s->session.trim_memory(keep_bytes); }, std::size_t{0});
 }
 
+// --------------------------------------------------------------- cache
+
+int aoe_cache_enabled(void) { return aoe::caching_enabled() ? 1 : 0; }
+
+int aoe_cache_active(aoe_session* s, int file) {
+    return guarded(s, [&] {
+        const aoe::Dataset* d = s->session.file(file);
+        return (d && d->cache_active()) ? 1 : 0;
+    }, 0);
+}
+
+const char* aoe_cache_path(aoe_session* s, int file) {
+    return guarded(s, [&]() -> const char* {
+        const aoe::Dataset* d = s->session.file(file);
+        if (!d) return empty_string();
+        aoe::LockGuard guard(s->text_lock);
+        s->scratch = d->cache_file();
+        return s->scratch.c_str();
+    }, empty_string());
+}
+
+int aoe_build_cache(aoe_session* s, int file) {
+    // Exclusive: this parses the whole file, replaces the attached sidecar and
+    // drops the columns it pulled in to do so. A reader running alongside would
+    // see the dataset mid-rebuild.
+    return guarded_write(s, [&] {
+        aoe::Dataset* d = s->session.file(file);
+        if (!d) {
+            s->error = "no such file";
+            return 0;
+        }
+        if (!aoe::caching_enabled()) {
+            s->error = "caching is switched off (AOE_CACHE)";
+            return 0;
+        }
+        std::string written;
+        if (!d->write_cache(&written)) {
+            s->error = "could not write a cache for '" + d->path() + "'";
+            return 0;
+        }
+        return 1;
+    }, 0);
+}
+
+int aoe_discard_cache(aoe_session* s, int file) {
+    return guarded_write(s, [&] {
+        aoe::Dataset* d = s->session.file(file);
+        return (d && d->discard_cache()) ? 1 : 0;
+    }, 0);
+}
+
 // ----------------------------------------------------------------- iso
 
 int aoe_iso_values(aoe_session* s, int file, const char* name, float* out, int max) {

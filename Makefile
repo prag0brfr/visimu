@@ -20,6 +20,14 @@ BUILD     = build
 
 ifeq ($(OS),Windows_NT)
     LIBNAME  = aoecore.dll
+    # Windows headers gate every declaration on _WIN32_WINNT, and MinGW-w64's
+    # default for it varies between distributions -- which is why this once
+    # built on one machine and failed on another with no source change.
+    # platform_thread.hpp needs at least 0x0600 (Vista) for SRWLOCK and
+    # SleepConditionVariableSRW; 0x0A00 is Windows 10, which the GUI already
+    # requires through PySide6. core/include/aoe/win32.hpp sets the same value
+    # if the build does not, so a build outside this file still works.
+    CXXFLAGS += -D_WIN32_WINNT=0x0A00
     LDFLAGS += -shared -static -static-libgcc -static-libstdc++
     LDLIBS   =
     EXE      = .exe
@@ -46,6 +54,7 @@ endif
 # "DLL load failed" if they are missing.
 
 SOURCES = core/src/mapped_file.cpp \
+          core/src/cache.cpp \
           core/src/dataset.cpp \
           core/src/formula.cpp \
           core/src/iso.cpp \

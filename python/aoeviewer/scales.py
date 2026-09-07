@@ -73,3 +73,43 @@ def range_to_view(low: float, high: float, log: bool,
     if view_high < view_low:
         view_low, view_high = view_high, view_low
     return (view_low, view_high)
+
+
+# ---------------------------------------------------------------- draw budget
+
+# Points handed to Qt per horizontal pixel, per curve. Two is what a min/max
+# decimation needs to keep every spike: one for the high, one for the low.
+POINTS_PER_PIXEL = 2
+
+# Ceiling on the points handed to Qt for one tile, across every curve. The
+# per-curve budget above is the first limit; this is the second, for the case
+# where the curve *count* is what makes the total unreasonable.
+MAX_TILE_POINTS = 1_500_000
+
+
+def resample_target(width_target: int, curve_count: int, total_points: int) -> int:
+    """How many buckets each curve gets when a tile is re-decimated.
+
+    Two limits, and the answer is the smaller. `width_target` is the per-curve
+    one -- two points per horizontal pixel, which is all a screen can show.
+    MAX_TILE_POINTS is the second, on the total across every curve: a thousand
+    runs of 500 samples is 600 000 points on a 600-pixel tile, and no amount of
+    per-curve fidelity is visible at a thousand curves per pixel column.
+
+    The second limit is a **ceiling, never a floor**, and making that hard to
+    get wrong is why this is a named function rather than three lines inside
+    the redraw. Written as a plain assignment it was neither:
+    `MAX_TILE_POINTS / curves / 2` only falls below a typical width target
+    somewhere past 400 curves, so at 75 -- three files of 25 runs against one
+    parameter, an entirely ordinary comparison -- a budget meant to protect the
+    draw path *raised* the target from 1 800 to 10 000 and pushed 1.5 M points
+    into Qt on every pan instead of 270 k. Decimation itself barely noticed
+    (12 ms against 19 ms); the cost was all in pyqtgraph, and it showed up as a
+    window that would not keep up with the mouse.
+
+    The figure returned is buckets, not points: min/max decimation emits two
+    points per bucket, which is why the budget divides by two.
+    """
+    if curve_count <= 1 or total_points <= MAX_TILE_POINTS:
+        return width_target
+    return min(width_target, max(32, int(MAX_TILE_POINTS / curve_count / 2)))

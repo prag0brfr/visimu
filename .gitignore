@@ -15,6 +15,10 @@ __pycache__/
 # Generated test data. .aoe is the extension the application filters on, so
 # every file holding data to test with uses it.
 *.aoe
+# The binary sidecar written beside a result file. Derived data: rebuilt from
+# the .aoe in seconds, tied to one exact copy of it, and megabytes apiece.
+*.aoec
+*.aoec.*.tmp
 data/
 _archive_/
 

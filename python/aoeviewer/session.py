@@ -510,6 +510,46 @@ class Session:
         """
         return int(lib.aoe_trim_memory(self._handle, c_size_t(max(0, int(keep_bytes)))))
 
+    # --------------------------------------------------------------- cache
+
+    @property
+    def cache_enabled(self) -> bool:
+        """False when the AOE_CACHE environment variable switches caching off."""
+        return bool(lib.aoe_cache_enabled())
+
+    def cache_active(self, file_index: int) -> bool:
+        """True when this file is being served from a matching `.aoec` sidecar.
+
+        A sidecar stores the file's numbers the way the viewer reads them --
+        one parameter's samples for every run laid out together, already
+        float32 -- so opening skips the index scan and loading a column skips
+        the parser entirely.
+        """
+        return bool(lib.aoe_cache_active(self._handle, int(file_index)))
+
+    def cache_path(self, file_index: int) -> str:
+        """Where this file's sidecar lives, or "" when it has none."""
+        raw = lib.aoe_cache_path(self._handle, int(file_index))
+        return raw.decode("utf-8", "replace") if raw else ""
+
+    def build_cache(self, file_index: int) -> bool:
+        """Parse the file once and write its sidecar, so later opens are fast.
+
+        This costs a full parse of the file, so it belongs on a worker thread,
+        not on the one drawing the window. Memory stays bounded to a single
+        parameter across every run however large the file is, so it is safe to
+        call on the files this is actually for.
+
+        Returns False, with `last_error` set, if the file cannot be parsed or
+        nowhere is writable -- solver output on a read-only share is the usual
+        reason, and it is not an error worth showing the user.
+        """
+        return bool(lib.aoe_build_cache(self._handle, int(file_index)))
+
+    def discard_cache(self, file_index: int) -> bool:
+        """Delete this file's sidecar and go back to reading the text."""
+        return bool(lib.aoe_discard_cache(self._handle, int(file_index)))
+
     # ----------------------------------------------------------------- iso
 
     def iso_values(self, file_index: int, name: str) -> np.ndarray:

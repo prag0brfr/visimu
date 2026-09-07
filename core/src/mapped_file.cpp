@@ -2,13 +2,7 @@
 #include "aoe/mapped_file.hpp"
 
 #if defined(_WIN32)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
+#include "aoe/win32.hpp"
 #else
 #include <fcntl.h>
 #include <sys/mman.h>

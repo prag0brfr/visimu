@@ -179,14 +179,22 @@ void summarise(SampleData& block) noexcept {
 
 // ---------------------------------------------------------------- open
 
-bool Dataset::open(const std::string& path) {
-    MappedFile file;
-    if (!file.open(path)) return false;
-    file.advise_sequential();
+void Dataset::finish_open() {
+    // Belt and braces: every later lookup indexes both with the same column
+    // number, so a dialect that surprises the parser must not leave them
+    // ragged.
+    units_.resize(headers_.size());
 
+    header_index_.reserve(headers_.size() * 2);
+    for (std::size_t i = 0; i < headers_.size(); ++i)
+        header_index_.emplace(headers_[i], static_cast<int>(i));
+
+    for (auto& sim : sims_) sim->columns.resize(headers_.size());
+}
+
+bool Dataset::open(const std::string& path) {
     path_ = path;
     mod_time_ = MappedFile::mod_time(path);
-    indexed_size_ = file.size();
 
     if (name_.empty()) {
         std::size_t slash = path.find_last_of("/\\");
@@ -198,21 +206,89 @@ bool Dataset::open(const std::string& path) {
     header_index_.clear();
     sims_.clear();
     values_per_line_ = 0;
+    cache_.reset();
+
+    // A matching sidecar already holds everything build_index() would go and
+    // work out -- the headers, the units, every run's id and byte range -- so
+    // when there is one the file is not scanned at all. This is the larger half
+    // of what the cache buys: on a file with a thousand runs the index scan is
+    // most of the time between choosing a file and seeing it.
+    if (attach_cache()) {
+        const std::size_t columns = cache_->column_count();
+        const std::size_t runs = cache_->simulation_count();
+
+        headers_.reserve(columns);
+        units_.reserve(columns);
+        for (std::size_t c = 0; c < columns; ++c) {
+            headers_.push_back(cache_->column_name(c));
+            units_.push_back(cache_->column_unit(c));
+        }
+
+        sims_.reserve(runs);
+        for (std::size_t s = 0; s < runs; ++s) {
+            auto sim = std::unique_ptr<Simulation>(new Simulation());
+            sim->id = cache_->simulation_id(s);
+            sim->display_name = sim->id;
+            sim->unique_key = name_ + "::" + sim->id + "::" + std::to_string(s);
+            sim->data_begin = static_cast<std::size_t>(cache_->data_begin(s));
+            sim->data_end = static_cast<std::size_t>(cache_->data_end(s));
+            sims_.push_back(std::move(sim));
+        }
+
+        values_per_line_ = cache_->values_per_line();
+        indexed_size_ = static_cast<std::size_t>(fingerprint_.size);
+
+        if (!headers_.empty()) {
+            finish_open();
+            return true;
+        }
+        // A cache with no columns should not have validated; if one somehow
+        // did, fall through and read the file properly rather than presenting
+        // an empty dataset.
+        cache_.reset();
+        headers_.clear();
+        units_.clear();
+        sims_.clear();
+    }
+
+    MappedFile file;
+    if (!file.open(path)) return false;
+    file.advise_sequential();
+    indexed_size_ = file.size();
 
     build_index(file);
 
     if (headers_.empty()) return false;
-    // Belt and braces: every later lookup indexes both with the same column
-    // number, so a dialect that surprises the parser must not leave them
-    // ragged.
-    units_.resize(headers_.size());
-
-    header_index_.reserve(headers_.size() * 2);
-    for (std::size_t i = 0; i < headers_.size(); ++i)
-        header_index_.emplace(headers_[i], static_cast<int>(i));
-
-    for (auto& sim : sims_) sim->columns.resize(headers_.size());
+    finish_open();
     return true;
+}
+
+bool Dataset::attach_cache() {
+    cache_.reset();
+    if (path_.empty() || !caching_enabled()) return false;
+
+    fingerprint_ = fingerprint(path_);
+    if (!fingerprint_.valid()) return false;
+
+    // Nearest first: beside the source, then the per-user directory. The first
+    // that opens *and* matches wins; one that fails to match is simply skipped,
+    // because the other location may hold a current one.
+    for (const std::string& candidate : cache_candidates(path_)) {
+        auto file = std::unique_ptr<CacheFile>(new CacheFile());
+        if (file->open(candidate, fingerprint_)) {
+            cache_ = std::move(file);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool Dataset::discard_cache() {
+    cache_.reset();
+    bool gone = true;
+    for (const std::string& candidate : cache_candidates(path_))
+        if (!remove_file(candidate)) gone = false;
+    return gone;
 }
 
 void Dataset::build_index(const MappedFile& file) {
@@ -410,10 +486,97 @@ void Dataset::parse_range(const char* base, std::size_t begin, std::size_t end_o
     }
 }
 
+bool Dataset::load_from_cache(const std::vector<int>& columns,
+                              const std::vector<int>& sim_indices) {
+    // Checked before anything else is computed, so the parsing path below pays
+    // nothing at all for this call when there is no cache.
+    if (!cache_active()) return false;
+
+    const int num_cols = static_cast<int>(headers_.size());
+    // The sidecar was written from this file's own index, so these agree by
+    // construction. Verified anyway: if they ever did not, indexing the cache
+    // with this file's column numbers would read the wrong channel, and showing
+    // the wrong channel is worse than being slow.
+    if (cache_->column_count() != headers_.size() ||
+        cache_->simulation_count() != sims_.size())
+        return false;
+
+    std::vector<int> sim_list;
+    if (sim_indices.empty()) {
+        sim_list.resize(sims_.size());
+        for (std::size_t i = 0; i < sims_.size(); ++i) sim_list[i] = static_cast<int>(i);
+    } else {
+        sim_list.reserve(sim_indices.size());
+        for (int i : sim_indices)
+            if (i >= 0 && i < static_cast<int>(sims_.size())) sim_list.push_back(i);
+    }
+    if (sim_list.empty()) return true;  // nothing asked for is not a failure
+
+    struct Fill {
+        int sim_index;
+        int column;
+        SampleBlock block;
+    };
+    std::vector<Fill> fills;
+    fills.reserve(sim_list.size() * columns.size());
+
+    for (int si : sim_list) {
+        Simulation& sim = *sims_[static_cast<std::size_t>(si)];
+        LockGuard guard(sim.lock);
+        if (sim.columns.size() < static_cast<std::size_t>(num_cols))
+            sim.columns.resize(static_cast<std::size_t>(num_cols));
+        for (int c : columns) {
+            if (c < 0 || c >= num_cols) continue;
+            if (!sim.columns[static_cast<std::size_t>(c)].loaded)
+                fills.push_back(Fill{si, c, SampleBlock()});
+        }
+    }
+    if (fills.empty()) return true;
+
+    // A copy out of the mapping, spread over the pool. The samples for one
+    // parameter across every run are contiguous on disk, so these reads are
+    // sequential and the page faults overlap rather than queueing.
+    ThreadPool::global().parallel_for(fills.size(), [&](std::size_t i) {
+        Fill& fill = fills[i];
+        const std::size_t column = static_cast<std::size_t>(fill.column);
+        const std::size_t sim = static_cast<std::size_t>(fill.sim_index);
+
+        auto block = std::make_shared<SampleData>();
+        std::size_t count = 0;
+        const float* values = cache_->values(column, sim, &count);
+        if (values && count) block->values.assign(values, values + count);
+
+        // The summary was computed when the sidecar was written, so the pass
+        // that summarise() would make here does not happen at all. On a tile
+        // showing a thousand curves that pass was the whole of the autoscale
+        // cost.
+        if (const CacheBlock* meta = cache_->block(column, sim)) {
+            block->minimum = meta->minimum;
+            block->maximum = meta->maximum;
+            block->has_finite = (meta->flags & kCacheHasFinite) != 0;
+            block->has_gaps = (meta->flags & kCacheHasGaps) != 0;
+            block->monotonic = (meta->flags & kCacheMonotonic) != 0;
+        }
+        fill.block = std::move(block);
+    });
+
+    for (Fill& fill : fills) {
+        Simulation& sim = *sims_[static_cast<std::size_t>(fill.sim_index)];
+        LockGuard guard(sim.lock);
+        Column& dest = sim.columns[static_cast<std::size_t>(fill.column)];
+        dest.block = std::move(fill.block);
+        dest.loaded = true;
+        dest.last_used = next_use_stamp();
+    }
+    return true;
+}
+
 void Dataset::load_columns(const std::vector<int>& columns,
                            const std::vector<int>& sim_indices) {
     const int num_cols = static_cast<int>(headers_.size());
     if (num_cols <= 0 || columns.empty() || sims_.empty()) return;
+
+    if (load_from_cache(columns, sim_indices)) return;
 
     std::vector<int> sim_list;
     if (sim_indices.empty()) {
@@ -686,6 +849,16 @@ float Dataset::first_value(std::size_t sim_index, int column) const {
         }
     }
 
+    // Straight out of the sidecar: one float, no mapping of the source and no
+    // parse. An ISO scan is exactly this call per run.
+    if (cache_active() && cache_->column_count() == headers_.size() &&
+        cache_->simulation_count() == sims_.size()) {
+        std::size_t count = 0;
+        const float* values = cache_->values(static_cast<std::size_t>(column),
+                                             sim_index, &count);
+        return (values && count) ? values[0] : nan_value;
+    }
+
     MappedFile file;
     if (!file.open(path_)) return nan_value;
     return first_value_in(file.begin(), file.size(), sim, column,
@@ -713,6 +886,20 @@ std::vector<float> Dataset::first_values(int column) const {
         }
     }
     if (wanted.empty()) return out;
+
+    // With a sidecar every one of these is the first float of a known block, so
+    // the whole scan is a walk down one contiguous region of the mapping. No
+    // pool, because the work per run is a single load.
+    if (cache_active() && cache_->column_count() == headers_.size() &&
+        cache_->simulation_count() == sims_.size()) {
+        for (std::size_t s : wanted) {
+            std::size_t count = 0;
+            const float* values =
+                cache_->values(static_cast<std::size_t>(column), s, &count);
+            if (values && count) out[s] = values[0];
+        }
+        return out;
+    }
 
     // One mapping for the whole scan, and the per-run reads spread over the
     // pool: each touches a few hundred bytes at a different offset, so they do
@@ -803,6 +990,133 @@ std::size_t Dataset::evict_until(std::size_t keep_bytes) {
         col.loaded = false;
     }
     return total;
+}
+
+bool Dataset::write_cache(std::string* out_path) {
+    if (out_path) out_path->clear();
+    if (headers_.empty() || sims_.empty() || path_.empty()) return false;
+    if (!caching_enabled()) return false;
+
+    // Fingerprint before reading anything, and check it again at the end. A
+    // file rewritten by the solver while we were parsing it would otherwise be
+    // cached as a mixture of before and after -- the one way this could produce
+    // a sidecar that matches its source and still holds numbers that were never
+    // in it together.
+    const SourceFingerprint before = fingerprint(path_);
+    if (!before.valid()) return false;
+
+    // Detach before anything else, for two reasons. Reading through the sidecar
+    // we are about to replace would make this a copy of itself rather than a
+    // fresh parse of the file. And on Windows a mapped file cannot be renamed
+    // over or deleted -- MoveFileEx fails with a sharing violation -- so the
+    // mapping has to be gone before finish() puts the new one in its place.
+    // Nothing is lost by dropping it: on any failure below, attach_cache()
+    // picks up whatever sidecar is still on disk.
+    cache_.reset();
+
+    const std::size_t column_count = headers_.size();
+    const std::size_t sim_count = sims_.size();
+
+    std::vector<std::string> ids;
+    std::vector<std::uint64_t> begins, ends;
+    ids.reserve(sim_count);
+    begins.reserve(sim_count);
+    ends.reserve(sim_count);
+    for (const auto& sim : sims_) {
+        ids.push_back(sim->id);
+        begins.push_back(static_cast<std::uint64_t>(sim->data_begin));
+        ends.push_back(static_cast<std::uint64_t>(sim->data_end));
+    }
+
+    std::vector<std::string> candidates = cache_candidates(path_);
+    if (candidates.empty()) {
+        attach_cache();
+        return false;
+    }
+
+    // Every run of one column, then the next column. Peak memory is therefore
+    // one parameter across every run -- a few megabytes on the files this is
+    // for -- rather than the whole file, which is the point of writing in this
+    // order rather than run by run.
+    std::vector<int> all_sims(sim_count);
+    for (std::size_t s = 0; s < sim_count; ++s) all_sims[s] = static_cast<int>(s);
+
+    std::string written_to;
+
+    for (const std::string& candidate : candidates) {
+        CacheWriter writer;
+        if (!writer.begin(candidate, before, headers_, units_, ids, begins, ends,
+                          values_per_line_))
+            continue;  // unwritable location -- a read-only share, typically
+
+        bool ok = true;
+        for (std::size_t c = 0; c < column_count && ok; ++c) {
+            // Which runs already had this column, so the ones we pull in only
+            // to write them out again can be released afterwards and the user's
+            // warm cache is left as we found it.
+            std::vector<char> was_resident(sim_count, 0);
+            for (std::size_t s = 0; s < sim_count; ++s) {
+                LockGuard guard(sims_[s]->lock);
+                if (sims_[s]->columns.size() > c && sims_[s]->columns[c].loaded)
+                    was_resident[s] = 1;
+            }
+
+            load_columns({static_cast<int>(c)}, all_sims);
+
+            std::vector<CacheSource> runs(sim_count);
+            std::vector<SampleBlock> hold(sim_count);
+            for (std::size_t s = 0; s < sim_count; ++s) {
+                LockGuard guard(sims_[s]->lock);
+                if (sims_[s]->columns.size() <= c) continue;
+                // Keep a reference while writing so an eviction on another
+                // thread cannot free the samples out from under fwrite.
+                hold[s] = sims_[s]->columns[c].block;
+                if (hold[s] && !hold[s]->values.empty()) {
+                    runs[s].values = hold[s]->values.data();
+                    runs[s].count = hold[s]->values.size();
+                }
+            }
+
+            ok = writer.write_column(c, runs);
+
+            for (std::size_t s = 0; s < sim_count; ++s) {
+                if (was_resident[s]) continue;
+                LockGuard guard(sims_[s]->lock);
+                if (sims_[s]->columns.size() <= c) continue;
+                sims_[s]->columns[c].block.reset();
+                sims_[s]->columns[c].loaded = false;
+            }
+        }
+
+        if (!ok) {
+            writer.abort();
+            continue;
+        }
+        if (!writer.finish()) continue;
+
+        written_to = candidate;
+        break;
+    }
+
+    if (written_to.empty()) {
+        attach_cache();
+        return false;
+    }
+
+    // The source has to be the same file it was when the parse began. If it
+    // changed, the sidecar describes a state that never existed; delete it
+    // rather than leave it to be validated against a fingerprint it happens to
+    // carry.
+    const SourceFingerprint after = fingerprint(path_);
+    if (after != before) {
+        remove_file(written_to);
+        attach_cache();
+        return false;
+    }
+
+    if (!attach_cache()) return false;
+    if (out_path) *out_path = cache_->path();
+    return true;
 }
 
 std::size_t Dataset::loaded_row_count(std::size_t sim_index) const {

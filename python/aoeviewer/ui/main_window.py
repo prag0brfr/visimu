@@ -487,6 +487,7 @@ class MainWindow(QMainWindow):
         def work():
             loaded = []
             failures = []
+            cached = 0
             for path in paths:
                 try:
                     handle = self.session.add_file(path)
@@ -494,10 +495,12 @@ class MainWindow(QMainWindow):
                     failures.append("{0}: {1}".format(os.path.basename(path), exc))
                     continue
                 loaded.append((handle.index, handle.simulation_count))
-            return loaded, failures
+                if self._build_cache_for(path, handle.index):
+                    cached += 1
+            return loaded, failures, cached
 
         def done(result):
-            loaded, failures = result
+            loaded, failures, cached = result
             for index, sim_count in loaded:
                 # Select every run of the first file, so something is on screen
                 # immediately rather than an empty grid.
@@ -510,12 +513,74 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(
                     self, "Some files could not be read", "\n".join(failures[:10])
                 )
-            self.status_label.setText(
-                "{0} file(s) loaded, {1} total".format(len(loaded), self.session.file_count)
-            )
+            message = "{0} file(s) loaded, {1} total".format(
+                len(loaded), self.session.file_count)
+            if cached:
+                message += "  (cached {0} for faster reopening)".format(cached)
+            self.status_label.setText(message)
 
-        description = "Opening {0} file(s)...".format(len(paths))
+        # Say what is actually about to happen. The first open of a large file
+        # also writes its sidecar, which is a second full parse -- on three
+        # 550 MB files that is most of the wait, and a progress message reading
+        # "Opening 3 file(s)..." for the whole of it makes a one-off cost look
+        # like the normal speed of opening a file.
+        pending = sum(1 for path in paths if self._cache_would_be_built(path))
+        if pending:
+            description = ("Opening {0} file(s) and building {1} cache(s) — "
+                           "this happens once; later opens are much faster..."
+                           ).format(len(paths), pending)
+        else:
+            description = "Opening {0} file(s)...".format(len(paths))
         self.tasks.submit(description, work, done)
+
+    def _cache_would_be_built(self, path: str) -> bool:
+        """Whether opening `path` will also write a sidecar, near enough.
+
+        A guess, and only ever used to word a progress message. It cannot see a
+        sidecar that lives in the per-user fallback directory, so it errs
+        towards announcing work that turns out to be already done -- which is
+        the harmless direction.
+        """
+        if not self.session.cache_enabled:
+            return False
+        try:
+            if os.path.getsize(path) < self.CACHE_THRESHOLD_BYTES:
+                return False
+        except OSError:
+            return False
+        return not os.path.exists(path + ".aoec")
+
+    # Below this, parsing the file is quick enough that a sidecar would save
+    # nothing measurable and would just leave an extra file beside the results.
+    CACHE_THRESHOLD_BYTES = 8 * 1024 * 1024
+
+    def _build_cache_for(self, path: str, index: int) -> bool:
+        """Write a `.aoec` sidecar for a freshly opened file, if it is worth it.
+
+        Runs on the worker thread, inside the same task that opened the file,
+        which is deliberate: the user is already waiting, and doing it here
+        costs one extra parse *once* rather than locking the window later for a
+        file they may be in the middle of using.
+
+        Every reason to skip is silent. A sidecar is an optimisation the user
+        did not ask for, so failing to write one -- results on a read-only
+        share, a full disk, caching switched off -- is not a problem to report;
+        the file has already opened and works.
+        """
+        if not self.session.cache_enabled:
+            return False
+        # Already served from a cache: this open was the fast path.
+        if self.session.cache_active(index):
+            return False
+        try:
+            if os.path.getsize(path) < self.CACHE_THRESHOLD_BYTES:
+                return False
+        except OSError:
+            return False
+        try:
+            return bool(self.session.build_cache(index))
+        except CoreError:
+            return False
 
     def _check_for_changes(self) -> None:
         if self._suppress_reload_prompt:
@@ -903,9 +968,11 @@ class MainWindow(QMainWindow):
             missing = []
             for file_path in data.get("files", []):
                 try:
-                    self.session.add_file(file_path)
+                    handle = self.session.add_file(file_path)
                 except CoreError:
                     missing.append(file_path)
+                    continue
+                self._build_cache_for(file_path, handle.index)
 
             for name, expression in data.get("computed", {}).items():
                 try:

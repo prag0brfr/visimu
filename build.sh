@@ -84,6 +84,7 @@ case "$(uname -s)" in
 esac
 
 SOURCES="core/src/mapped_file.cpp \
+         core/src/cache.cpp \
          core/src/dataset.cpp \
          core/src/formula.cpp \
          core/src/iso.cpp \

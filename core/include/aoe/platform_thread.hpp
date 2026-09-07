@@ -19,13 +19,11 @@
 #include <cstddef>
 
 #if defined(_WIN32)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
+// Brings in <windows.h> with _WIN32_WINNT set. The SRWLOCK and
+// CONDITION_VARIABLE types below are declared only when it is at least 0x0600,
+// so including <windows.h> directly here makes this file's errors depend on
+// whatever default the toolchain happens to carry.
+#include "aoe/win32.hpp"
 #else
 #include <pthread.h>
 #include <unistd.h>

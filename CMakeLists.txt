@@ -26,8 +26,28 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
+if(WIN32)
+    # Windows headers gate every declaration on _WIN32_WINNT, and MinGW-w64's
+    # default for it varies between distributions -- which is why the core once
+    # built on one machine and failed on another with no source change, on
+    # errors like "'SRWLOCK' does not name a type" from platform_thread.hpp.
+    #
+    # 0x0600 (Vista) is the real floor: SRWLOCK, AcquireSRWLockShared and
+    # SleepConditionVariableSRW all arrived there. 0x0A00 is Windows 10, which
+    # the GUI already requires through PySide6.
+    #
+    # Directory scope rather than per target, because the tests and the
+    # benchmark compile the core sources themselves rather than linking the
+    # library, so a definition on aoecore alone would miss them.
+    #
+    # core/include/aoe/win32.hpp sets the same value when a build does not, so
+    # this is insurance, not the only line of defence.
+    add_compile_definitions(_WIN32_WINNT=0x0A00)
+endif()
+
 set(AOE_SOURCES
     core/src/mapped_file.cpp
+    core/src/cache.cpp
     core/src/dataset.cpp
     core/src/formula.cpp
     core/src/iso.cpp

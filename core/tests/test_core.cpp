@@ -2,6 +2,8 @@
 // Self-contained C++ tests for the core. No framework needed, so this builds
 // with nothing but the compiler that is already on the target machine.
 
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -10,6 +12,15 @@
 #include <string>
 #include <vector>
 
+#if defined(_WIN32)
+#include <direct.h>
+#else
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+#endif
+
+#include "aoe/cache.hpp"
 #include "aoe/decimate.hpp"
 #include "aoe/thread_pool.hpp"
 #include "aoe/fast_parse.hpp"
@@ -849,9 +860,12 @@ void test_concurrent_access(const std::string& path) {
     struct Shared {
         aoe_session* session;
         std::string path;
-        volatile bool stop;
-        int reads;
-    } shared{session, path, false, 0};
+        std::atomic<bool> stop;
+        // Both readers bump this. Plain int here is a data race in its own
+        // right, and one a sanitiser reports on every run -- which is exactly
+        // how a real race in the code under test gets lost in the noise.
+        std::atomic<int> reads;
+    } shared{session, path, {false}, {0}};
 
     auto reader = [](void* arg) {
         Shared* state = static_cast<Shared*>(arg);
@@ -869,7 +883,7 @@ void test_concurrent_access(const std::string& path) {
             }
             aoe_param_count(state->session);
             aoe_resident_bytes(state->session);
-            ++state->reads;
+            state->reads.fetch_add(1, std::memory_order_relaxed);
         }
     };
 
@@ -888,7 +902,7 @@ void test_concurrent_access(const std::string& path) {
     a.join();
     b.join();
 
-    CHECK(shared.reads > 0);
+    CHECK(shared.reads.load() > 0);
     CHECK(aoe_file_count(session) >= 1);
     aoe_session_destroy(session);
 }
@@ -996,6 +1010,721 @@ void test_formula_extensions(const std::string& path) {
     }
 }
 
+// ------------------------------------------------------------- cache
+//
+// The sidecar is the one part of the core that can be *wrong* rather than
+// merely slow: if it is served when it should not be, the user sees numbers
+// that are not in their file any more. So these tests spend most of their
+// effort on the staleness check, and treat the speed as the easy part.
+
+// Everything one Dataset knows about its samples, flattened, so the parsed and
+// the cached routes can be compared in one shot rather than field by field.
+struct Snapshot {
+    std::vector<std::string> headers;
+    std::vector<std::string> units;
+    std::vector<std::string> ids;
+    // [sim][column] -> values, and the summary that came with them
+    std::vector<std::vector<std::vector<float>>> values;
+    std::vector<std::vector<float>> minima;
+    std::vector<std::vector<float>> maxima;
+    std::vector<std::vector<int>> flags;  // finite | gaps<<1 | monotonic<<2
+};
+
+Snapshot snapshot_of(aoe::Dataset& d) {
+    Snapshot snap;
+    snap.headers = d.headers();
+    snap.units = d.units();
+
+    const std::size_t sims = d.simulation_count();
+    const std::size_t cols = d.column_count();
+    snap.ids.resize(sims);
+    snap.values.resize(sims);
+    snap.minima.resize(sims);
+    snap.maxima.resize(sims);
+    snap.flags.resize(sims);
+
+    for (std::size_t s = 0; s < sims; ++s) {
+        snap.ids[s] = d.simulation(s).id;
+        snap.values[s].resize(cols);
+        snap.minima[s].assign(cols, 0.0f);
+        snap.maxima[s].assign(cols, 0.0f);
+        snap.flags[s].assign(cols, 0);
+        for (std::size_t c = 0; c < cols; ++c) {
+            aoe::SampleBlock block = d.column_block(s, static_cast<int>(c));
+            if (!block) continue;
+            snap.values[s][c] = block->values;
+            snap.minima[s][c] = block->minimum;
+            snap.maxima[s][c] = block->maximum;
+            snap.flags[s][c] = (block->has_finite ? 1 : 0) | (block->has_gaps ? 2 : 0) |
+                               (block->monotonic ? 4 : 0);
+        }
+    }
+    return snap;
+}
+
+bool snapshots_match(const Snapshot& a, const Snapshot& b, std::string* why) {
+    const auto fail = [why](const std::string& message) {
+        if (why) *why = message;
+        return false;
+    };
+    if (a.headers != b.headers) return fail("headers differ");
+    if (a.units != b.units) return fail("units differ");
+    if (a.ids != b.ids) return fail("simulation ids differ");
+    if (a.values.size() != b.values.size()) return fail("simulation count differs");
+
+    for (std::size_t s = 0; s < a.values.size(); ++s) {
+        if (a.values[s].size() != b.values[s].size())
+            return fail("column count differs for run " + std::to_string(s));
+        for (std::size_t c = 0; c < a.values[s].size(); ++c) {
+            if (a.values[s][c].size() != b.values[s][c].size())
+                return fail("sample count differs at run " + std::to_string(s) +
+                            " column " + std::to_string(c));
+            // Bit-for-bit. The cache stores the very floats the parser produced,
+            // so anything less exact would hide a real defect.
+            for (std::size_t i = 0; i < a.values[s][c].size(); ++i) {
+                if (std::memcmp(&a.values[s][c][i], &b.values[s][c][i], sizeof(float)) != 0)
+                    return fail("sample differs at run " + std::to_string(s) +
+                                " column " + std::to_string(c) + " index " +
+                                std::to_string(i));
+            }
+            if (a.minima[s][c] != b.minima[s][c] || a.maxima[s][c] != b.maxima[s][c])
+                return fail("summary range differs at run " + std::to_string(s) +
+                            " column " + std::to_string(c));
+            if (a.flags[s][c] != b.flags[s][c])
+                return fail("summary flags differ at run " + std::to_string(s) +
+                            " column " + std::to_string(c));
+        }
+    }
+    return true;
+}
+
+// Reads a whole file into memory. Used to put one back exactly as it was.
+std::string slurp(const std::string& path) {
+    std::FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) return std::string();
+    std::string out;
+    char buffer[65536];
+    std::size_t got = 0;
+    while ((got = std::fread(buffer, 1, sizeof(buffer), f)) > 0) out.append(buffer, got);
+    std::fclose(f);
+    return out;
+}
+
+bool spit(const std::string& path, const std::string& content) {
+    std::FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) return false;
+    const bool ok = std::fwrite(content.data(), 1, content.size(), f) == content.size();
+    std::fclose(f);
+    return ok;
+}
+
+std::string cache_of(const std::string& source) { return source + ".aoec"; }
+
+void test_cache_round_trip(const std::string& path) {
+    section("cache: a cached read is the parsed read");
+
+    std::remove(cache_of(path).c_str());
+
+    Snapshot parsed;
+    {
+        aoe::Dataset d;
+        CHECK(d.open(path));
+        CHECK(!d.cache_active());  // nothing written yet
+        parsed = snapshot_of(d);
+
+        std::string written;
+        CHECK(d.write_cache(&written));
+        CHECK(!written.empty());
+        // Writing one attaches it, so the same object is now serving from disk.
+        CHECK(d.cache_active());
+    }
+
+    // A fresh object, which is what the next run of the program will be.
+    aoe::Dataset cached;
+    CHECK(cached.open(path));
+    CHECK(cached.cache_active());
+
+    std::string why;
+    const Snapshot from_cache = snapshot_of(cached);
+    const bool same = snapshots_match(parsed, from_cache, &why);
+    CHECK(same);
+    if (!same) std::printf("  ...%s\n", why.c_str());
+
+    // The cheap reads have their own paths through the cache, so check them
+    // separately rather than trusting that column_block() covering them.
+    aoe::Dataset plain;
+    std::remove(cache_of(path).c_str());
+    CHECK(plain.open(path));
+    CHECK(!plain.cache_active());
+
+    for (int c = 0; c < static_cast<int>(plain.column_count()); ++c) {
+        const std::vector<float> a = plain.first_values(c);
+        const std::vector<float> b = cached.first_values(c);
+        CHECK(a.size() == b.size());
+        for (std::size_t i = 0; i < a.size() && i < b.size(); ++i)
+            CHECK(std::memcmp(&a[i], &b[i], sizeof(float)) == 0);
+    }
+    // first_value() reads a single run and takes a different branch again.
+    {
+        aoe::Dataset one;
+        CHECK(one.open(path));
+        CHECK(one.cache_active() == false);
+    }
+    aoe::Dataset fresh_cached;
+    // Rebuild so the single-value path has something to read.
+    {
+        aoe::Dataset builder;
+        CHECK(builder.open(path));
+        CHECK(builder.write_cache(nullptr));
+    }
+    CHECK(fresh_cached.open(path));
+    CHECK(fresh_cached.cache_active());
+    for (std::size_t s = 0; s < plain.simulation_count(); ++s) {
+        for (int c = 0; c < static_cast<int>(plain.column_count()); ++c) {
+            const float a = plain.first_value(s, c);
+            const float b = fresh_cached.first_value(s, c);
+            CHECK(std::memcmp(&a, &b, sizeof(float)) == 0);
+        }
+    }
+
+    std::remove(cache_of(path).c_str());
+}
+
+void test_cache_detects_edits(const std::string& source) {
+    section("cache: a file that changed is not served from cache");
+
+    const std::string path = source + ".edit.aoe";
+    const std::string original = slurp(source);
+    CHECK(!original.empty());
+    CHECK(spit(path, original));
+
+    {
+        aoe::Dataset d;
+        CHECK(d.open(path));
+        CHECK(d.write_cache(nullptr));
+        CHECK(d.cache_active());
+    }
+    CHECK(aoe::MappedFile::exists(cache_of(path)));
+
+    // 1. Content changed, length unchanged. The modification time moves too, so
+    //    this is caught twice over; the same-length case is here because it is
+    //    the one a size check alone would miss.
+    {
+        std::string edited = original;
+        const std::size_t at = edited.size() / 2;
+        // Find a digit to bump, so the file stays parseable and the difference
+        // is a real change of value rather than a corrupt line.
+        std::size_t i = at;
+        while (i < edited.size() && !(edited[i] >= '0' && edited[i] <= '8')) ++i;
+        CHECK(i < edited.size());
+        if (i < edited.size()) edited[i] = static_cast<char>(edited[i] + 1);
+        CHECK(edited.size() == original.size());
+        CHECK(spit(path, edited));
+
+        aoe::Dataset d;
+        CHECK(d.open(path));
+        CHECK(!d.cache_active());  // the stale sidecar must be refused
+    }
+
+    // 2. Length changed by an append, which is how a running solver grows its
+    //    output.
+    CHECK(spit(path, original));
+    {
+        aoe::Dataset d;
+        CHECK(d.open(path));
+        CHECK(d.write_cache(nullptr));
+    }
+    {
+        std::string longer = original + "*TABLEAU : SIM_EXTRA\n 0.0 0.0 0.0 0.0\n*FIN\n";
+        CHECK(spit(path, longer));
+        aoe::Dataset d;
+        CHECK(d.open(path));
+        CHECK(!d.cache_active());
+    }
+
+    // 3. Identical bytes, different modification time. Restoring a file from
+    //    backup does this. The cache is still refused: the check is deliberately
+    //    strict in the direction that only ever costs a rebuild.
+    CHECK(spit(path, original));
+    {
+        aoe::Dataset d;
+        CHECK(d.open(path));
+        CHECK(d.write_cache(nullptr));
+        CHECK(d.cache_active());
+    }
+    {
+        const std::uint64_t before = aoe::MappedFile::mod_time(path);
+        CHECK(spit(path, original));  // same bytes, written again
+        const std::uint64_t after = aoe::MappedFile::mod_time(path);
+
+        aoe::Dataset d;
+        CHECK(d.open(path));
+        if (after != before) {
+            CHECK(!d.cache_active());
+        } else {
+            // A filesystem too coarse to notice. The content hash agrees and
+            // the length agrees, so serving the cache here is correct.
+            CHECK(d.cache_active());
+        }
+    }
+
+    // 4. The source disappearing takes the cache with it, rather than leaving a
+    //    dataset that opens from a sidecar for a file that is not there.
+    {
+        aoe::Dataset d;
+        CHECK(d.open(path));
+        CHECK(d.write_cache(nullptr));
+    }
+    std::remove(path.c_str());
+    {
+        aoe::Dataset d;
+        CHECK(!d.open(path));
+    }
+
+    std::remove(cache_of(path).c_str());
+    std::remove(path.c_str());
+}
+
+void test_cache_rejects_damage(const std::string& source) {
+    section("cache: a damaged sidecar is refused, not read");
+
+    const std::string path = source + ".damage.aoe";
+    CHECK(spit(path, slurp(source)));
+
+    const std::string cache = cache_of(path);
+    const auto rebuild = [&] {
+        std::remove(cache.c_str());
+        aoe::Dataset d;
+        return d.open(path) && d.write_cache(nullptr);
+    };
+
+    CHECK(rebuild());
+    const std::string good = slurp(cache);
+    CHECK(good.size() > 256);
+
+    // A cache that opens is one whose every offset has been proved to lie
+    // inside it, so each of these has to be rejected at open() rather than
+    // read past the end later.
+    struct Case {
+        const char* what;
+        std::size_t at;
+        unsigned char to;
+    };
+    const Case cases[] = {
+        {"magic", 0, 'X'},
+        {"format version", 8, 0xFE},
+        {"byte order mark", 12, 0xFE},
+        {"recorded source length", 16, 0x7F},
+        {"recorded content hash", 32, 0x7F},
+        {"column count", 40, 0xFF},
+        {"a section offset", 48, 0xFF},
+        {"the recorded total length", 96, 0xFF},
+        {"the header's own hash", 112, 0xFF},
+    };
+
+    for (const Case& c : cases) {
+        std::string damaged = good;
+        CHECK(c.at < damaged.size());
+        damaged[c.at] = static_cast<char>(damaged[c.at] ^ c.to);
+        CHECK(spit(cache, damaged));
+
+        aoe::Dataset d;
+        const bool opened = d.open(path);
+        CHECK(opened);  // the source is still fine, so this must still work
+        if (d.cache_active())
+            std::printf("  FAIL damaged %s was accepted\n", c.what);
+        CHECK(!d.cache_active());
+    }
+
+    // Truncation, which is what a full disk leaves behind. Half a header and
+    // most of a file are both covered.
+    for (std::size_t keep : {std::size_t{0}, std::size_t{64}, std::size_t{200},
+                             good.size() / 2, good.size() - 1}) {
+        CHECK(spit(cache, good.substr(0, keep)));
+        aoe::Dataset d;
+        CHECK(d.open(path));
+        CHECK(!d.cache_active());
+    }
+
+    // And the intact one still works, so the tests above are rejecting the
+    // damage rather than rejecting everything.
+    CHECK(spit(cache, good));
+    {
+        aoe::Dataset d;
+        CHECK(d.open(path));
+        CHECK(d.cache_active());
+    }
+
+    std::remove(cache.c_str());
+    std::remove(path.c_str());
+}
+
+void test_cache_large_file_fingerprint() {
+    section("cache: a file too large to hash whole is still checked");
+
+    // Over the 4 MiB threshold, so the fingerprint samples windows rather than
+    // reading everything. The windows are what this exercises.
+    const std::string path = "./aoe_test_big.aoe";
+    CHECK(aoe_test::write_sample(path, 8, 22000, false));
+
+    const std::string original = slurp(path);
+    CHECK(original.size() > (4u << 20));
+
+    {
+        aoe::Dataset d;
+        CHECK(d.open(path));
+        CHECK(d.write_cache(nullptr));
+        CHECK(d.cache_active());
+    }
+    {
+        aoe::Dataset d;
+        CHECK(d.open(path));
+        CHECK(d.cache_active());
+    }
+
+    // A change in the first window: a rewritten header is the common case and
+    // the first window always starts at byte zero.
+    {
+        std::string edited = original;
+        edited[edited.find("ALPHA")] = 'B';
+        CHECK(edited.size() == original.size());
+        CHECK(spit(path, edited));
+        aoe::Dataset d;
+        CHECK(d.open(path));
+        CHECK(!d.cache_active());
+    }
+
+    // A change in the last window: an appended or rewritten tail. The last
+    // window is anchored to the end of the file for exactly this.
+    CHECK(spit(path, original));
+    {
+        aoe::Dataset d;
+        CHECK(d.open(path));
+        CHECK(d.write_cache(nullptr));
+    }
+    {
+        std::string edited = original;
+        const std::size_t at = edited.size() - 2048;
+        std::size_t i = at;
+        while (i < edited.size() && !(edited[i] >= '0' && edited[i] <= '8')) ++i;
+        CHECK(i < edited.size());
+        if (i < edited.size()) edited[i] = static_cast<char>(edited[i] + 1);
+        CHECK(spit(path, edited));
+        aoe::Dataset d;
+        CHECK(d.open(path));
+        CHECK(!d.cache_active());
+    }
+
+    std::remove(cache_of(path).c_str());
+    std::remove(path.c_str());
+}
+
+void test_cache_through_the_session(const std::string& source) {
+    section("cache: formulas and ISO agree across both routes");
+
+    const std::string path = source + ".session.aoe";
+    CHECK(spit(path, slurp(source)));
+    std::remove(cache_of(path).c_str());
+
+    std::vector<float> parsed_iso, cached_iso;
+    std::vector<float> parsed_formula, cached_formula;
+
+    for (int pass = 0; pass < 2; ++pass) {
+        aoe::Session session;
+        const int file = session.add_file(path);
+        CHECK(file >= 0);
+
+        aoe::Dataset* d = session.file(file);
+        CHECK(d != nullptr);
+        if (!d) break;
+        CHECK(d->cache_active() == (pass == 1));
+
+        std::string error;
+        CHECK(session.set_computed("DRAG", "ALPHA * 2 + NZ", &error));
+
+        std::vector<float>& iso = (pass == 0) ? parsed_iso : cached_iso;
+        iso = session.iso_values(file, "MACH");
+
+        std::vector<float>& formula = (pass == 0) ? parsed_formula : cached_formula;
+        std::size_t count = 0;
+        const float* values = session.channel(file, 0, "DRAG", &count);
+        CHECK(values != nullptr);
+        if (values) formula.assign(values, values + count);
+
+        if (pass == 0) CHECK(d->write_cache(nullptr));
+    }
+
+    CHECK(parsed_iso == cached_iso);
+    CHECK(parsed_formula.size() == cached_formula.size());
+    CHECK(!parsed_formula.empty());
+    for (std::size_t i = 0; i < parsed_formula.size() && i < cached_formula.size(); ++i)
+        CHECK(std::memcmp(&parsed_formula[i], &cached_formula[i], sizeof(float)) == 0);
+
+    std::remove(cache_of(path).c_str());
+    std::remove(path.c_str());
+}
+
+void test_cache_survives_reload_and_threads(const std::string& source) {
+    section("cache: reload re-checks it, and many threads may read it at once");
+
+    const std::string path = source + ".reload.aoe";
+    CHECK(spit(path, slurp(source)));
+    std::remove(cache_of(path).c_str());
+
+    aoe::Dataset d;
+    CHECK(d.open(path));
+    CHECK(d.write_cache(nullptr));
+    CHECK(d.cache_active());
+
+    // Reload with the file unchanged: the sidecar still matches, so it stays.
+    CHECK(d.reload());
+    CHECK(d.cache_active());
+
+    // Every column of every run, pulled from the sidecar by the whole pool at
+    // once. The mapping is shared and read-only, so this is only unsafe if the
+    // load path is doing something to it that it should not be.
+    const std::size_t sims = d.simulation_count();
+    const std::size_t cols = d.column_count();
+    std::vector<double> sums(sims * cols, 0.0);
+    aoe::ThreadPool::global().parallel_for(sims * cols, [&](std::size_t i) {
+        const std::size_t s = i / cols;
+        const int c = static_cast<int>(i % cols);
+        std::size_t n = 0;
+        aoe::SampleBlock block;
+        const float* v = d.column_data(s, c, &n, &block);
+        double total = 0.0;
+        for (std::size_t k = 0; k < n; ++k) total += v[k];
+        sums[i] = total;
+    });
+
+    // The same figures read one at a time, with no cache at all.
+    CHECK(d.discard_cache());
+    aoe::Dataset plain;
+    CHECK(plain.open(path));
+    CHECK(!plain.cache_active());
+    for (std::size_t s = 0; s < sims; ++s) {
+        for (std::size_t c = 0; c < cols; ++c) {
+            std::size_t n = 0;
+            const float* v = plain.column_data(s, static_cast<int>(c), &n);
+            double total = 0.0;
+            for (std::size_t k = 0; k < n; ++k) total += v[k];
+            CHECK(total == sums[s * cols + c]);
+        }
+    }
+
+    // Now the file changes underneath a dataset that is holding a cache, and
+    // reload() has to notice. This is the sequence the file watcher drives.
+    {
+        aoe::Dataset live;
+        CHECK(live.open(path));
+        CHECK(live.write_cache(nullptr));
+        CHECK(live.cache_active());
+
+        std::string longer = slurp(path);
+        longer += "*TABLEAU : SIM_LATE\n 9.0 9.0 9.0 9.0\n*FIN\n";
+        CHECK(spit(path, longer));
+
+        CHECK(live.changed_on_disk());
+        CHECK(live.reload());
+        CHECK(!live.cache_active());  // the sidecar describes the old file
+    }
+
+    std::remove(cache_of(path).c_str());
+    std::remove(path.c_str());
+}
+
+// Points the fallback cache location somewhere the test owns, rather than at
+// the developer's real cache directory.
+//
+// SetEnvironmentVariable rather than _putenv_s on Windows, for two reasons.
+// cache.cpp reads the variable with GetEnvironmentVariableW, so this writes to
+// exactly the store that will be read -- the CRT keeps its own copy, and the
+// two are only kept in step by the CRT's own setters. And _putenv_s needs
+// __MSVCRT_VERSION__ >= 0x0800, which is not something to depend on in a test
+// that has to build with whatever MinGW-w64 the target machine happens to
+// carry. SetEnvironmentVariableA has been in kernel32 since NT 3.1.
+bool set_environment(const char* name, const char* value) {
+#if defined(_WIN32)
+    return ::SetEnvironmentVariableA(name, value) != 0;
+#else
+    return ::setenv(name, value, 1) == 0;
+#endif
+}
+
+void test_cache_falls_back_to_the_user_directory(const std::string& source) {
+    section("cache: an unwritable results directory falls back to the user's");
+
+    // Solver output routinely lives on a read-only share, which is the whole
+    // reason for a second candidate location. Reproduced here without needing
+    // a read-only filesystem: a *directory* sitting where the sidecar would go
+    // means the rename onto it cannot succeed, so the writer moves on exactly
+    // as it would if the share refused the write.
+    const std::string path = source + ".fallback.aoe";
+    CHECK(spit(path, slurp(source)));
+
+    const std::string blocked = cache_of(path);
+    std::remove(blocked.c_str());
+#if defined(_WIN32)
+    const bool made = ::_mkdir(blocked.c_str()) == 0;
+#else
+    const bool made = ::mkdir(blocked.c_str(), 0755) == 0;
+#endif
+    CHECK(made);
+
+    const std::string fallback_dir = "./aoe_test_cachedir";
+    CHECK(set_environment("AOE_CACHE_DIR", fallback_dir.c_str()));
+    CHECK(aoe::user_cache_directory() == fallback_dir);
+
+    // The second candidate is named from a hash of the source's full path, so
+    // ask for it rather than guessing.
+    const std::vector<std::string> candidates = aoe::cache_candidates(path);
+    CHECK(candidates.size() == 2);
+    if (candidates.size() == 2) {
+        CHECK(candidates[0] == blocked);
+        // The directory does not exist yet: begin() has to create it.
+        CHECK(!aoe::MappedFile::exists(candidates[1]));
+
+        aoe::Dataset d;
+        CHECK(d.open(path));
+        CHECK(d.write_cache(nullptr));
+        CHECK(d.cache_active());
+        CHECK(d.cache_file() == candidates[1]);
+        CHECK(aoe::MappedFile::exists(candidates[1]));
+
+        // And a fresh open finds it there, having tried and failed at the
+        // first location.
+        aoe::Dataset again;
+        CHECK(again.open(path));
+        CHECK(again.cache_active());
+        CHECK(again.cache_file() == candidates[1]);
+
+        // discard_cache() clears both locations, not just the attached one.
+        CHECK(again.discard_cache());
+        CHECK(!aoe::MappedFile::exists(candidates[1]));
+    }
+
+    CHECK(set_environment("AOE_CACHE_DIR", ""));
+#if defined(_WIN32)
+    ::_rmdir(blocked.c_str());
+    ::_rmdir(fallback_dir.c_str());
+#else
+    ::rmdir(blocked.c_str());
+    ::rmdir(fallback_dir.c_str());
+#endif
+    std::remove(path.c_str());
+}
+
+void test_cache_is_faster() {
+    section("cache: opening and reading is materially faster");
+
+    const std::string path = "./aoe_test_speed.aoe";
+    CHECK(aoe_test::write_sample(path, 120, 2000, false));
+    std::remove(cache_of(path).c_str());
+
+    const auto read_everything = [&](aoe::Dataset& d) {
+        double sum = 0.0;
+        for (std::size_t s = 0; s < d.simulation_count(); ++s)
+            for (int c = 0; c < static_cast<int>(d.column_count()); ++c) {
+                std::size_t n = 0;
+                const float* v = d.column_data(s, c, &n);
+                if (v && n) sum += v[n / 2];
+            }
+        return sum;
+    };
+
+    double parsed_sum = 0.0, cached_sum = 0.0;
+    double parsed_seconds = 0.0, cached_seconds = 0.0;
+
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        aoe::Dataset d;
+        CHECK(d.open(path));
+        parsed_sum = read_everything(d);
+        parsed_seconds = std::chrono::duration<double>(
+                             std::chrono::steady_clock::now() - t0).count();
+        CHECK(d.write_cache(nullptr));
+    }
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        aoe::Dataset d;
+        CHECK(d.open(path));
+        CHECK(d.cache_active());
+        cached_sum = read_everything(d);
+        cached_seconds = std::chrono::duration<double>(
+                             std::chrono::steady_clock::now() - t0).count();
+    }
+
+    CHECK(parsed_sum == cached_sum);
+    std::printf("  parsed %.1f ms, cached %.1f ms  (%.1fx)\n", parsed_seconds * 1e3,
+                cached_seconds * 1e3,
+                cached_seconds > 0 ? parsed_seconds / cached_seconds : 0.0);
+
+    // Deliberately a loose bound. The point of the check is to catch the cache
+    // silently not being used at all -- a tight one would fail on a loaded
+    // build machine and teach everyone to ignore it.
+    CHECK(cached_seconds < parsed_seconds);
+
+    std::remove(cache_of(path).c_str());
+    std::remove(path.c_str());
+}
+
+void test_cache_units_and_wrapped_records(const std::string& indexed,
+                                          const std::string& wrapped) {
+    section("cache: units and wrapped records survive the round trip");
+
+    // The indexed dialect is the only one that declares units, and units live
+    // in the sidecar's string table rather than being re-derived.
+    for (const std::string& source : {indexed, wrapped}) {
+        const std::string path = source + ".rt.aoe";
+        CHECK(spit(path, slurp(source)));
+        std::remove(cache_of(path).c_str());
+
+        Snapshot parsed;
+        {
+            aoe::Dataset d;
+            CHECK(d.open(path));
+            parsed = snapshot_of(d);
+            CHECK(d.write_cache(nullptr));
+        }
+        aoe::Dataset d;
+        CHECK(d.open(path));
+        CHECK(d.cache_active());
+
+        std::string why;
+        const bool same = snapshots_match(parsed, snapshot_of(d), &why);
+        CHECK(same);
+        if (!same) std::printf("  ...%s in %s\n", why.c_str(), source.c_str());
+
+        std::remove(cache_of(path).c_str());
+        std::remove(path.c_str());
+    }
+}
+
+void test_cache_discard(const std::string& source) {
+    section("cache: discarding removes the sidecar and falls back to parsing");
+
+    const std::string path = source + ".discard.aoe";
+    CHECK(spit(path, slurp(source)));
+
+    aoe::Dataset d;
+    CHECK(d.open(path));
+    CHECK(d.write_cache(nullptr));
+    CHECK(d.cache_active());
+    CHECK(aoe::MappedFile::exists(cache_of(path)));
+
+    CHECK(d.discard_cache());
+    CHECK(!d.cache_active());
+    CHECK(!aoe::MappedFile::exists(cache_of(path)));
+
+    // Still fully usable with no cache: this is the fallback every path has.
+    std::size_t count = 0;
+    const float* values = d.column_data(0, 0, &count);
+    CHECK(values != nullptr);
+    CHECK(count > 0);
+
+    std::remove(path.c_str());
+}
+
 int main() {
     const std::string dir = ".";
     const std::string plain = dir + "/aoe_test_plain.aoe";
@@ -1030,6 +1759,16 @@ int main() {
     test_truncated_file(plain);
     test_concurrent_access(plain);
     test_formula_extensions(plain);
+    test_cache_round_trip(plain);
+    test_cache_units_and_wrapped_records(indexed, wrapped);
+    test_cache_detects_edits(plain);
+    test_cache_rejects_damage(plain);
+    test_cache_large_file_fingerprint();
+    test_cache_through_the_session(plain);
+    test_cache_discard(plain);
+    test_cache_survives_reload_and_threads(plain);
+    test_cache_falls_back_to_the_user_directory(plain);
+    test_cache_is_faster();
 
     std::remove(plain.c_str());
     std::remove(wrapped.c_str());
