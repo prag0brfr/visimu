@@ -21,7 +21,9 @@ from __future__ import annotations
 import math
 from typing import Optional, Tuple
 
-__all__ = ["to_view", "from_view", "range_to_view", "MAX_EXPONENT"]
+__all__ = ["to_view", "from_view", "range_to_view", "resample_key",
+           "resample_target", "MAX_EXPONENT", "MAX_TILE_POINTS",
+           "POINTS_PER_PIXEL"]
 
 # Past this the exponent overflows a float, and no plot has anything to say
 # about 10^400 anyway.
@@ -113,3 +115,45 @@ def resample_target(width_target: int, curve_count: int, total_points: int) -> i
     if curve_count <= 1 or total_points <= MAX_TILE_POINTS:
         return width_target
     return min(width_target, max(32, int(MAX_TILE_POINTS / curve_count / 2)))
+
+
+def significant(value: float, digits: int = 12) -> float:
+    """`value` rounded to `digits` significant figures.
+
+    A view range read back from a plot wobbles in the last bits of a double as
+    the mouse moves, so comparing raw floats calls every mouse move a new view.
+    Twelve figures is far finer than any zoom a person performs and far coarser
+    than that noise.
+    """
+    if value == 0.0 or not math.isfinite(value):
+        return 0.0
+    factor = 10.0 ** (digits - 1 - math.floor(math.log10(abs(value))))
+    return round(value * factor) / factor
+
+
+def resample_key(x_range: Optional[Tuple[float, float]], target: int,
+                 log: bool) -> tuple:
+    """What a tile's drawn points were computed for.
+
+    Two redraws with equal keys would produce the same points, so the second
+    can be skipped -- which is what makes restyling a curve, dragging a marker
+    or returning to a page cost nothing.
+
+    Both halves of the answer are needed, and getting that wrong is easy. The
+    position is quantised to the bucket width, because a difference smaller than
+    one bucket cannot move a drawn point. But the span has to be carried
+    separately and in absolute terms: quantising *only* the endpoints hides
+    every zoom whose lower edge scales with its width -- a range of 0..1 and a
+    range of 0..0.25 both come out as bucket -82, because the bucket shrank by
+    exactly the factor the edge did. Zooming in around the origin then kept
+    whatever resolution the curve already had, and no amount of zooming got any
+    more of it.
+    """
+    if x_range is None:
+        return (None, None, int(target), bool(log))
+    low, high = float(x_range[0]), float(x_range[1])
+    span = high - low
+    if not (span > 0.0) or not math.isfinite(span) or not math.isfinite(low):
+        return (None, None, int(target), bool(log))
+    bucket = span / max(1, int(target))
+    return (round(low / bucket), significant(span), int(target), bool(log))

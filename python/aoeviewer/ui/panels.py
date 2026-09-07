@@ -1114,12 +1114,22 @@ class StylePanel(QWidget):
     """
 
     style_changed = Signal()
+    # How many tiles "Apply legend to all tiles" actually changed. Emitted even
+    # when that is zero: a button that does nothing visible has to say so, or it
+    # reads as broken.
+    legend_applied = Signal(int)
 
     def __init__(self, session: Session, state: AppState, parent=None):
         super().__init__(parent)
         self._session = session
         self._state = state
         self._updating = False
+        # What the curve table currently shows, so a refresh that would produce
+        # the same rows can return without touching a widget, and which key
+        # each row edits, because the row widgets outlive their keys. See
+        # _rebuild_table().
+        self._table_signature = None
+        self._row_keys: List[str] = []
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -1232,17 +1242,30 @@ class StylePanel(QWidget):
         legend_drag_hint.setWordWrap(True)
         legend_form.addWidget(legend_drag_hint)
 
+        # One row rather than four stacked. What goes into a legend entry is a
+        # single decision and reads better side by side, and the three lines it
+        # frees are what the Apply button below now occupies.
+        #
+        # "ISO" rather than "ISO value" so the row still fits the panel at its
+        # narrowest (300 px): four checkboxes with the longer label came to just
+        # over that, and a clipped tick box is worse than a short name. The word
+        # is unambiguous here -- the ISO parameter is chosen a few rows above.
+        parts_row = QHBoxLayout()
+        parts_row.setSpacing(8)
         self.legend_checks = {}
-        for field, label in (
-            ("legend_show_param", "Parameter"),
-            ("legend_show_iso", "ISO value"),
-            ("legend_show_file", "File"),
-            ("legend_show_sim", "Simulation"),
+        for field, label, tip in (
+            ("legend_show_param", "Parameter", "The parameter's name"),
+            ("legend_show_iso", "ISO", "The ISO parameter and this run's value"),
+            ("legend_show_file", "File", "The file the run came from"),
+            ("legend_show_sim", "Simulation", "The run's own identifier"),
         ):
             check = QCheckBox(label)
+            check.setToolTip(tip)
             check.toggled.connect(self._on_legend_changed)
-            legend_form.addWidget(check)
+            parts_row.addWidget(check)
             self.legend_checks[field] = check
+        parts_row.addStretch(1)
+        legend_form.addLayout(parts_row)
 
         legend_hint = QLabel(
             "With File and Simulation off, identical entries are merged — so in "
@@ -1251,6 +1274,14 @@ class StylePanel(QWidget):
         legend_hint.setObjectName("Hint")
         legend_hint.setWordWrap(True)
         legend_form.addWidget(legend_hint)
+
+        apply_legend = QPushButton("Apply legend to all tiles")
+        apply_legend.setToolTip(
+            "Give every tile, on every page, this tile's legend: whether it is "
+            "shown, its corner or dragged position, and which parts make up a row"
+        )
+        apply_legend.clicked.connect(self._apply_legend_to_all)
+        legend_form.addWidget(apply_legend)
 
         layout.addWidget(legend_box)
 
@@ -1336,44 +1367,108 @@ class StylePanel(QWidget):
         return entries
 
     def _rebuild_table(self) -> None:
+        """Fill the per-curve table, reusing the rows already in it.
+
+        This runs on every refresh, and a refresh happens on every click that
+        changes the active tile. Rebuilt from scratch it costs four widgets per
+        curve -- a colour button and two populated combo boxes -- created and
+        the previous four destroyed. In simulation mode there is one row per
+        selected run, so a study of a few hundred runs meant creating and
+        destroying a four-figure number of widgets to answer a click that, most
+        of the time, changed nothing in this table at all.
+
+        Two things fix that. The signature check returns immediately when the
+        rows would come out identical, which is the common case; and when they
+        would not, the existing widgets are refilled in place instead of being
+        replaced. Binding the signals to the row rather than to the key is what
+        makes reuse possible -- the widget outlives the key it was made for, so
+        the key has to be looked up when the signal fires, from _row_keys.
+        """
         entries = self._style_entries()
         styles = self._state.styles
 
-        self.table.setRowCount(len(entries))
-        for row, (label, key) in enumerate(entries):
-            item = QTableWidgetItem(label)
-            item.setToolTip(label)
-            self.table.setItem(row, 0, item)
+        signature = tuple(
+            (label, key, styles.color_for(key), styles.dash_for(key),
+             styles.symbol_for(key))
+            for label, key in entries
+        )
+        if signature == self._table_signature:
+            return
+        self._table_signature = signature
+        self._row_keys = [key for _label, key in entries]
 
+        # Without this Qt relayouts and repaints the table on every single cell.
+        self.table.setUpdatesEnabled(False)
+        try:
+            if not entries:
+                # Drop to zero first: that destroys the cell widgets of any rows
+                # still there, which setRowCount(1) alone would leave behind
+                # under the hint.
+                self.table.setRowCount(0)
+                self.table.setRowCount(1)
+                hint = QTableWidgetItem("Nothing plotted yet")
+                hint.setFlags(Qt.ItemFlag.NoItemFlags)
+                self.table.setItem(0, 0, hint)
+                return
+
+            self.table.setRowCount(len(entries))
+            for row, (label, key) in enumerate(entries):
+                self._fill_row(row, label, key, styles)
+        finally:
+            self.table.setUpdatesEnabled(True)
+
+    def _fill_row(self, row: int, label: str, key: str, styles) -> None:
+        """Put one curve's styling into a table row, making widgets only if the
+        row does not have them yet."""
+        item = self.table.item(row, 0)
+        if item is None:
+            item = QTableWidgetItem()
+            self.table.setItem(row, 0, item)
+        # A row left over from the "Nothing plotted yet" hint is unselectable
+        # until its flags are put back.
+        item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        item.setText(label)
+        item.setToolTip(label)
+
+        swatch = self.table.cellWidget(row, 1)
+        if swatch is None:
             swatch = ColorSwatch(styles.color_for(key))
             swatch.color_picked.connect(
-                lambda color, k=key: self._set_color(k, color)
+                lambda color, r=row: self._set_color(self._key_for_row(r), color)
             )
             self.table.setCellWidget(row, 1, swatch)
+        else:
+            swatch.set_color(styles.color_for(key))
 
+        dash = self.table.cellWidget(row, 2)
+        if dash is None:
             dash = QComboBox()
             dash.addItems(list(DASH_STYLES))
-            dash.setCurrentText(styles.dash_for(key))
             dash.currentTextChanged.connect(
-                lambda value, k=key: self._set_dash(k, value)
+                lambda value, r=row: self._set_dash(self._key_for_row(r), value)
             )
             self.table.setCellWidget(row, 2, dash)
+        # _updating is already set by refresh(); setting it here as well keeps
+        # this correct if the table is ever refilled from anywhere else, since
+        # setCurrentText fires currentTextChanged like a user edit would.
+        was_updating = self._updating
+        self._updating = True
+        try:
+            dash.setCurrentText(styles.dash_for(key))
 
-            symbol = QComboBox()
-            for code in SYMBOLS:
-                symbol.addItem(SYMBOL_LABELS.get(code, code), code)
-            index = symbol.findData(styles.symbol_for(key))
-            symbol.setCurrentIndex(max(0, index))
-            symbol.currentIndexChanged.connect(
-                lambda _i, k=key, combo=symbol: self._set_symbol(k, combo.currentData())
-            )
-            self.table.setCellWidget(row, 3, symbol)
-
-        if not entries:
-            self.table.setRowCount(1)
-            hint = QTableWidgetItem("Nothing plotted yet")
-            hint.setFlags(Qt.ItemFlag.NoItemFlags)
-            self.table.setItem(0, 0, hint)
+            symbol = self.table.cellWidget(row, 3)
+            if symbol is None:
+                symbol = QComboBox()
+                for code in SYMBOLS:
+                    symbol.addItem(SYMBOL_LABELS.get(code, code), code)
+                symbol.currentIndexChanged.connect(
+                    lambda _i, r=row, combo=symbol:
+                    self._set_symbol(self._key_for_row(r), combo.currentData())
+                )
+                self.table.setCellWidget(row, 3, symbol)
+            symbol.setCurrentIndex(max(0, symbol.findData(styles.symbol_for(key))))
+        finally:
+            self._updating = was_updating
 
     # ------------------------------------------------------------- actions
 
@@ -1388,20 +1483,34 @@ class StylePanel(QWidget):
         self._state.dirty = True
         self.style_changed.emit()
 
+    def _key_for_row(self, row: int) -> str:
+        """The styling key a table row currently edits.
+
+        Rows are reused across refreshes, so the widget in a row outlives the
+        key it was first built for and the key has to be looked up when the
+        signal fires. Out of range means the row has been dropped since; the
+        setters below treat the empty string as "nothing to do".
+        """
+        if 0 <= row < len(self._row_keys):
+            return self._row_keys[row]
+        return ""
+
     def _set_color(self, key: str, color: str) -> None:
+        if not key:
+            return
         self._state.styles.set_color(key, color)
         self._state.dirty = True
         self.style_changed.emit()
 
     def _set_dash(self, key: str, dash: str) -> None:
-        if self._updating:
+        if self._updating or not key:
             return
         self._state.styles.set_dash(key, dash)
         self._state.dirty = True
         self.style_changed.emit()
 
     def _set_symbol(self, key: str, symbol) -> None:
-        if self._updating:
+        if self._updating or not key:
             return
         self._state.styles.set_symbol(key, symbol or "")
         self._state.dirty = True
@@ -1478,6 +1587,22 @@ class StylePanel(QWidget):
             setattr(tile, field, check.isChecked())
         self._state.dirty = True
         self.style_changed.emit()
+
+    def _apply_legend_to_all(self) -> None:
+        """Copy this tile's legend onto every other tile, on every page.
+
+        The copying itself is in AppState.apply_legend_everywhere(), not here:
+        which fields make up "the legend" is a fact about the model, it must not
+        drift from what a workspace saves, and it is worth testing without a
+        running Qt.
+        """
+        count = self._state.apply_legend_everywhere(self._state.tile)
+        # Redraw first, report second, and the order is load-bearing: the
+        # redraw ends by rewriting the status bar with the file and run counts,
+        # so a message posted before it would be overwritten before it was read.
+        if count:
+            self.style_changed.emit()
+        self.legend_applied.emit(count)
 
 
 # ==========================================================================

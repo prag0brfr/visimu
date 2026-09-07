@@ -77,6 +77,11 @@ class MainWindow(QMainWindow):
         # while a task runs the UI stops touching it entirely -- see tasks.py.
         self._stale_panels = set()
         self._focus_before_task = None
+        # Which channels the last completed load put in memory. refresh_plots()
+        # compares against it to tell a redraw that needs a read from one that
+        # does not; None means "assume nothing".
+        self._loaded_signature = None
+        self._ui_enabled = True
         self.tasks = TaskRunner(self)
         self.tasks.started.connect(self._on_task_started)
         self.tasks.finished.connect(self._on_task_finished)
@@ -279,6 +284,7 @@ class MainWindow(QMainWindow):
         self.compute_panel.parameters_changed.connect(self.refresh_all)
         self.iso_panel.filter_changed.connect(self._on_iso_filter)
         self.style_panel.style_changed.connect(self.refresh_plots)
+        self.style_panel.legend_applied.connect(self._on_legend_applied)
         self.scale_panel.scale_changed.connect(self.refresh_plots)
         self.area_panel.changed.connect(self.refresh_plots)
         self.marker_panel.changed.connect(self.refresh_plots)
@@ -406,7 +412,17 @@ class MainWindow(QMainWindow):
         visible for a text field: typing a caption fired a redraw per keystroke,
         each redraw disabled the panel, and the caret was gone after every
         single character. So the focused widget is put back afterwards.
+
+        Redundant calls are dropped. Disabling a widget changes how it is drawn,
+        so every plot in the grid repaints on the way down and again on the way
+        back up -- and a chain of queued tasks emits started/finished for each
+        one, asking for a state the UI is already in.
         """
+        enabled = bool(enabled)
+        if enabled == self._ui_enabled:
+            return
+        self._ui_enabled = enabled
+
         if not enabled:
             focused = QApplication.focusWidget()
             self._focus_before_task = (
@@ -449,9 +465,16 @@ class MainWindow(QMainWindow):
         resident = self.session.resident_bytes
         self.memory_label.setText("cache {0:.0f} MB".format(resident / (1024 * 1024)))
 
-    def _enforce_memory_limit(self) -> None:
+    def _enforce_memory_limit(self) -> bool:
+        """Trim resident columns back under the cap. True if anything was let go.
+
+        The answer matters to refresh_plots(): what it remembers having loaded
+        is only true until the cap evicts some of it.
+        """
         if self.session.resident_bytes > self.memory_limit_bytes:
             self.session.trim_memory(int(self.memory_limit_bytes * 0.8))
+            return True
+        return False
 
     # -------------------------------------------------------------- theme
 
@@ -618,12 +641,21 @@ class MainWindow(QMainWindow):
                     handle = self.session.file(index)
                     if handle:
                         handle.reload()
+                # A reload drops the loaded columns even when the answer was
+                # No, so the next redraw must go through the worker rather than
+                # reading them back on the GUI thread.
+                self._loaded_signature = None
         finally:
             self._suppress_reload_prompt = False
 
     # ----------------------------------------------------------- refresh
 
     def refresh_all(self) -> None:
+        # Everything that routes through here -- a file added, removed or
+        # reloaded, a computed channel changed, an alias edited, a workspace
+        # loaded -- can have moved the sample buffers, so what was resident
+        # before says nothing about what is resident now.
+        self._loaded_signature = None
         # Settle tiles that name channels the open files do not have, before
         # anything looks at them. This is the deliberate, once-per-file-change
         # moment for it, and the panels no longer do it as a side effect of
@@ -698,14 +730,40 @@ class MainWindow(QMainWindow):
             return
 
         sims_by_file = self.grid.selected_sims_by_file()
+        signature = (
+            tuple(sorted((index, tuple(names))
+                         for index, names in requirements.items())),
+            tuple(sorted((index, tuple(sims))
+                         for index, sims in sims_by_file.items())),
+        )
+
+        # Nothing new to read: draw now, on this thread, and skip the worker
+        # entirely. Most redraws are of this kind -- restyling a curve, toggling
+        # the grid or the legend, editing a limit -- and routing them through a
+        # background task was costing far more than the read it was there to
+        # cover. Starting a task disables the panels, the rail and the whole
+        # grid, and re-enables them a moment later; every plot widget in the
+        # page repaints on each of those, so a style tweak was paying for two
+        # full-grid repaints, a thread, and two trips round the event loop
+        # before a single curve was redrawn.
+        #
+        # `busy` still forces the slow path: while a worker is inside the core
+        # session, nothing on this thread may touch it (see tasks.py).
+        if signature == self._loaded_signature and not self.tasks.busy:
+            self.grid.refresh()
+            self._update_status()
+            return
 
         def work():
             for file_index, names in requirements.items():
                 self.session.preload(file_index, sims_by_file.get(file_index, []), names)
-            self._enforce_memory_limit()
-            return None
+            return self._enforce_memory_limit()
 
-        def done(_result):
+        def done(trimmed):
+            # Only claim the data is resident if the cap did not just evict
+            # part of it; otherwise the next redraw would take the fast path
+            # and read columns back in on the GUI thread.
+            self._loaded_signature = None if trimmed else signature
             self.grid.refresh()
             self._update_status()
             self._update_memory_label()
@@ -797,11 +855,15 @@ class MainWindow(QMainWindow):
                     continue
                 position = index if index < values.size else values.size - 1
                 rows.append((name, float(values[position])))
-            self._enforce_memory_limit()
-            return x_param, rows
+            return x_param, rows, self._enforce_memory_limit()
 
         def done(result):
-            axis, rows = result
+            axis, rows, trimmed = result
+            # Reading every channel of a run is the most likely thing to push
+            # the cache over its cap, and what it evicts may be exactly the
+            # columns the plots are drawn from.
+            if trimmed:
+                self._loaded_signature = None
             self.inspect_panel.show_result(file_index, sim_index, x_value, axis, rows)
             self._update_memory_label()
 
@@ -833,6 +895,22 @@ class MainWindow(QMainWindow):
         self._refresh_panel(self.marker_panel)
         self._refresh_panel(self.area_panel)
         self.grid.refresh()
+
+    def _on_legend_applied(self, count: int) -> None:
+        """The legend was copied to every tile. Say how far it reached.
+
+        Most of those tiles are on other pages or in another part of the grid,
+        so without this the button looks like it did nothing.
+        """
+        if not count:
+            self.status_label.setText(
+                "Every tile already had this legend."
+            )
+            return
+        self.status_label.setText(
+            "Legend applied to {0} other tile{1}.".format(
+                count, "" if count == 1 else "s")
+        )
 
     def _on_legend_moved(self) -> None:
         """The legend was dragged. Only the Style panel needs to know."""

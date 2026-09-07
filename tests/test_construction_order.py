@@ -296,14 +296,79 @@ class TestDrawPathWiring(unittest.TestCase):
         self.assertIn("view_changed.emit", body)
 
     def test_curves_are_grouped_rather_than_drawn_one_by_one(self):
-        """One Qt item per curve does not survive a thousand-run study."""
+        """One Qt item per curve does not survive a thousand-run study.
+
+        Curves are collected into a group per pen and painted as one polyline;
+        the walk fills in a _GroupPlan, and _adopt_groups() then decides which
+        of the items already on the plot each plan can keep.
+        """
         body = self._source("ui/plot_tile.py", "PlotTile", "rebuild")
-        self.assertIn("DrawGroup", body)
-        self.assertIn("group.entries.append", body)
+        self.assertIn("_GroupPlan", body)
+        self.assertIn("plan.entries.append", body)
+        self.assertIn("_adopt_groups", body)
+
+    def test_a_rebuild_does_not_force_a_resample(self):
+        """Forcing here is what made every rebuild redraw curves it had just
+        proven identical -- a restyle, a grid toggle or a marker drag paid for
+        re-decimating every curve in the tile from full resolution.
+
+        A newly built group has no sampled_for and is drawn anyway; an adopted
+        one carries the key its points were computed for. So the skip in
+        _resample_visible() is the whole mechanism, and forcing past it defeats
+        the reuse that _adopt_groups() exists to find.
+        """
+        body = self._source("ui/plot_tile.py", "PlotTile", "rebuild")
+        self.assertIn("self._resample_visible()", body)
+        self.assertNotIn("_resample_visible(force=True)", body)
 
     def test_the_legend_is_capped(self):
         body = self._source("ui/plot_tile.py", "PlotTile", "rebuild")
         self.assertIn("MAX_LEGEND_ROWS", body)
+
+    def test_a_redraw_that_needs_no_read_skips_the_worker(self):
+        """Most redraws load nothing, and a background task is not free.
+
+        Starting one disables the panels, the rail and the whole plot grid, and
+        re-enables them a moment later; every plot widget repaints on each of
+        those. Restyling a curve was paying for two full-grid repaints, a
+        thread and two trips round the event loop before a curve was redrawn.
+
+        `busy` must still force the slow path: while a worker is inside the core
+        session, nothing on the GUI thread may touch it.
+        """
+        body = self._source("ui/main_window.py", "MainWindow", "refresh_plots")
+        self.assertIn("_loaded_signature", body)
+        self.assertIn("not self.tasks.busy", body)
+
+    def test_what_was_loaded_is_forgotten_when_it_may_be_gone(self):
+        """The fast path above is only sound while the signature is honest.
+
+        Anything that can move or drop the sample buffers has to clear it, or a
+        later redraw takes the fast path and reads columns back in on the GUI
+        thread -- which on a 500 MB file is the freeze the worker exists to
+        prevent.
+        """
+        for method in ("refresh_all", "_check_for_changes"):
+            body = self._source("ui/main_window.py", "MainWindow", method)
+            self.assertIn("_loaded_signature = None", body,
+                          "{0}() must forget the loaded set".format(method))
+
+    def test_enabling_the_ui_twice_over_does_nothing(self):
+        """Disabling a widget changes how it is drawn, so every plot in the grid
+        repaints on the way down and again on the way back up. A chain of queued
+        tasks emits started/finished for each one, asking for a state the UI is
+        already in."""
+        body = self._source("ui/main_window.py", "MainWindow", "_set_ui_enabled")
+        self.assertIn("self._ui_enabled", body)
+
+    def test_the_active_border_is_not_reapplied(self):
+        """setStyleSheet does no comparison of its own: handed the string it
+        already has, it still repolishes the widget and repaints its whole
+        scene. _refresh_active_border() calls this on every tile in the page on
+        every mouse press, so without the guard one click redrew every plot."""
+        body = self._source("ui/plot_tile.py", "PlotTile", "set_active_border")
+        self.assertIn("_border_active", body)
+        self.assertIn("return", body)
 
     def test_the_resample_path_writes_one_item_per_group(self):
         body = self._source("ui/plot_tile.py", "PlotTile", "_resample_visible")

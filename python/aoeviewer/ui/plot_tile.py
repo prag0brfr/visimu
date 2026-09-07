@@ -43,7 +43,12 @@ from ..theme import Theme
 # The drawing budget lives in aoeviewer.scales, which imports no Qt, so the
 # arithmetic behind it can be tested without a running application -- which is
 # exactly where the last mistake in it hid.
-from ..scales import MAX_TILE_POINTS, POINTS_PER_PIXEL, resample_target  # noqa: F401
+from ..scales import (  # noqa: F401
+    MAX_TILE_POINTS,
+    POINTS_PER_PIXEL,
+    resample_key,
+    resample_target,
+)
 
 # Stacking order of the things drawn on a tile. pyqtgraph puts plot curves at
 # z = 0, so anything meant to be read *over* the data has to be above that.
@@ -396,13 +401,19 @@ class CurveEntry:
     cap to evict a column at any moment.
     """
 
-    __slots__ = ("x", "y", "label", "key")
+    __slots__ = ("x", "y", "label", "key", "curve_key")
 
-    def __init__(self, x: np.ndarray, y: np.ndarray, label: str, key: str):
+    def __init__(self, x: np.ndarray, y: np.ndarray, label: str, key: str,
+                 curve_key: str = ""):
         self.x = x
         self.y = y
         self.label = label
+        # The styling key: which colour, dash and marker this curve draws with.
         self.key = key
+        # "file|sim|parameter" -- identity, not appearance. Two rebuilds compare
+        # these to decide whether a draw item still shows the same curves and so
+        # can be kept; see PlotTile._reuse_signature().
+        self.curve_key = curve_key
 
 
 class DrawGroup:
@@ -433,6 +444,65 @@ class DrawGroup:
         self.sampled_for = None
 
 
+class _GroupPlan:
+    """One group's appearance and membership, before an item is chosen for it.
+
+    A rebuild cannot decide which existing draw item to keep until it knows a
+    group's whole membership, and that is not known until every curve has been
+    walked. So the walk fills these in, and PlotTile._adopt_groups() then
+    matches them against the items already on the plot.
+    """
+
+    __slots__ = ("color", "dash", "width", "marker", "symbol_size", "name",
+                 "entries")
+
+    def __init__(self, color, dash, width, marker, symbol_size, name):
+        self.color = color
+        self.dash = dash
+        self.width = width
+        self.marker = marker
+        self.symbol_size = symbol_size
+        # The legend row this group owns, or None when it has none.
+        self.name = name
+        self.entries: List[CurveEntry] = []
+
+    def _pen(self) -> QPen:
+        pen = QPen(QColor(self.color))
+        pen.setWidthF(self.width)
+        pen.setStyle(_PEN_STYLES.get(self.dash, Qt.PenStyle.SolidLine))
+        # Cosmetic: the width is in device pixels, so a zoom does not fatten
+        # the line.
+        pen.setCosmetic(True)
+        return pen
+
+    def build_item(self) -> pg.PlotDataItem:
+        return pg.PlotDataItem(
+            pen=self._pen(),
+            antialias=False,
+            symbol=self.marker,
+            symbolSize=self.symbol_size,
+            symbolBrush=self.color,
+            symbolPen=pg.mkPen(self.color),
+            name=self.name,
+        )
+
+    def restyle_item(self, item: pg.PlotDataItem) -> None:
+        """Repaint an existing item in this group's colours.
+
+        setSymbol and friends each mark the item dirty and schedule a repaint,
+        which is exactly what a restyle should do -- and nothing here touches
+        the data, so the points already computed stay valid. `name` is set
+        directly because PlotDataItem has no setter for it; the legend reads
+        opts["name"] through name().
+        """
+        item.setPen(self._pen())
+        item.setSymbol(self.marker)
+        item.setSymbolSize(self.symbol_size)
+        item.setSymbolBrush(self.color)
+        item.setSymbolPen(pg.mkPen(self.color))
+        item.opts["name"] = self.name
+
+
 class PlotTile(pg.PlotWidget):
     """A single plot showing one x parameter against several y parameters."""
 
@@ -461,6 +531,9 @@ class PlotTile(pg.PlotWidget):
     _redraw_timer = None
     _curves: Dict[str, CurveEntry] = {}
     _groups: List["DrawGroup"] = []
+    # None means "no sheet applied yet", so the first call always applies one.
+    # See set_active_border() for why the state has to be remembered at all.
+    _border_active = None
     _index = -1
     _suppress_range_event = True
     _slope_origin = None
@@ -545,6 +618,10 @@ class PlotTile(pg.PlotWidget):
 
     def apply_theme(self, theme: Theme) -> None:
         self._theme = theme
+        # The border colour comes from the theme, so the cached state that lets
+        # set_active_border() skip redundant work no longer describes what is on
+        # screen. Forget it, and the next call repaints in the new colours.
+        self._border_active = None
         if self._gizmo is not None:
             self._gizmo.set_theme(theme)
         self.setBackground(theme.plot_background)
@@ -693,7 +770,25 @@ class PlotTile(pg.PlotWidget):
         super().wheelEvent(event)
 
     def set_active_border(self, active: bool) -> None:
-        """Mark this tile as the one the side panels are editing."""
+        """Mark this tile as the one the side panels are editing.
+
+        The early return is not a micro-optimisation, it is the fix for the
+        whole grid stalling on a single click. QWidget.setStyleSheet does no
+        comparison of its own: handed the string it already has, it still
+        repolishes the widget and every child and schedules a repaint. A tile is
+        a QGraphicsView, so that repaint is the entire scene -- every curve,
+        every point. And _refresh_active_border() calls this on *every* tile,
+        on every mouse press anywhere in the grid, because a press emits
+        `activated` whether or not the active tile actually changes.
+
+        So one click on a 5x5 page repainted twenty-five plots holding a million
+        points between them, to change a border on at most two of them. Applying
+        the sheet only when the state really flips leaves exactly those two.
+        """
+        active = bool(active)
+        if active == self._border_active:   # None on the first call
+            return
+        self._border_active = active
         color = self._theme.accent if active else self._theme.border
         self.setStyleSheet(
             "PlotTile {{ border: {0}px solid {1}; }}".format(2 if active else 1, color)
@@ -826,11 +921,28 @@ class PlotTile(pg.PlotWidget):
     # ------------------------------------------------------------ rebuild
 
     def rebuild(self) -> None:
-        """Recreate every curve from the current selection and tile settings."""
+        """Recreate every curve from the current selection and tile settings.
+
+        Most rebuilds do not change a single drawn point. Toggling the grid,
+        restyling one colour, dragging a marker, editing the legend, coming back
+        to a page -- all of them arrive here, and all of them used to throw away
+        every item and re-decimate every curve from full resolution for an
+        answer identical to the one already on screen.
+
+        So the old items are kept until the new grouping is known, and any group
+        drawing exactly the same curves from exactly the same buffers is reused
+        as it stands: its pen is updated in place and, because it keeps its
+        `sampled_for`, the resample below skips it entirely. Only groups whose
+        membership genuinely changed are rebuilt, and only those are re-drawn.
+        """
         plot = self.getPlotItem()
 
-        for group in self._groups:
-            plot.removeItem(group.item)
+        # Kept, not removed: _adopt_groups() below decides what can be reused,
+        # and _drop_groups() takes away whatever is left. Holding them also
+        # holds a reference to their sample buffers, which is what makes the
+        # pointer comparison in _reuse_signature() safe -- a buffer that is
+        # still referenced cannot have been freed and another put at its address.
+        previous_groups = self._groups
         self._groups = []
         self._curves = {}
 
@@ -874,6 +986,9 @@ class PlotTile(pg.PlotWidget):
                       size="9pt")
 
         if tile.plot3d:
+            # A projection stores screen coordinates, not samples, so nothing
+            # here can be reused: _rebuild_3d builds its own groups.
+            self._drop_groups(previous_groups)
             self._rebuild_3d(plot, tile)
             self._draw_overlays()
             self._refresh_texts()
@@ -885,6 +1000,7 @@ class PlotTile(pg.PlotWidget):
         self._gizmo.setVisible(False)
 
         if tile.is_empty() or not self._state.selected_sims:
+            self._drop_groups(previous_groups)
             if self._legend is not None:
                 self._legend.setVisible(False)
             # An empty tile has no frame worth keeping, so the next parameter
@@ -924,10 +1040,15 @@ class PlotTile(pg.PlotWidget):
         legend_rows = 0
         hidden_rows = 0
 
-        # (pen signature, legend name) -> DrawGroup. Curves that look identical
-        # are painted together; see DrawGroup for why that is the difference
-        # between a thousand-run study being viewable and not.
-        groups: Dict[tuple, DrawGroup] = {}
+        # (pen signature, legend name) -> plan. Curves that look identical are
+        # painted together; see DrawGroup for why that is the difference between
+        # a thousand-run study being viewable and not.
+        #
+        # A plan rather than a DrawGroup, because which old item can be reused
+        # is only knowable once a group's whole membership is known, and that is
+        # not true until this loop has finished.
+        plans: Dict[tuple, _GroupPlan] = {}
+        order: List[tuple] = []
 
         for file_index, sims in sorted(by_file.items()):
             handle = self._session.file(file_index)
@@ -977,7 +1098,7 @@ class PlotTile(pg.PlotWidget):
                     marker = symbol or ("o" if tile.show_points else None)
 
                     key = "{0}|{1}|{2}".format(file_index, sim_index, param)
-                    entry = CurveEntry(x, y, label, style_key)
+                    entry = CurveEntry(x, y, label, style_key, key)
                     self._curves[key] = entry
 
                     # The legend name is part of the grouping key, so a curve
@@ -985,26 +1106,17 @@ class PlotTile(pg.PlotWidget):
                     # curve's row -- the legend stays exactly as it was.
                     group_key = (color, dash, width, marker, styles.symbol_size,
                                  label if show_in_legend else None)
-                    group = groups.get(group_key)
-                    if group is None:
-                        pen = QPen(QColor(color))
-                        pen.setWidthF(width)
-                        pen.setStyle(_PEN_STYLES.get(dash, Qt.PenStyle.SolidLine))
-                        pen.setCosmetic(True)
-                        item = pg.PlotDataItem(
-                            pen=pen,
-                            antialias=False,
-                            symbol=marker,
-                            symbolSize=styles.symbol_size,
-                            symbolBrush=color,
-                            symbolPen=pg.mkPen(color),
-                            name=label if show_in_legend else None,
-                        )
-                        plot.addItem(item)
-                        group = DrawGroup(item)
-                        groups[group_key] = group
-                        self._groups.append(group)
-                    group.entries.append(entry)
+                    plan = plans.get(group_key)
+                    if plan is None:
+                        plan = _GroupPlan(color, dash, width, marker,
+                                          styles.symbol_size,
+                                          label if show_in_legend else None)
+                        plans[group_key] = plan
+                        order.append(group_key)
+                    plan.entries.append(entry)
+
+        self._adopt_groups(plot, previous_groups,
+                           [plans[k] for k in order])
 
         if hidden_rows and self._legend is not None:
             # Say what was left out rather than silently truncating.
@@ -1032,9 +1144,77 @@ class PlotTile(pg.PlotWidget):
                 # range the tile had before it was fitted.
                 self._store_view_range()
 
-        self._resample_visible(force=True)
+        # No force. A group that was newly built has no `sampled_for` and is
+        # drawn; a group that was adopted whole keeps the key its points were
+        # computed for and is left alone. Forcing here is what made every
+        # rebuild re-decimate curves it had just proven identical.
+        self._resample_visible()
         self._draw_overlays()
         self._refresh_texts()
+
+    # -------------------------------------------------------- group reuse
+
+    def _drop_groups(self, groups: List["DrawGroup"]) -> None:
+        """Take a set of draw items off the plot for good."""
+        plot = self.getPlotItem()
+        for group in groups:
+            plot.removeItem(group.item)
+
+    @staticmethod
+    def _reuse_signature(entries: List[CurveEntry]) -> tuple:
+        """What a group draws, in a form two rebuilds can compare.
+
+        The curve keys say *which* runs and parameters, and the buffer address
+        and length say the samples are still the same ones -- a reloaded file,
+        or a column evicted by the memory cap and read back, lands somewhere
+        else and so compares unequal. Comparing addresses is only sound because
+        the old entries are still alive and still referencing those buffers
+        while this runs, so nothing else can have been put at the same address.
+        """
+        return tuple(
+            (entry.curve_key, entry.x.ctypes.data, entry.x.size,
+             entry.y.ctypes.data, entry.y.size)
+            for entry in entries
+        )
+
+    def _adopt_groups(self, plot, previous: List["DrawGroup"],
+                      plans: List["_GroupPlan"]) -> None:
+        """Turn the planned groups into drawn ones, reusing what still fits.
+
+        A plan whose curves match an existing group's exactly takes that
+        group's item over: the pen and legend name are updated in place and the
+        `sampled_for` key comes with it, so the points already on screen are
+        recognised as current and never recomputed. Everything not taken over is
+        removed from the plot.
+        """
+        available: Dict[tuple, List[DrawGroup]] = {}
+        for group in previous:
+            if not group.entries:
+                # The "... and N more" legend spacer draws nothing and carries
+                # no curves; it is rebuilt from scratch each time.
+                continue
+            available.setdefault(self._reuse_signature(group.entries),
+                                 []).append(group)
+
+        adopted: Set[int] = set()
+        for plan in plans:
+            candidates = available.get(self._reuse_signature(plan.entries))
+            group = candidates.pop() if candidates else None
+            if group is None:
+                group = DrawGroup(plan.build_item())
+                plot.addItem(group.item)
+            else:
+                adopted.add(id(group))
+                plan.restyle_item(group.item)
+                # The legend was cleared above and pyqtgraph only fills it from
+                # addItem(), which an adopted item does not go through -- so its
+                # row is put back by hand or it silently disappears.
+                if plan.name is not None and self._legend is not None:
+                    self._legend.addItem(group.item, plan.name)
+            group.entries = plan.entries
+            self._groups.append(group)
+
+        self._drop_groups([g for g in previous if id(g) not in adopted])
 
     def _restore_view(self, tile: TileState) -> None:
         """Put the stored range back, without consulting the data.
@@ -1450,19 +1630,12 @@ class PlotTile(pg.PlotWidget):
             # panning, instead of visibly redrawing at the border.
             x_range = (x_low - span * 0.05, x_high + span * 0.05)
 
-        # Quantise the range before comparing: pyqtgraph reports a view range
-        # that wobbles in the last bits as the mouse moves, which would defeat
-        # the check without changing a single drawn pixel.
-        #
         # Built from the final target, after the budget above has had its say,
-        # so the key can never describe a resampling that did not happen.
-        if x_range is None:
-            key = (None, target, bool(tile.log_y))
-        else:
-            span = x_range[1] - x_range[0]
-            scale = span / max(1, target) if span > 0 else 1.0
-            key = (round(x_range[0] / scale), round(x_range[1] / scale),
-                   target, bool(tile.log_y))
+        # so the key can never describe a resampling that did not happen. The
+        # quantisation, and why the span has to be part of it, are in
+        # aoeviewer.scales -- which imports no Qt, so that arithmetic can be
+        # tested without a running application.
+        key = resample_key(x_range, target, tile.log_y)
 
         gap = np.array([np.nan], dtype=np.float32)
 

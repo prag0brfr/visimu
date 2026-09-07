@@ -23,6 +23,7 @@ sequence.
 from __future__ import annotations
 
 import os
+import dataclasses
 import random
 import sys
 import tempfile
@@ -795,6 +796,175 @@ class TestLegendPlacement(unittest.TestCase):
         self.assertTrue(state.paste_tile())
         self.assertEqual(state.page.tiles[1].legend_position, "custom")
         self.assertAlmostEqual(state.page.tiles[1].legend_x, 0.3)
+
+
+class TestLegendEverywhere(unittest.TestCase):
+    """Applying one tile's legend to all of them.
+
+    Comparing tiles is the reason to have several, and a legend configured on
+    one was configured for all of them -- so this exists to stop the same four
+    tick boxes being set eight or twenty times by hand.
+    """
+
+    def _state(self, pages: int = 2) -> AppState:
+        """`pages` pages of a 2x2 grid.
+
+        A page always carries MAX_TILES tiles whatever its grid shape -- the
+        shape decides how many are shown, not how many exist -- so the totals
+        below are in those terms rather than in visible tiles.
+        """
+        state = AppState()
+        state.page.rows, state.page.cols = 2, 2
+        for _ in range(pages - 1):
+            page = state.add_page()
+            page.rows, page.cols = 2, 2
+        state.active_page = 0
+        return state
+
+    def test_every_legend_field_is_copied(self):
+        state = self._state()
+        source = state.page.tiles[0]
+        source.show_legend = False
+        source.legend_position = "custom"
+        source.legend_x, source.legend_y = 0.31, 0.62
+        source.legend_show_param = False
+        source.legend_show_iso = True
+        source.legend_show_file = True
+        source.legend_show_sim = True
+
+        state.apply_legend_everywhere(source)
+
+        for page in state.pages:
+            for tile in page.tiles:
+                for name in TileState.LEGEND_FIELDS:
+                    self.assertEqual(getattr(tile, name), getattr(source, name),
+                                     "{0} was not copied".format(name))
+
+    def test_it_reaches_every_page(self):
+        state = self._state(pages=3)
+        source = state.page.tiles[0]
+        source.legend_show_file = True
+        state.apply_legend_everywhere(source)
+        self.assertTrue(all(tile.legend_show_file
+                            for page in state.pages for tile in page.tiles))
+
+    def test_it_reaches_tiles_the_grid_is_currently_hiding(self):
+        # A 2x2 page shrunk to 1x1 still holds four tiles. One that comes back
+        # when the grid grows again should come back consistent with the rest.
+        state = self._state(pages=1)
+        state.page.rows, state.page.cols = 1, 1
+        source = state.page.tiles[0]
+        source.legend_show_sim = True
+        state.apply_legend_everywhere(source)
+        self.assertTrue(all(t.legend_show_sim for t in state.page.tiles))
+
+    def test_nothing_else_about_a_tile_is_touched(self):
+        state = self._state(pages=1)
+        source = state.page.tiles[0]
+        source.legend_show_file = True
+        source.x_param, source.y_params = "TIME", ["ALT"]
+        source.log_y = True
+        source.color_mode = ColorMode.PARAMETER
+
+        other = state.page.tiles[1]
+        other.x_param, other.y_params = "MACH", ["AOA", "BETA"]
+        other.log_y = False
+        other.lock_y, other.y_min, other.y_max = True, -3.0, 7.0
+
+        state.apply_legend_everywhere(source)
+
+        self.assertEqual(other.x_param, "MACH")
+        self.assertEqual(other.y_params, ["AOA", "BETA"])
+        self.assertFalse(other.log_y)
+        self.assertEqual(other.color_mode, ColorMode.SIMULATION)
+        self.assertEqual((other.lock_y, other.y_min, other.y_max),
+                         (True, -3.0, 7.0))
+
+    def test_the_count_is_of_tiles_actually_changed(self):
+        state = self._state(pages=2)
+        source = state.page.tiles[0]
+        source.legend_show_file = True
+        # Every tile of both pages except the source itself.
+        self.assertEqual(state.apply_legend_everywhere(source),
+                         2 * MAX_TILES - 1)
+
+    def test_a_tile_that_already_matches_is_not_counted(self):
+        state = self._state(pages=1)
+        source = state.page.tiles[0]
+        source.legend_show_file = True
+        state.page.tiles[1].legend_show_file = True
+        self.assertEqual(state.apply_legend_everywhere(source), MAX_TILES - 2)
+
+    def test_a_second_click_changes_nothing_and_says_so(self):
+        state = self._state()
+        source = state.page.tiles[0]
+        source.legend_show_file = True
+        state.apply_legend_everywhere(source)
+        self.assertEqual(state.apply_legend_everywhere(source), 0)
+
+    def test_it_marks_the_workspace_dirty_only_when_it_changed_something(self):
+        state = self._state()
+        source = state.page.tiles[0]
+        source.legend_show_file = True
+        state.dirty = False
+        state.apply_legend_everywhere(source)
+        self.assertTrue(state.dirty)
+
+        state.dirty = False
+        state.apply_legend_everywhere(source)
+        self.assertFalse(state.dirty)
+
+    def test_the_source_is_left_alone(self):
+        state = self._state()
+        source = state.page.tiles[0]
+        source.legend_position = "bottom-right"
+        state.apply_legend_everywhere(source)
+        self.assertEqual(source.legend_position, "bottom-right")
+
+    def test_it_survives_a_workspace_round_trip(self):
+        state = self._state()
+        source = state.page.tiles[0]
+        source.legend_position = "custom"
+        source.legend_x, source.legend_y = 0.25, 0.75
+        source.legend_show_iso = True
+        state.apply_legend_everywhere(source)
+
+        restored = AppState()
+        restored.load_dict(state.to_dict())
+        for page in restored.pages:
+            for tile in page.visible_tiles():
+                self.assertEqual(tile.legend_position, "custom")
+                self.assertTrue(tile.legend_show_iso)
+                self.assertAlmostEqual(tile.legend_x, 0.25)
+
+
+class TestLegendFields(unittest.TestCase):
+    """TileState.LEGEND_FIELDS must not fall behind TileState.
+
+    A legend field added later and not listed here would simply be skipped by
+    "Apply legend to all tiles" -- silently, and only on the tiles the user
+    could not see. Deriving the expected set from the dataclass itself is what
+    makes that a test failure rather than a bug report.
+    """
+
+    def _legend_fields(self):
+        return {f.name for f in dataclasses.fields(TileState)
+                if f.name.startswith("legend_") or f.name == "show_legend"}
+
+    def test_every_legend_field_is_listed(self):
+        missing = self._legend_fields() - set(TileState.LEGEND_FIELDS)
+        self.assertEqual(missing, set(),
+                         "add these to TileState.LEGEND_FIELDS")
+
+    def test_nothing_is_listed_that_is_not_a_field(self):
+        names = {f.name for f in dataclasses.fields(TileState)}
+        self.assertEqual(set(TileState.LEGEND_FIELDS) - names, set())
+
+    def test_it_is_not_itself_a_dataclass_field(self):
+        # Annotating it would give every tile its own copy of the tuple and put
+        # it into to_dict(), where it is not state but a description of state.
+        names = {f.name for f in dataclasses.fields(TileState)}
+        self.assertNotIn("LEGEND_FIELDS", names)
 
 
 class TestIsoMonkey(MonkeyBase):

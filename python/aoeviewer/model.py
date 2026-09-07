@@ -193,6 +193,26 @@ class TextNote:
 class TileState:
     """One plot in the grid."""
 
+    # Everything that decides what this tile's legend looks like: whether it is
+    # shown at all, where it sits, and which parts make up a row. Named in one
+    # place so that "apply this legend to every tile" cannot quietly fall behind
+    # a field added later -- TestLegendFields guards exactly that, by requiring
+    # every legend-ish field of this class to appear here.
+    #
+    # No annotation, deliberately: @dataclass collects annotated names only, so
+    # this stays a class attribute rather than becoming a field with a default.
+    LEGEND_FIELDS = (
+        "show_legend",
+        "legend_position",
+        "legend_x",
+        "legend_y",
+        "legend_show_param",
+        "legend_show_iso",
+        "legend_show_file",
+        "legend_show_sim",
+        "legend_show_style",
+    )
+
     x_param: str = ""
     y_params: List[str] = field(default_factory=list)
 
@@ -653,6 +673,42 @@ class AppState:
         for page in self.pages:
             for tile in page.visible_tiles():
                 self.apply_global_limits(tile)
+
+    def apply_legend_everywhere(self, source: "TileState") -> int:
+        """Give every tile, on every page, the legend of `source`.
+
+        Comparing a set of tiles is the ordinary reason to have several, and a
+        legend configured on one of them was configured for all of them --
+        setting the same four tick boxes and the same corner eight or twenty
+        times over is not a decision, it is transcription.
+
+        Every page, not just the visible one, because the same is true across
+        pages and because the alternative is a button whose effect depends on
+        which page happens to be on screen. This matches "Apply colour mode to
+        all tiles" above it, and the hidden tiles of a shrunken grid are
+        included for the same reason those are: a tile that comes back when the
+        grid grows should come back consistent with the rest.
+
+        Returns how many tiles it changed, so the caller can say so rather than
+        leaving the user to go and look. Tiles that already match are not
+        counted and are not touched, which is what keeps a second click from
+        reporting work it did not do.
+        """
+        changed = 0
+        for page in self.pages:
+            for tile in page.tiles:
+                if tile is source:
+                    continue
+                values = [(name, getattr(source, name))
+                          for name in TileState.LEGEND_FIELDS]
+                if all(getattr(tile, name) == value for name, value in values):
+                    continue
+                for name, value in values:
+                    setattr(tile, name, value)
+                changed += 1
+        if changed:
+            self.dirty = True
+        return changed
 
     def default_x_param(self, available: Sequence[str]) -> str:
         """The x axis to reach for when a tile has not been given one.

@@ -461,6 +461,10 @@ and keys on exactly one parameter — named in the legend so it is unambiguous.
   value instead of fifty rows saying the same thing. The dash pattern and marker
   are not spelled out in the text: the legend already draws a sample of the
   actual curve, so the swatch carries both at once.
+  **Apply legend to all tiles** copies the whole lot — shown or not, corner or
+  dragged position, and the four parts — onto every tile on every page, and says
+  how many it changed. Comparing tiles is the reason to have several, and a
+  legend settled on one of them was settled for all of them.
 
 Files and runs can be **renamed** from the DATA tab — double-click, or use the
 right-click menu. Only the label changes: the identity keys that colours and
@@ -904,6 +908,47 @@ slowing down.
 roughly two points per horizontal pixel before it crosses the boundary, so a tile
 draws ~1200 points whether the channel holds ten thousand samples or ten million.
 
+**A redraw that changes nothing costs nothing.** Once a page holds a lot of
+data, what makes the window feel slow is not drawing a curve but deciding to
+draw one that is already on screen. Four things were doing exactly that, and
+each of them was triggered by an ordinary click:
+
+- *The active-tile border repainted the whole page.* `QWidget.setStyleSheet`
+  does no comparison of its own — handed the string it already has, it still
+  repolishes the widget and schedules a repaint, and a tile is a
+  `QGraphicsView`, so that repaint is its entire scene. The border was reapplied
+  to every tile on every mouse press, because a press announces the tile whether
+  or not the active one changed. A 5x5 page therefore redrew twenty-five plots
+  holding a million points between them to change a border on two. It is now
+  applied only when the state actually flips.
+- *Every rebuild threw away every draw item.* A rebuild arrives for many reasons
+  that say nothing about the data: restyling a curve, toggling the grid,
+  dragging a marker, coming back to a page. Each one dropped every item and
+  re-decimated every curve from full resolution for an answer identical to the
+  one already on screen. Groups that draw exactly the same curves from exactly
+  the same buffers are now kept, with their pen updated in place — the points
+  are recognised as current and never recomputed. At 150 curves over 10.6 M
+  samples, restyling a curve went from **46 ms to 1.1 ms per tile**.
+- *Every redraw went through a worker thread.* Starting a background task
+  disables the panels, the rail and the whole plot grid and re-enables them a
+  moment later, and every plot widget repaints on each of those. A style tweak
+  was paying for two full-grid repaints, a thread and two trips round the event
+  loop before a curve was redrawn — to cover a read that had nothing to read.
+  A redraw whose channels are already resident now draws straight away.
+- *The style table rebuilt its widgets on every click.* It holds one row per
+  curve, and each row is a colour button and two populated combo boxes; in
+  simulation mode a study of a few hundred runs created and destroyed a
+  four-figure number of widgets to answer a click that usually changed nothing
+  in the table. Rows are now refilled in place, and a refresh that would produce
+  the same rows returns without touching a widget.
+
+The decimation cache behind the second of those is keyed on the view as well as
+the samples, and getting that key wrong is easy: quantising only the endpoints
+hid every zoom whose lower edge scaled with its width, so zooming in around the
+origin kept whatever resolution the curve already had. The key and its
+arithmetic live in `aoeviewer/scales.py`, which imports no Qt, and are tested in
+`tests/test_redraw.py`.
+
 **A file opened once is opened fast afterwards.** An AOE file stores one record
 per line — every parameter of one time step, side by side — and this program
 reads the transpose of that: one parameter, every run. So plotting a single
@@ -1132,8 +1177,8 @@ the fingerprint, which is capped, while the parse it replaces is not.
 ## Testing and benchmarking
 
 ```bash
-make test                                  # 783 C++ checks
-python -m unittest discover -s tests -v    # 99 Python tests
+make test                                  # 1666 C++ checks
+python -m unittest discover -s tests -v    # 314 Python tests
 make bench                                 # parser microbenchmark
 python tools/bench_app.py FILE...          # end-to-end, on real files
 ```
@@ -1156,6 +1201,20 @@ indices that had shifted, and a tile keeping parameters that no longer existed.
 Neither is reachable by calling one function wrongly; both are reachable by
 calling three correct functions in the wrong order. Every case is seeded, so a
 failure replays exactly.
+
+`tests/test_redraw.py` covers the part that decides whether the window feels
+fast: not how a curve is drawn, but how often the code decides to draw one that
+is already on screen, and how much of the widget tree it disturbs to answer a
+click that changed nothing. PySide6 is a large binary wheel and a plot widget
+needs a display, so `tests/qt_stubs.py` stands in for PySide6 and pyqtgraph —
+recording what was asked of them and nothing more, which is enough for questions
+of the form *"given this state, does it do the expensive thing?"*. The stubs are
+installed unconditionally: an answer about our own code must not depend on
+whether the machine running the suite happens to have Qt.
+
+`tests/test_construction_order.py` complements both by *parsing* the GUI rather
+than importing it, which is how the wiring is checked on a machine with no Qt at
+all.
 
 Indicative benchmark figures (4-core container, 3 worker threads):
 
