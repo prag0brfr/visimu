@@ -38,6 +38,7 @@ __all__ = [
     "default_name",
     "rename_defaults",
     "counts_per_group",
+    "group_of",
     "values_outside",
     "is_contiguous",
 ]
@@ -201,6 +202,24 @@ def counts_per_group(groups: Sequence[Group],
                 counts[index] += 1
                 break
     return counts
+
+
+def group_of(groups: Sequence[Group], value: float) -> Optional[int]:
+    """Which group claims a value, or None if none does.
+
+    Inclusive at both ends and first claim wins, the same rule
+    counts_per_group() applies and the same one the core's IsoGroup.contains
+    applies -- so a value sitting exactly on a shared edge belongs to the
+    earlier group. Three readers of one rule is two too many for it to live
+    anywhere but here.
+    """
+    if not _finite(value):
+        return None
+    value = float(value)
+    for index, (_name, low, high, _active) in enumerate(groups):
+        if low <= value <= high:
+            return index
+    return None
 
 
 def values_outside(groups: Sequence[Group],

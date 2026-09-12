@@ -155,11 +155,61 @@ class PlotDataItem:
     def setVisible(self, visible):
         self.opts["visible"] = visible
 
+    def setZValue(self, z):
+        self.opts["z"] = z
+
+    def zValue(self):
+        return self.opts.get("z", 0)
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return _Any()
+
+
+class _GraphicsGridLayout:
+    """Just the contents margins, which is all the legend sets on it."""
+
+    def __init__(self):
+        self.margins = (0, 0, 0, 0)
+
+    def setContentsMargins(self, left, top, right, bottom):
+        self.margins = (left, top, right, bottom)
+
+    def getContentsMargins(self):
+        return self.margins
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return _Any()
+
 
 class LegendItem:
     def __init__(self, *args, **kwargs):
         self.rows = []
         self.visible = True
+        self.z = 0.0
+        self.layout = _GraphicsGridLayout()
+        # Real enough for the ground tests: pyqtgraph keeps the fill, the
+        # border and the text colour in opts, and paint() reads them from
+        # there.
+        self.opts = {
+            "brush": kwargs.get("brush"),
+            "pen": kwargs.get("pen"),
+            "labelTextColor": kwargs.get("labelTextColor"),
+            "labelTextSize": kwargs.get("labelTextSize"),
+            "offset": kwargs.get("offset"),
+        }
+
+    def setLabelTextColor(self, colour):
+        self.opts["labelTextColor"] = colour
+
+    def setZValue(self, z):
+        self.z = float(z)
+
+    def zValue(self):
+        return self.z
 
     def clear(self):
         self.rows = []
@@ -275,6 +325,20 @@ class QComboBox:
             if value == data:
                 return index
         return -1
+
+    def findText(self, text):
+        # An int, like Qt's. Without this the catch-all __getattr__ hands back
+        # an _Any, and `if combo.findText(name) >= 0` raises a TypeError that
+        # looks like a bug in the panel rather than a gap in the stub.
+        for index, (label, _value) in enumerate(self._items):
+            if label == text:
+                return index
+        return -1
+
+    def blockSignals(self, blocked):
+        self.currentTextChanged.blocked = bool(blocked)
+        self.currentIndexChanged.blocked = bool(blocked)
+        return False
 
     def setCurrentIndex(self, index):
         if index == self._index or not (0 <= index < len(self._items)):
@@ -448,6 +512,9 @@ class QListWidgetItem:
         self._check = None
         self._data = {}
         self.list = None
+        # See QTreeWidgetItem.check_writes: the in-place refresh path writes a
+        # box only when it is wrong, and this is how that is asserted.
+        self.check_writes = 0
 
     def _changed(self):
         if self.list is not None:
@@ -472,7 +539,14 @@ class QListWidgetItem:
     def flags(self):
         return self._flags
 
+    def setHidden(self, hidden):
+        self._hidden = bool(hidden)
+
+    def isHidden(self):
+        return getattr(self, "_hidden", False)
+
     def setCheckState(self, state):
+        self.check_writes += 1
         self._check = state
         self._changed()
 
@@ -560,6 +634,11 @@ class QTreeWidgetItem:
         self._tooltips = {}
         self._flags = 0
         self._checks = {}
+        self._foregrounds = {}
+        # How many times a box on this row has been written. The in-place
+        # refresh path only writes a box that is actually wrong, and "wrote
+        # nothing" is the assertion that keeps it that way.
+        self.check_writes = 0
         self._data = {}
         self._children = []
         self._parent = None
@@ -616,6 +695,12 @@ class QTreeWidgetItem:
     def toolTip(self, column=0):
         return self._tooltips.get(column, "")
 
+    def setForeground(self, column, brush):
+        self._foregrounds[column] = brush
+
+    def foreground(self, column=0):
+        return self._foregrounds.get(column)
+
     def setFlags(self, flags):
         self._flags = flags
 
@@ -623,6 +708,7 @@ class QTreeWidgetItem:
         return self._flags
 
     def setCheckState(self, column, state):
+        self.check_writes += 1
         self._checks[column] = state
         self._changed()
 
@@ -682,6 +768,26 @@ class QTreeWidget:
         self.itemExpanded.blocked = self.signals_blocked
         self.itemCollapsed.blocked = self.signals_blocked
         return was
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return _Any()
+
+
+class QLineEdit:
+    """Text and the signal that goes with it. The panels filter through these."""
+
+    def __init__(self, text="", *args, **kwargs):
+        self._text = text
+        self.textChanged = _BoundSignal()
+
+    def setText(self, text):
+        self._text = text
+        self.textChanged.emit(text)
+
+    def text(self):
+        return self._text
 
     def __getattr__(self, name):
         if name.startswith("__"):
@@ -820,6 +926,7 @@ def install() -> None:
     widgets.QTreeWidget = QTreeWidget
     widgets.QTreeWidgetItem = QTreeWidgetItem
     widgets.QLabel = QLabel
+    widgets.QLineEdit = QLineEdit
     widgets.QSpinBox = QSpinBox
 
     pyside = types.ModuleType("PySide6")
@@ -834,6 +941,10 @@ def install() -> None:
     pg.PlotDataItem = PlotDataItem
     pg.PlotItem = PlotItem
     pg.LegendItem = LegendItem
+    # ViewBox's mode constants are read off the *class*, and _Any only answers
+    # attribute lookups on instances -- so an auto-made stub raised where the
+    # real one just has two integers.
+    pg.ViewBox = type("ViewBox", (_Any,), {"PanMode": 3, "RectMode": 1})
     pg.GraphicsObject = type("GraphicsObject", (_Any,), {})
     pg.TextItem = type("TextItem", (_Any,), {})
     pg.InfiniteLine = type("InfiniteLine", (_Any,), {})

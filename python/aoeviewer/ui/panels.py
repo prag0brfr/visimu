@@ -15,7 +15,7 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from PySide6.QtCore import QRect, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtGui import QBrush, QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -65,7 +65,7 @@ from ..model import (
     TextNote,
     tile_title,
 )
-from ..session import CoreError, IsoGroup, Session
+from ..session import CoreError, Session
 from ..theme import theme_for
 from .plot_tile import LEGEND_POSITIONS
 
@@ -98,6 +98,13 @@ ISO_OVERVIEW_MAX_VALUES = 8
 # what makes a panel feel broken. Everything past the cap is still filtered on
 # -- the ticks live in the state, not in the tree -- and the node says so.
 ISO_TREE_MAX_CHILDREN = 400
+
+# Private item roles on the DATA tree's run rows. Both hold the last answer the
+# panel wrote, so a refresh that changes nothing writes nothing -- reading a
+# colour or a tooltip back off a widget to compare against is both awkward and
+# the kind of thing Qt is free to normalise underneath you.
+_HELD_BACK_ROLE = int(Qt.ItemDataRole.UserRole) + 1     # bool: ticked but filtered out
+_BASE_TIP_ROLE = int(Qt.ItemDataRole.UserRole) + 2      # str: the tooltip without the note
 
 
 def iso_selection_badge(total: int, chosen: int) -> str:
@@ -148,6 +155,9 @@ class DataPanel(QWidget):
         self._session = session
         self._state = state
         self._updating = False
+        # What the tree was last built from, so a refresh that changes nothing
+        # structural can leave the widget items alone. See _tree_signature.
+        self._tree_state = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -180,15 +190,148 @@ class DataPanel(QWidget):
         layout.addWidget(rename)
 
         selection = QHBoxLayout()
-        for text, handler in (("Plot all", lambda: self._set_all(True)),
-                              ("Plot none", lambda: self._set_all(False))):
+        # These two are every loaded file at once, which is why the file rows
+        # carry their own box: with three studies open, "all of them" is rarely
+        # the question. The tooltips say which scope each control has, since
+        # the buttons and the boxes now look equally like the obvious one.
+        for text, tip, handler in (
+                ("Plot all", "Every run of every loaded file",
+                 lambda: self._set_all(True)),
+                ("Plot none", "Clear the selection across every loaded file",
+                 lambda: self._set_all(False))):
             button = QPushButton(text)
+            button.setToolTip(tip)
             button.clicked.connect(handler)
             selection.addWidget(button)
         layout.addLayout(selection)
 
+        hint = QLabel(
+            "Tick a file to plot all of its runs; tick runs individually to "
+            "choose. Right-click either for the same, by name."
+        )
+        hint.setObjectName("Hint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+    def _tree_signature(self):
+        """What the tree is *made of* -- deliberately not what is ticked in it.
+
+        Ticking a run changes the selection and nothing else, so on a tick this
+        matches and the rows can be updated where they are. That distinction is
+        the whole point: ticking a checkbox told the window the selection had
+        changed, the window marked every panel stale and refreshed the visible
+        one -- which is this one -- and the tree you had just clicked was
+        destroyed and rebuilt underneath your cursor. Hence the blink.
+
+        It cost more than the flicker. clear() takes the scroll position, the
+        expanded/collapsed state and the current item with it, so on a study of
+        a few hundred runs ticking ten of them meant finding your place ten
+        times.
+        """
+        return tuple(
+            (handle.index, handle.name, handle.path,
+             tuple((sim.index, sim.name, sim.sim_id)
+                   for sim in handle.simulations))
+            for handle in self._session.files
+        )
+
+    def _file_check_state(self, handle):
+        """How much of one file is plotted: all of it, none, or some.
+
+        The file row is where you look to find out, so it is also where the
+        answer belongs. A partial tick is the useful third state: without it a
+        file whose runs are half selected has to claim to be either on or off,
+        and both are lies.
+        """
+        simulations = handle.simulations
+        if not simulations:
+            return Qt.CheckState.Unchecked
+        chosen = sum(1 for sim in simulations
+                     if self._state.is_selected(handle.index, sim.index))
+        if chosen == 0:
+            return Qt.CheckState.Unchecked
+        if chosen == len(simulations):
+            return Qt.CheckState.Checked
+        return Qt.CheckState.PartiallyChecked
+
+    def _mark_held_back(self, child, file_index: int, sim_index: int) -> None:
+        """Dim a row that is ticked but which the ISO filters exclude.
+
+        The two tabs are independent constraints, which is right -- and it
+        means a run can be firmly ticked here and still not be on any tile.
+        Without saying so, that is indistinguishable from a bug: the checkbox
+        claims the run is plotted and the plot disagrees. Dimmed, with the
+        reason on hover, it reads as what it is.
+
+        The previous answer is kept on the row rather than read back off its
+        colour, so a refresh that changes nothing writes nothing.
+        """
+        held = (self._state.is_selected(file_index, sim_index)
+                and not self._state.iso_admitted(file_index, sim_index))
+        if child.data(0, _HELD_BACK_ROLE) == held:
+            return
+        child.setData(0, _HELD_BACK_ROLE, held)
+        # Grey, the same grey a hidden marker or band gets in its own list --
+        # one convention for "configured, but not on screen".
+        child.setForeground(0, QBrush(Qt.GlobalColor.gray) if held
+                            else QBrush())
+        base = child.data(0, _BASE_TIP_ROLE) or ""
+        child.setToolTip(
+            0,
+            "{0}\n\nTicked, but held back by an ISO filter: this run's value "
+            "is not among the ones selected in the ISO tab.".format(base)
+            if held else base)
+
+    def _sync_check_states(self) -> None:
+        """Bring the ticks up to date without touching the rows.
+
+        Each box is written only when it is actually wrong, so the common case
+        -- a refresh arriving for a reason that changed no selection at all --
+        touches no widget and paints nothing.
+
+        The file rows are written from the same pass. Their state is derived
+        from their children, so a run being ticked anywhere changes the file
+        row above it, and deriving it in one place is what keeps the two from
+        disagreeing.
+        """
+        self._updating = True
+        blocked = self.tree.blockSignals(True)
+        try:
+            for index in range(self.tree.topLevelItemCount()):
+                parent = self.tree.topLevelItem(index)
+                for child_index in range(parent.childCount()):
+                    child = parent.child(child_index)
+                    data = child.data(0, Qt.ItemDataRole.UserRole)
+                    if not data or data[0] != "sim":
+                        continue
+                    wanted = (Qt.CheckState.Checked
+                              if self._state.is_selected(data[1], data[2])
+                              else Qt.CheckState.Unchecked)
+                    if child.checkState(0) != wanted:
+                        child.setCheckState(0, wanted)
+                    self._mark_held_back(child, data[1], data[2])
+
+                data = parent.data(0, Qt.ItemDataRole.UserRole)
+                if not data or data[0] != "file":
+                    continue
+                handle = self._session.file(data[1])
+                if handle is None:
+                    continue
+                wanted = self._file_check_state(handle)
+                if parent.checkState(0) != wanted:
+                    parent.setCheckState(0, wanted)
+        finally:
+            self.tree.blockSignals(blocked)
+            self._updating = False
+
     def refresh(self) -> None:
         """Rebuild the tree from the session, preserving check state."""
+        signature = self._tree_signature()
+        if signature == self._tree_state:
+            self._sync_check_states()
+            return
+        self._tree_state = signature
+
         self._updating = True
         try:
             # A study of a thousand runs is a thousand tree items. Without
@@ -201,7 +344,15 @@ class DataPanel(QWidget):
                 parent.setData(0, Qt.ItemDataRole.UserRole, ("file", file_handle.index))
                 # The full path on hover: the displayed name is a basename, and
                 # two studies routinely have identically named result files.
-                parent.setToolTip(0, file_handle.path)
+                parent.setToolTip(0, "{0}\n\nTick to plot every run in this "
+                                     "file; clear to plot none of them.".format(
+                                         file_handle.path))
+                # Checkable, and the reason the panel needed this at all: Plot
+                # all and Plot none are every loaded file at once, and with
+                # three studies open that is not the question anyone is asking.
+                # One box per file answers it where the file is.
+                parent.setFlags(parent.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                parent.setCheckState(0, self._file_check_state(file_handle))
                 parent.setExpanded(True)
 
                 for sim in file_handle.simulations:
@@ -211,6 +362,9 @@ class DataPanel(QWidget):
                     tip = file_handle.path
                     if sim.name != sim.sim_id:
                         tip = "{0}\n(named {1} in the file)".format(tip, sim.sim_id)
+                    # Kept, because _mark_held_back appends a note to it and
+                    # has to be able to take the note off again.
+                    child.setData(0, _BASE_TIP_ROLE, tip)
                     child.setToolTip(0, tip)
                     child.setFlags(child.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                     checked = self._state.is_selected(file_handle.index, sim.index)
@@ -218,6 +372,7 @@ class DataPanel(QWidget):
                         0,
                         Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked,
                     )
+                    self._mark_held_back(child, file_handle.index, sim.index)
         finally:
             self.tree.blockSignals(blocked)
             self.tree.setUpdatesEnabled(True)
@@ -227,31 +382,71 @@ class DataPanel(QWidget):
         if self._updating:
             return
         data = item.data(0, Qt.ItemDataRole.UserRole)
-        if not data or data[0] != "sim":
+        if not data:
+            return
+
+        if data[0] == "file":
+            # Qt toggles a partly-ticked box to Checked, which is the useful
+            # direction: a file with some of its runs on becomes a file with
+            # all of them on, and a second click clears it.
+            self._set_file(data[1], item.checkState(0) == Qt.CheckState.Checked)
+            return
+
+        if data[0] != "sim":
             return
         _kind, file_index, sim_index = data
         self._state.set_selected(
             file_index, sim_index, item.checkState(0) == Qt.CheckState.Checked
         )
+        # The file row above now says something that may no longer be true.
+        self._sync_file_node(item.parent())
+        self.selection_changed.emit()
+
+    def _sync_file_node(self, parent) -> None:
+        """Re-derive one file row's tick from its children.
+
+        Just the one, because a run being ticked can only have changed the file
+        it belongs to -- walking the whole tree to discover that is the kind of
+        work this panel was rebuilt to stop doing.
+        """
+        if parent is None:
+            return
+        data = parent.data(0, Qt.ItemDataRole.UserRole)
+        if not data or data[0] != "file":
+            return
+        handle = self._session.file(data[1])
+        if handle is None:
+            return
+        wanted = self._file_check_state(handle)
+        if parent.checkState(0) == wanted:
+            return
+        self._updating = True
+        blocked = self.tree.blockSignals(True)
+        try:
+            parent.setCheckState(0, wanted)
+        finally:
+            self.tree.blockSignals(blocked)
+            self._updating = False
+
+    def _set_file(self, file_index: int, on: bool) -> None:
+        """Plot every run of one file, or none of them."""
+        handle = self._session.file(file_index)
+        if handle is None:
+            return
+        for sim in handle.simulations:
+            self._state.set_selected(file_index, sim.index, on)
+        self._sync_check_states()
         self.selection_changed.emit()
 
     def _set_all(self, on: bool) -> None:
-        self._updating = True
-        try:
-            for i in range(self.tree.topLevelItemCount()):
-                parent = self.tree.topLevelItem(i)
-                for j in range(parent.childCount()):
-                    child = parent.child(j)
-                    data = child.data(0, Qt.ItemDataRole.UserRole)
-                    if not data or data[0] != "sim":
-                        continue
-                    child.setCheckState(
-                        0,
-                        Qt.CheckState.Checked if on else Qt.CheckState.Unchecked,
-                    )
-                    self._state.set_selected(data[1], data[2], on)
-        finally:
-            self._updating = False
+        # Driven from the session rather than from the tree. The two hold the
+        # same set of runs, but the session is the one that knows it -- and a
+        # loop over widget items to decide what the state should be had the
+        # dependency the wrong way round.
+        for handle in self._session.files:
+            for sim in handle.simulations:
+                self._state.set_selected(handle.index, sim.index, on)
+        self._sync_check_states()
         self.selection_changed.emit()
 
     def _remove_selected(self) -> None:
@@ -286,7 +481,7 @@ class DataPanel(QWidget):
 
     def _clear_all(self) -> None:
         self._session.clear()
-        self._state.selected_sims.clear()
+        self._state.clear_selection()
         self.refresh()
         self.files_changed.emit()
 
@@ -298,8 +493,27 @@ class DataPanel(QWidget):
             return
         menu = QMenu(self)
         menu.addAction("Rename...", self._rename_selected)
+
         data = item.data(0, Qt.ItemDataRole.UserRole)
+        # A run's payload carries its file index too, so the whole-file actions
+        # are offered from either row. Right-clicking a run to say "actually,
+        # all of them" is the more likely gesture of the two.
+        if data and data[0] in ("file", "sim"):
+            file_index = data[1]
+            handle = self._session.file(file_index)
+            if handle is not None:
+                count = len(handle.simulations)
+                menu.addSeparator()
+                menu.addAction(
+                    "Plot all {0} run{1} in {2}".format(
+                        count, "" if count == 1 else "s", handle.name),
+                    lambda: self._set_file(file_index, True))
+                menu.addAction(
+                    "Plot no runs in {0}".format(handle.name),
+                    lambda: self._set_file(file_index, False))
+
         if data and data[0] == "file":
+            menu.addSeparator()
             menu.addAction("Copy full path", lambda: self._copy_path(data[1]))
         menu.exec(self.tree.viewport().mapToGlobal(position))
 
@@ -370,6 +584,8 @@ class ParameterPanel(QWidget):
         self._session = session
         self._state = state
         self._updating = False
+        # The parameter set the lists were built from; see _list_signature.
+        self._list_state = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -400,7 +616,54 @@ class ParameterPanel(QWidget):
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
+    def _list_signature(self):
+        """The parameters the lists are built from, and how they are written.
+
+        Not which are ticked and not which is the x axis: those change every
+        time you tick a box or click another tile, and neither changes what the
+        rows are. Rebuilding on them is what made this list blink -- and the
+        list is four hundred rows long in these files, so the rebuild also
+        threw away the scroll position and the filter's hidden flags every time
+        a checkbox moved.
+        """
+        return tuple((name, self._session.label(name))
+                     for name in self._session.parameters)
+
+    def _sync_selection(self) -> None:
+        """Point the x combo and the y ticks at the active tile, in place.
+
+        Everything is written only if it is wrong, so refreshing a panel whose
+        tile has not changed paints nothing at all.
+        """
+        tile = self._state.tile
+        self._updating = True
+        blocked = self.y_list.blockSignals(True)
+        try:
+            index = self.x_combo.findData(tile.x_param)
+            if index >= 0 and index != self.x_combo.currentIndex():
+                self.x_combo.setCurrentIndex(index)
+
+            wanted = set(tile.y_params)
+            for row in range(self.y_list.count()):
+                item = self.y_list.item(row)
+                name = item.data(Qt.ItemDataRole.UserRole) or item.text()
+                state = (Qt.CheckState.Checked if name in wanted
+                         else Qt.CheckState.Unchecked)
+                if item.checkState() != state:
+                    item.setCheckState(state)
+        finally:
+            self.y_list.blockSignals(blocked)
+            self._updating = False
+
     def refresh(self) -> None:
+        signature = self._list_signature()
+        if signature == self._list_state:
+            # The filter is not touched: it depends only on the text in the
+            # box, which a refresh cannot have changed.
+            self._sync_selection()
+            return
+        self._list_state = signature
+
         self._updating = True
         try:
             params = self._session.parameters
@@ -433,15 +696,24 @@ class ParameterPanel(QWidget):
                 default = next((p for p in params if p.upper().startswith("TIME")), params[0])
                 self.x_combo.setCurrentIndex(max(0, self.x_combo.findData(default)))
 
-            self.y_list.clear()
-            for name in params:
-                item = QListWidgetItem(self._session.label(name))
-                item.setData(Qt.ItemDataRole.UserRole, name)
-                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                item.setCheckState(
-                    Qt.CheckState.Checked if name in tile.y_params else Qt.CheckState.Unchecked
-                )
-                self.y_list.addItem(item)
+            # Four hundred channels is four hundred list items, and without
+            # these Qt relayouts and repaints the widget on every one of them.
+            self.y_list.setUpdatesEnabled(False)
+            blocked = self.y_list.blockSignals(True)
+            try:
+                self.y_list.clear()
+                for name in params:
+                    item = QListWidgetItem(self._session.label(name))
+                    item.setData(Qt.ItemDataRole.UserRole, name)
+                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                    item.setCheckState(
+                        Qt.CheckState.Checked if name in tile.y_params
+                        else Qt.CheckState.Unchecked
+                    )
+                    self.y_list.addItem(item)
+            finally:
+                self.y_list.blockSignals(blocked)
+                self.y_list.setUpdatesEnabled(True)
 
         finally:
             self._updating = False
@@ -1303,7 +1575,18 @@ class IsoPanel(QWidget):
         for name in list(self._state.iso_states):
             self._ensure_groups(name)
         signature = self._tree_signature()
-        if not force and signature == getattr(self, "_tree_state", None):
+        previous = getattr(self, "_tree_state", None)
+        if not force and signature == previous:
+            self._update_summary()
+            return
+        if (not force and previous is not None
+                and self._tree_shape(signature) == self._tree_shape(previous)):
+            # Only ticks moved. The rows are right, so write the ticks where
+            # they are rather than destroying several hundred widget items and
+            # building them again -- which is what made this tree blink every
+            # time a value was toggled, and took the scroll position with it.
+            self._tree_state = signature
+            self._sync_tree_ticks(signature)
             self._update_summary()
             return
         self._tree_state = signature
@@ -1326,9 +1609,74 @@ class IsoPanel(QWidget):
         self._select_param(selected)
         self._update_summary()
 
-    def _add_param_node(self, name, active, grouped, value_count, outside,
-                        entries, expanded) -> None:
-        iso = self._state.iso_states[name]
+    @staticmethod
+    def _tree_shape(signature):
+        """The signature with every tick taken out of it.
+
+        Two signatures with the same shape describe the same rows in the same
+        order, so one can be turned into the other by writing checkboxes. The
+        parameter's own active flag and each entry's on flag are what differ;
+        everything else -- which parameters, grouped or not, their labels and
+        keys, what falls outside the groups, what is expanded -- decides what
+        rows exist.
+        """
+        return tuple(
+            (name, grouped, value_count, outside,
+             tuple((label, key) for label, _on, key in entries), expanded)
+            for name, _active, grouped, value_count, outside, entries, expanded
+            in signature
+        )
+
+    def _sync_tree_ticks(self, signature) -> None:
+        """Write the ticks of an already-correct tree.
+
+        Walks the nodes alongside the signature rows -- they are in the same
+        order because both come from sorted(iso_states) -- and touches only
+        what is wrong. The heading goes with them: the badge counts what is
+        ticked, so it is as stale as the checkbox.
+        """
+        self._updating = True
+        blocked = self.tree.blockSignals(True)
+        try:
+            for index, row in enumerate(signature):
+                node = self.tree.topLevelItem(index)
+                if node is None:
+                    break
+                name, active, grouped, value_count, outside, entries, _exp = row
+
+                wanted = (Qt.CheckState.Checked if active
+                          else Qt.CheckState.Unchecked)
+                if node.checkState(0) != wanted:
+                    node.setCheckState(0, wanted)
+
+                text = self._param_node_text(name, grouped, value_count,
+                                             outside, entries)
+                if node.text(0) != text:
+                    node.setText(0, text)
+                    node.setToolTip(0, self._param_node_tip(entries))
+
+                for child_index, (_label, on, _key) in enumerate(
+                        entries[:ISO_TREE_MAX_CHILDREN]):
+                    child = node.child(child_index)
+                    if child is None:
+                        break
+                    wanted = (Qt.CheckState.Checked if on
+                              else Qt.CheckState.Unchecked)
+                    if child.checkState(0) != wanted:
+                        child.setCheckState(0, wanted)
+        finally:
+            self.tree.blockSignals(blocked)
+            self._updating = False
+
+    def _param_node_text(self, name, grouped, value_count, outside,
+                         entries) -> str:
+        """The heading of one parameter's node, badge and warnings included.
+
+        Its own function because the in-place update path needs exactly this
+        string: the badge counts what is ticked, so a tick changes the heading
+        as well as the checkboxes under it, and a heading left saying "3 of 12"
+        over four ticked values would be worse than a rebuild.
+        """
         badge = iso_selection_badge(
             len(entries), sum(1 for _label, on, _key in entries if on))
         parts = [name]
@@ -1347,14 +1695,23 @@ class IsoPanel(QWidget):
             # with nothing to explain it.
             parts.append("{0} outside the groups".format(outside))
 
-        node = QTreeWidgetItem(self.tree, ["   ".join(parts)])
+        return "   ".join(parts)
+
+    @staticmethod
+    def _param_node_tip(entries) -> str:
+        return iso_selection_summary(
+            [label for label, _on, _key in entries],
+            [label for label, on, _key in entries if on])
+
+    def _add_param_node(self, name, active, grouped, value_count, outside,
+                        entries, expanded) -> None:
+        node = QTreeWidgetItem(self.tree, [self._param_node_text(
+            name, grouped, value_count, outside, entries)])
         node.setFlags(node.flags() | Qt.ItemFlag.ItemIsUserCheckable)
         node.setCheckState(
             0, Qt.CheckState.Checked if active else Qt.CheckState.Unchecked)
         node.setData(0, Qt.ItemDataRole.UserRole, ("param", name))
-        node.setToolTip(0, iso_selection_summary(
-            [label for label, _on, _key in entries],
-            [label for label, on, _key in entries if on]))
+        node.setToolTip(0, self._param_node_tip(entries))
 
         # Only what will be looked at. Everything past the cap is still
         # filtered on -- its ticks are in the state, not in the tree -- and
@@ -1383,10 +1740,16 @@ class IsoPanel(QWidget):
                 "Add a parameter to filter runs by the value it holds constant.")
             return
         active = sum(1 for iso in states.values() if iso.active)
+        # Say what the filters are doing to the DATA tab's choice, not what
+        # they select on their own. These narrow that choice rather than
+        # replacing it, and the sentence is where that becomes obvious.
+        held = self._state.excluded_by_iso()
+        effect = (" Narrowing what the DATA tab has chosen: {0} of its runs "
+                  "held back.".format(held) if held else "")
         self.summary.setText(
             "{0} filter{1}, {2} active. Filters combine with AND, so each one "
-            "narrows the set.".format(
-                len(states), "" if len(states) == 1 else "s", active)
+            "narrows the set.{3}".format(
+                len(states), "" if len(states) == 1 else "s", active, effect)
         )
 
     # ------------------------------------------------------------ selection
@@ -1625,46 +1988,28 @@ class IsoPanel(QWidget):
         self._rebuild_tree(force=True)
         self.apply_filter()
 
-    def _passes(self, iso: IsoState, value: float) -> bool:
-        if value != value:      # NaN: the run has no value for this parameter
-            return False
-        if iso.grouped and iso.groups:
-            index = self._session.iso_group_index(
-                value, [IsoGroup(n, lo, hi, a) for n, lo, hi, a in iso.groups]
-            )
-            return 0 <= index < len(iso.groups) and iso.groups[index][3]
-        return iso.value_enabled.get(value, True)
-
     def apply_filter(self) -> None:
-        """Select the runs that satisfy every active filter.
+        """Say that the filters changed. Nothing else.
 
-        Combining with AND rather than OR is the useful default: adding a second
-        filter should narrow the set, not widen it.
+        It used to select the runs itself -- a pass over every run in every
+        file calling set_selected() -- so switching a filter on rewrote the
+        DATA tab: every run in the band joined the plot whether or not the user
+        had chosen it, and every run outside it was unticked whether or not
+        they had. Two controls, one piece of state, each overwriting the
+        other's answer.
+
+        The two are independent constraints now. Which runs the filters admit
+        is recorded separately (AppState.resolve_iso_filters) and intersected
+        with the DATA ticks at the point of drawing (AppState.plotted_sims), so
+        this panel no longer needs to know what a file is -- it declares the
+        filter and the window re-derives from it, which is also the one place
+        that can know a file has since been loaded.
+
+        The predicate moved into AppState with the rest, which took one ABI
+        crossing per run per filter out of the path on the way: deciding which
+        interval holds a value is two comparisons, and isogroups.group_of()
+        does them without leaving Python.
         """
-        filters = self._state.active_iso_filters()
-        if not filters:
-            self.filter_changed.emit()
-            return
-
-        for file_handle in self._session.files:
-            # One ISO scan per parameter per file; each reads only the first
-            # record of every block, so this stays cheap even on large files.
-            values = {
-                iso.param: self._session.iso_values(file_handle.index, iso.param)
-                for iso in filters
-            }
-            for sim_index in range(file_handle.simulation_count):
-                keep = True
-                for iso in filters:
-                    column = values[iso.param]
-                    if sim_index >= column.size:
-                        keep = False
-                        break
-                    if not self._passes(iso, float(column[sim_index])):
-                        keep = False
-                        break
-                self._state.set_selected(file_handle.index, sim_index, keep)
-
         self.filter_changed.emit()
 
 
@@ -1920,9 +2265,10 @@ class StylePanel(QWidget):
                 self.iso_combo.setCurrentText(tile.color_iso_param)
             elif params:
                 # Displayed, not assigned: a refresh must not edit the tile.
-                # Prefer a parameter the user has already set up as an ISO.
-                configured = [p for p in self._state.iso_states if p in params]
-                self.iso_combo.setCurrentText(configured[0] if configured else params[0])
+                # The same rule the commit uses, so the dropdown can never show
+                # one parameter while the tile goes on to adopt another.
+                self.iso_combo.setCurrentText(
+                    self._state.default_iso_param(params))
 
             self.width_spin.setValue(styles.line_width)
             self.symbol_spin.setValue(styles.symbol_size)
@@ -1960,7 +2306,7 @@ class StylePanel(QWidget):
                     entries.append((label, "iso::{0}::{1}".format(tile.color_iso_param, label)))
 
         else:  # simulation
-            for file_index, sim_index in sorted(self._state.selected_sims):
+            for file_index, sim_index in self._state.plotted_sims():
                 handle = self._session.file(file_index)
                 if handle is None or sim_index >= handle.simulation_count:
                     continue
@@ -2123,6 +2469,20 @@ class StylePanel(QWidget):
         if self._updating:
             return
         self._state.tile.color_mode = ColorMode(index)
+        # Settled here, before the table is built from it. Choosing ISO leaves
+        # the tile in ISO mode with no ISO parameter named, and both
+        # _style_entries() and the tile's own colouring test that name and fall
+        # back to colouring by simulation when it is empty. The default was
+        # being committed -- but by AppState.apply_parameter_defaults, which
+        # runs inside refresh_plots(), i.e. *after* style_changed reaches the
+        # window, which is one step too late for the table below. So the plots
+        # came back coloured by ISO while CURVES still listed runs, under a
+        # dropdown already showing the parameter it had picked.
+        #
+        # Calling the same method rather than repeating its choice: which
+        # parameter to prefer is a rule with one owner, and two copies of it
+        # would eventually disagree about a tile the user never touched.
+        self._state.apply_parameter_defaults(self._session.parameters)
         self._state.dirty = True
         self.refresh()
         self.style_changed.emit()
@@ -2689,19 +3049,11 @@ class AreaPanel(_AnnotationPanelBase):
         self.color_swatch.color_picked.connect(self._commit_color)
         form.addRow("Colour", self.color_swatch)
 
-        self.label_edit = QLineEdit()
-        self.label_edit.setPlaceholderText("Optional caption, e.g. rotation")
-        # Deliberately not textChanged: every keystroke would redraw every
-        # plot, and a caption is not worth a round trip through the core per
-        # character. editingFinished fires on Enter or when focus leaves, and
-        # the timer catches a pause in typing so the plot still follows along.
-        self.label_edit.editingFinished.connect(self._commit_label)
-        self._label_timer = QTimer(self)
-        self._label_timer.setSingleShot(True)
-        self._label_timer.setInterval(400)
-        self._label_timer.timeout.connect(self._commit_label)
-        self.label_edit.textEdited.connect(lambda _t: self._label_timer.start())
-        form.addRow("Label", self.label_edit)
+        # No caption field. A band was captioned by typing into a box here,
+        # and every keystroke rebuilt the tile -- which deleted the item being
+        # edited, so the caption vanished as it was typed. Text notes already
+        # do captions properly: placed where you want them, on an opaque
+        # ground, dragged rather than typed at. See model.Marker.
 
         self.alpha_spin = QDoubleSpinBox()
         self.alpha_spin.setRange(0.02, 1.0)
@@ -2736,9 +3088,10 @@ class AreaPanel(_AnnotationPanelBase):
         self.changed.emit()
 
     def _describe(self, item) -> str:
-        span = "{0}:  {1:g} … {2:g}".format(item.x_param or "?",
+        # Bands no longer carry a caption -- see AreaBand in model.py. The row
+        # is the span alone, which is what identifies the band in the list.
+        return "{0}:  {1:g} … {2:g}".format(item.x_param or "?",
                                             item.x_min, item.x_max)
-        return "{0}   ({1})".format(item.label, span) if item.label else span
 
     def _load_editor(self, item) -> None:
         self.visible_check.setChecked(item.visible)
@@ -2746,20 +3099,8 @@ class AreaPanel(_AnnotationPanelBase):
             self.x_param_combo.setCurrentText(item.x_param)
         self.min_spin.setValue(item.x_min)
         self.max_spin.setValue(item.x_max)
-        self.label_edit.setText(item.label)
         self.color_swatch.set_color(item.color)
         self.alpha_spin.setValue(item.alpha)
-
-    def _commit_label(self) -> None:
-        self._label_timer.stop()
-        item = self._current()
-        if item is None or self._updating:
-            return
-        text = self.label_edit.text()
-        if text == item.label:
-            return          # nothing to redraw for
-        item.label = text
-        self._commit()
 
     def _commit_visible(self, checked: bool) -> None:
         item = self._current()
@@ -2825,10 +3166,7 @@ class MarkerPanel(_AnnotationPanelBase):
         self.position_spin.valueChanged.connect(self._commit_position)
         form.addRow("At", self.position_spin)
 
-        self.label_edit = QLineEdit()
-        self.label_edit.setPlaceholderText("Optional label, e.g. Rotation")
-        self.label_edit.editingFinished.connect(self._commit_label)
-        form.addRow("Label", self.label_edit)
+        # No caption field -- see AreaPanel above for why.
 
         self.color_swatch = ColorSwatch("#ff3333")
         self.color_swatch.color_picked.connect(self._commit_color)
@@ -2864,15 +3202,8 @@ class MarkerPanel(_AnnotationPanelBase):
         if item.x_param:
             self.x_param_combo.setCurrentText(item.x_param)
         self.position_spin.setValue(item.position)
-        self.label_edit.setText(item.label)
         self.color_swatch.set_color(item.color)
         self.dot_spin.setValue(item.dot_size)
-
-    def _commit_label(self) -> None:
-        item = self._current()
-        if item is not None and not self._updating:
-            item.label = self.label_edit.text().strip()
-            self._commit()
 
     def _commit_dot_size(self, value: float) -> None:
         item = self._current()
@@ -3672,7 +4003,7 @@ class InspectPanel(QWidget):
         tile = self._state.tile
         rows = []
 
-        if tile.is_empty() or not self._state.selected_sims:
+        if tile.is_empty() or not self._state.plotted_sims():
             self.stats_header.setText("Nothing plotted in the active tile.")
             self.stats_table.setRowCount(0)
             return
@@ -3687,7 +4018,7 @@ class InspectPanel(QWidget):
         # respect.
         windowed = 0
 
-        for file_index, sim_index in sorted(self._state.selected_sims):
+        for file_index, sim_index in self._state.plotted_sims():
             handle = self._session.file(file_index)
             if handle is None or sim_index >= handle.simulation_count:
                 continue

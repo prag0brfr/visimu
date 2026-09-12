@@ -82,6 +82,10 @@ class MainWindow(QMainWindow):
         # does not; None means "assume nothing".
         self._loaded_signature = None
         self._ui_enabled = True
+        # (path, size, mtime) of files the user has said not to reload. Held
+        # rather than acted on, so declining leaves the plots as they are --
+        # see _check_for_changes().
+        self._declined_reloads = set()
         self.tasks = TaskRunner(self)
         self.tasks.started.connect(self._on_task_started)
         self.tasks.finished.connect(self._on_task_finished)
@@ -270,7 +274,14 @@ class MainWindow(QMainWindow):
         self.rail.theme_toggled.connect(self.toggle_theme)
 
         self.panel_stack = QStackedWidget()
-        self.panel_stack.setMinimumWidth(300)
+        # 230, not 300. The window's minimum width is the sum of its parts, and
+        # on a laptop screen that sum was wider than the screen -- which is why
+        # the window could not be shrunk, and on some Linux window managers
+        # could not be maximised either, since a maximise that cannot satisfy
+        # the minimum is refused outright. The panels are narrower now that the
+        # type is smaller, so this is the width they actually need rather than
+        # the width they used to.
+        self.panel_stack.setMinimumWidth(230)
         self.panel_stack.setMaximumWidth(600)
         for _name, widget in self._panels:
             self.panel_stack.addWidget(widget)
@@ -337,14 +348,43 @@ class MainWindow(QMainWindow):
 
         self._sync_page_combo()
 
+    @staticmethod
+    def _refresh_now(widget) -> bool:
+        """Refresh one panel, and survive it failing.
+
+        One panel is a list of things; the plots are the work. A refresh that
+        raised used to take the whole handler with it, and the damage was never
+        confined to the panel: dragging a shaded band ran
+        _apply_annotation_move(), which refreshed the marker and area panels
+        *before* redrawing the grid, so when AreaPanel.refresh() raised on a
+        field that had been removed from the model, the grid refresh never
+        happened at all. The band moved on the tile under the cursor -- pyqtgraph
+        having already dragged that item -- and stayed where it was on every
+        other tile. Two bugs from one exception, and only one of them looked
+        like an exception.
+
+        Logged rather than swallowed, for the same reason PlotGrid.refresh()
+        logs a tile that will not draw: a panel that is visibly out of date and
+        a line in the log is a far easier thing to diagnose than a window that
+        silently stops keeping up.
+        """
+        if widget is None or not hasattr(widget, "refresh"):
+            return False
+        try:
+            widget.refresh()
+            return True
+        except Exception:
+            _log.exception("panel %s failed to refresh",
+                           type(widget).__name__)
+            return False
+
     def _on_tab_selected(self, index: int) -> None:
         self.panel_stack.setCurrentIndex(index)
         widget = self._panels[index][1]
         # Always refresh on show: a panel becomes visible rarely, and doing it
         # unconditionally avoids having to track staleness perfectly.
         self._stale_panels.discard(widget)
-        if hasattr(widget, "refresh"):
-            widget.refresh()
+        self._refresh_now(widget)
 
     def _refresh_panel(self, widget) -> None:
         """Refresh one panel now, or mark it for when it is next shown.
@@ -358,7 +398,7 @@ class MainWindow(QMainWindow):
             return
         if widget is self.panel_stack.currentWidget():
             self._stale_panels.discard(widget)
-            widget.refresh()
+            self._refresh_now(widget)
         else:
             self._stale_panels.add(widget)
 
@@ -366,8 +406,7 @@ class MainWindow(QMainWindow):
         """Mark every panel stale, refreshing only the one on screen."""
         current = self.panel_stack.currentWidget()
         self._stale_panels = {panel for _name, panel in self._panels if panel is not current}
-        if current is not None and hasattr(current, "refresh"):
-            current.refresh()
+        self._refresh_now(current)
 
     def _build_status_bar(self) -> None:
         self.status_label = QLabel("Ready")
@@ -605,6 +644,17 @@ class MainWindow(QMainWindow):
         except CoreError:
             return False
 
+    def _file_stamp(self, index: int):
+        """(path, size, mtime) of one open file as it is on disk right now."""
+        handle = self.session.file(index)
+        if handle is None:
+            return None
+        try:
+            info = os.stat(handle.path)
+        except OSError:
+            return None
+        return (handle.path, info.st_size, info.st_mtime)
+
     def _check_for_changes(self) -> None:
         if self._suppress_reload_prompt:
             return
@@ -614,6 +664,9 @@ class MainWindow(QMainWindow):
         if self.tasks.busy:
             return
         stale = self.session.stale_files()
+        # Drop the ones already declined, unless they have changed again since.
+        stale = [index for index in stale
+                 if self._file_stamp(index) not in self._declined_reloads]
         if not stale:
             return
 
@@ -633,18 +686,26 @@ class MainWindow(QMainWindow):
                     handle = self.session.file(index)
                     if handle:
                         handle.reload()
+                # Reloaded, so nothing about these is declined any more.
+                self._declined_reloads.clear()
                 self.refresh_all()
             else:
-                # Re-reading the timestamps stops us asking again about the
-                # same change on the next tick.
+                # No means no. This used to reload anyway -- the only way to
+                # stop the timer asking again was to re-read the timestamps,
+                # and re-reading them is a reload -- so declining swapped the
+                # data under the plots, which is the one thing the question was
+                # asked to prevent.
+                #
+                # What the timer actually needs is to recognise the change it
+                # has already been told about, and that is a fact about the
+                # file on disk rather than about the session. Remembering the
+                # size and mtime that were declined costs a stat per tick and
+                # leaves the loaded data alone; if the file changes again, the
+                # stamp no longer matches and the question comes back.
                 for index in stale:
-                    handle = self.session.file(index)
-                    if handle:
-                        handle.reload()
-                # A reload drops the loaded columns even when the answer was
-                # No, so the next redraw must go through the worker rather than
-                # reading them back on the GUI thread.
-                self._loaded_signature = None
+                    stamp = self._file_stamp(index)
+                    if stamp is not None:
+                        self._declined_reloads.add(stamp)
         finally:
             self._suppress_reload_prompt = False
 
@@ -668,6 +729,14 @@ class MainWindow(QMainWindow):
                     len(notes), notes[0] + ("..." if len(notes) > 1 else ""))
             )
 
+        # Which runs the ISO filters admit is a fact about the loaded files, so
+        # it is recomputed here and only here -- this is the one moment those
+        # can have changed. Doing it on every redraw would put an ISO column
+        # read per file into the restyle path for an answer that never moves;
+        # not doing it at all would leave a newly loaded file's runs outside an
+        # answer computed before it arrived, and so silently filtered out.
+        self._resolve_iso_filters()
+
         # One panel failing must not stop the others, and must not abort the
         # task callback this runs inside -- that is what leaves the UI disabled.
         for name, panel in self._panels:
@@ -677,6 +746,14 @@ class MainWindow(QMainWindow):
                 _log.exception("panel %s failed to refresh", name)
         self._sync_page_combo()
         self.refresh_plots()
+
+    def _resolve_iso_filters(self) -> None:
+        """Re-derive the ISO half of what gets drawn."""
+        self.state.resolve_iso_filters(
+            [(handle.index, handle.simulation_count)
+             for handle in self.session.files],
+            self.session.iso_values,
+        )
 
     def _on_selection_changed(self) -> None:
         # Which curves exist changed, so every panel listing them is stale.
@@ -729,7 +806,7 @@ class MainWindow(QMainWindow):
             self._update_status()
             return
 
-        sims_by_file = self.grid.selected_sims_by_file()
+        sims_by_file = self.grid.plotted_sims_by_file()
         signature = (
             tuple(sorted((index, tuple(names))
                          for index, names in requirements.items())),
@@ -778,11 +855,19 @@ class MainWindow(QMainWindow):
         self.refresh_plots()
 
     def _update_status(self) -> None:
+        # Both numbers when they differ. The DATA tab and the ISO filters are
+        # independent constraints, so a run can be ticked and still not drawn,
+        # and "12 run(s) plotted" over a DATA tab showing twenty ticks is the
+        # kind of thing that reads as a bug. Saying how many the filters are
+        # holding back is what makes it read as a filter.
+        plotted = len(self.state.plotted_sims())
+        held = self.state.excluded_by_iso()
+        runs = ("{0} run(s) plotted".format(plotted) if not held
+                else "{0} of {1} run(s) plotted, {2} held back by the ISO "
+                     "filter(s)".format(plotted, plotted + held, held))
         self.status_label.setText(
-            "{0} file(s), {1} run(s) plotted, {2} parameter(s)".format(
-                self.session.file_count,
-                len(self.state.selected_sims),
-                len(self.session.parameters),
+            "{0} file(s), {1}, {2} parameter(s)".format(
+                self.session.file_count, runs, len(self.session.parameters),
             )
         )
 
@@ -892,9 +977,15 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._apply_annotation_move)
 
     def _apply_annotation_move(self) -> None:
+        # The plots first. They are the thing the drag was for, and they are
+        # global: the same band belongs on every tile drawn against its
+        # parameter, so a drag that reaches only the tile under the cursor is
+        # not a cosmetic failure but a wrong picture. Refreshing the lists
+        # ahead of them put two panels between the user's gesture and its
+        # result for no reason at all.
+        self.grid.refresh()
         self._refresh_panel(self.marker_panel)
         self._refresh_panel(self.area_panel)
-        self.grid.refresh()
 
     def _on_legend_applied(self, count: int) -> None:
         """The legend was copied to every tile. Say how far it reached.
@@ -946,7 +1037,14 @@ class MainWindow(QMainWindow):
             self.inspect_panel.refresh_stats()
 
     def _on_iso_filter(self) -> None:
-        self.data_panel.refresh()
+        # Re-derive which runs the filters admit. The ISO panel declares the
+        # filter; this is where it becomes a set of runs, because this is the
+        # only place that knows which files are loaded.
+        self._resolve_iso_filters()
+        # The DATA tab is refreshed whether or not it is the visible panel, and
+        # its ticks are untouched by any of this -- what changes is which of
+        # its rows are dimmed as held back by the filter.
+        self._refresh_now(self.data_panel)
         self.refresh_plots()
 
     def _refresh_active_border(self) -> None:
@@ -977,6 +1075,10 @@ class MainWindow(QMainWindow):
             self.plot_toolbar.refresh()
             return
         self.state.active_tile = index
+        # The Inspect panel reports one run at one instant, and that instant
+        # belonged to the tile that was active. A dot left on it would point at
+        # a reading no longer on screen.
+        self.grid.clear_inspect_dots(keep=index)
         self._invalidate_panels()
         self.plot_toolbar.refresh()
         self._refresh_active_border()
@@ -1121,7 +1223,7 @@ class MainWindow(QMainWindow):
         someone 1200 of their 500,000 points would be a trap.
         """
         tile = self.state.tile
-        if tile.is_empty() or not self.state.selected_sims:
+        if tile.is_empty() or not self.state.plotted_sims():
             QMessageBox.information(self, "Nothing to export",
                                     "The active tile has no curves.")
             return
@@ -1142,7 +1244,7 @@ class MainWindow(QMainWindow):
                 writer = csv.writer(handle)
                 writer.writerow(["file", "run", "parameter", tile.x_param, "value"])
 
-                for file_index, sim_index in sorted(self.state.selected_sims):
+                for file_index, sim_index in self.state.plotted_sims():
                     file_handle = self.session.file(file_index)
                     if file_handle is None or sim_index >= file_handle.simulation_count:
                         continue
@@ -1176,7 +1278,13 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------- close
 
     def closeEvent(self, event) -> None:
-        if self.state.dirty and self.state.workspace_path:
+        # `dirty` alone, not `dirty and workspace_path`. Requiring a path meant
+        # the prompt appeared only for work that had *already* been saved once
+        # -- so an afternoon of pages, tiles and styles built from scratch, the
+        # case with the most to lose, was the one case that closed without
+        # asking. save_workspace() falls back to a Save As when there is no
+        # path, so answering Yes still works from here.
+        if self.state.dirty:
             answer = QMessageBox.question(
                 self,
                 "Unsaved changes",

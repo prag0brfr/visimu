@@ -81,20 +81,20 @@ def theme_for(dark: bool) -> Theme:
 # report -1, and code that reads a font back to adjust it -- the tab rail, the
 # tile captions -- then has to guess. Pixels keep one unit throughout, and the
 # constants below are the only places these numbers appear.
-FONT_PX = 11          # body text: menus, panels, buttons, lists, tables
-FONT_SMALL_PX = 10    # hints, section titles, table headers, the status bar
+FONT_PX = 10          # body text: menus, panels, buttons, lists, tables
+FONT_SMALL_PX = 9     # hints, section titles, table headers, the status bar
 
 # The plot tiles. pyqtgraph wants CSS-ish strings and QFont point sizes rather
 # than pixels, so these are points -- roughly 0.75 x the pixel figures above at
 # the 96 dpi Qt assumes, which is what keeps a tile title in step with a panel
 # heading instead of shouting over it.
-PLOT_TITLE_PT = 8.0     # the tile title
-PLOT_AXIS_PT = 7.5      # axis names and their tick numbers
-PLOT_LEGEND_PT = 7.5    # legend rows
-PLOT_LABEL_PT = 7.0     # crosshair readout, slope figure, marker and area names
+PLOT_TITLE_PT = 7.5     # the tile title
+PLOT_AXIS_PT = 7.0      # axis names and their tick numbers
+PLOT_LEGEND_PT = 7.0    # legend rows
+PLOT_LABEL_PT = 6.5     # crosshair readout, slope figure, captions
 
 # The vertical tab rail down the left edge, whose text is drawn rotated.
-RAIL_FONT_PT = 7.0
+RAIL_FONT_PT = 6.5
 
 
 def plot_font(size_pt: float, bold: bool = False):
@@ -242,25 +242,47 @@ def stylesheet(theme: Theme) -> str:
 
     /* Check and radio indicators are drawn explicitly rather than left to the
        platform style. Once the application sets a palette-changing stylesheet,
-       Windows keeps drawing its own indicators against the *system* colours --
-       so on the dark theme a selected radio button was a dark dot on a dark
-       ground and there was no way to tell which of Simulation / Parameter /
-       ISO was active. These rules make the checked state a filled accent
-       colour, which is unambiguous in both themes. */
+       Qt keeps drawing its own indicators against the *system* colours -- so on
+       the dark theme a selected radio button was a dark dot on a dark ground
+       and there was no way to tell which of Simulation / Parameter / ISO was
+       active. These rules make the checked state a filled accent colour, which
+       is unambiguous in both themes.
+
+       The item views are listed alongside, and that is the part that was
+       missing: the tick boxes beside a run in DATA, a parameter in PARAMS or a
+       value in ISO are drawn by QTreeView/QListView, not by QCheckBox, so none
+       of the rules below reached them. They kept the platform's own indicator,
+       whose unchecked box is a dark outline on a dark ground -- invisible, on
+       the tab whose whole job is choosing what to plot.
+
+       The border is {text_dim} rather than {border}: an outline has to be
+       findable against the surface behind it before it can be read as empty or
+       filled, and the panel border colour is deliberately quiet. */
     QCheckBox, QRadioButton {{ spacing: 5px; color: {text}; }}
-    QCheckBox::indicator, QRadioButton::indicator {{
+    QCheckBox::indicator, QRadioButton::indicator,
+    QTreeView::indicator, QListView::indicator, QTableView::indicator {{
         width: 12px;
         height: 12px;
-        border: 1px solid {border};
+        border: 1px solid {text_dim};
+        border-radius: 3px;
         background: {surface};
     }}
-    QCheckBox::indicator {{ border-radius: 3px; }}
     QRadioButton::indicator {{ border-radius: 7px; }}
-    QCheckBox::indicator:hover, QRadioButton::indicator:hover {{
+    QCheckBox::indicator:hover, QRadioButton::indicator:hover,
+    QTreeView::indicator:hover, QListView::indicator:hover,
+    QTableView::indicator:hover {{
         border: 1px solid {accent};
     }}
-    QCheckBox::indicator:checked {{
+    QCheckBox::indicator:checked,
+    QTreeView::indicator:checked, QListView::indicator:checked,
+    QTableView::indicator:checked {{
         background: {accent};
+        border: 1px solid {accent};
+    }}
+    /* Partly-checked reads as neither on nor off: the accent, dimmed, on the
+       same outline. */
+    QTreeView::indicator:indeterminate, QListView::indicator:indeterminate {{
+        background: {selection};
         border: 1px solid {accent};
     }}
     QRadioButton::indicator:checked {{
@@ -270,7 +292,8 @@ def stylesheet(theme: Theme) -> str:
                                     stop:0 {accent}, stop:0.55 {accent},
                                     stop:0.6 {surface}, stop:1 {surface});
     }}
-    QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {{
+    QCheckBox::indicator:disabled, QRadioButton::indicator:disabled,
+    QTreeView::indicator:disabled, QListView::indicator:disabled {{
         border: 1px solid {border};
         background: {panel};
     }}

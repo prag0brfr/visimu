@@ -348,10 +348,32 @@ class TestDrawPathWiring(unittest.TestCase):
         thread -- which on a 500 MB file is the freeze the worker exists to
         prevent.
         """
-        for method in ("refresh_all", "_check_for_changes"):
-            body = self._source("ui/main_window.py", "MainWindow", method)
-            self.assertIn("_loaded_signature = None", body,
-                          "{0}() must forget the loaded set".format(method))
+        body = self._source("ui/main_window.py", "MainWindow", "refresh_all")
+        self.assertIn("_loaded_signature = None", body,
+                      "refresh_all() must forget the loaded set")
+
+        # The watch timer reaches it through refresh_all() on the reload path,
+        # and has nothing to forget on the other one -- see the test below.
+        watch = self._source("ui/main_window.py", "MainWindow",
+                             "_check_for_changes")
+        self.assertIn("refresh_all", watch)
+
+    def test_declining_a_reload_does_not_reload(self):
+        """"No" used to reload anyway.
+
+        The only way to stop the timer asking again was to re-read the
+        timestamps, and re-reading them *is* a reload -- so declining swapped
+        the data under the plots, which is the one thing the question is asked
+        to prevent. The refusal is remembered as a fact about the file on disk
+        instead, so the loaded data is left alone and a later change asks again.
+        """
+        body = self._source("ui/main_window.py", "MainWindow",
+                            "_check_for_changes")
+        _yes, _sep, no_branch = body.partition("else:")
+        self.assertTrue(_sep, "the decline branch has gone")
+        self.assertNotIn("reload()", no_branch,
+                         "declining a reload must not reload")
+        self.assertIn("_declined_reloads", no_branch)
 
     def test_enabling_the_ui_twice_over_does_nothing(self):
         """Disabling a widget changes how it is drawn, so every plot in the grid
@@ -403,6 +425,45 @@ class TestDrawPathWiring(unittest.TestCase):
             other = self._source("ui/panels.py", "IsoPanel", method)
             self.assertNotIn("_values_cache = {}", other,
                              "{0}() must not clear the cache".format(method))
+
+    def test_the_tiles_do_not_clip_to_view(self):
+        """pyqtgraph's clipToView says of itself that it "presumes that x-values
+        have uniform spacing": it derives dx from the first and last x and
+        slices the array by index arithmetic.
+
+        Curves that share a pen are drawn here as one polyline -- several runs
+        concatenated with a NaN between them -- so x runs 0..100, NaN, 0..100,
+        and both the spacing and the ordering that slice depends on are false.
+        It cut most of the runs out of the item, and the tile came back missing
+        curves. ISO colouring is what made it visible: colouring by ISO value is
+        what makes many runs share one pen.
+
+        Nothing is lost by leaving it off -- the core decimates to the visible
+        x range before the data crosses into Python.
+        """
+        body = self._source("ui/plot_tile.py", "PlotTile", "__init__")
+        self.assertNotIn("setClipToView(True)", body)
+
+    def test_a_failing_tile_does_not_stop_the_others(self):
+        """A rebuild reaches a lot of drawing code, and when something in it
+        raised the loop stopped at that tile: every tile after it kept whatever
+        it was showing before, silently. That reads as "the plot did not
+        update", which is far harder to diagnose than one empty tile and a line
+        in the log."""
+        body = self._source("ui/plot_grid.py", "PlotGrid", "refresh")
+        self.assertIn("try:", body)
+        self.assertIn("_log.exception", body)
+
+    def test_the_legend_is_placed_after_it_is_filled(self):
+        """A legend anchored while empty and then filled changes size under its
+        own anchor, and pyqtgraph re-derives the anchor from whichever corner
+        the item is nearest -- so a legend dragged to the middle crept further
+        on every rebuild until it was back against an edge."""
+        body = self._source("ui/plot_tile.py", "PlotTile", "rebuild")
+        placed = body.index("_place_legend")
+        adopted = body.index("_adopt_groups")
+        self.assertGreater(placed, adopted,
+                           "_place_legend must come after the groups are built")
 
     def test_the_resample_path_writes_one_item_per_group(self):
         body = self._source("ui/plot_tile.py", "PlotTile", "_resample_visible")

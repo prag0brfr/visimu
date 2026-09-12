@@ -434,6 +434,20 @@ tile *looks* — legend, grid, log-y, markers — is all in STYLE.
 
 **COMPUTE** — define derived channels. See below.
 
+Anything drawn **over** the curves — the crosshair readout, the slope figure,
+a text note, a 3D tick — sits on an opaque panel in the plot's own background
+colour. Without one, text was dark on dark wherever a trace ran under it and
+the eye read the two as one object.
+
+**Markers and bands have no captions of their own.** They had, and it was the
+wrong place for them twice over: pyqtgraph anchors a line's label to the line,
+so it sat on the data with nothing behind it, and every keystroke while editing
+one rebuilt the tile and deleted the item being edited — the caption vanished as
+it was typed. Name a band with a **text note** placed over it instead: those are
+positioned where you want them, dragged rather than typed at, and carry the
+opaque ground described above. Workspaces saved when the field existed still
+open; the retired key is ignored.
+
 **ISO values** are written the same way everywhere they appear — a tree row, a
 legend entry, a generated interval name — because every character there is one
 the data does not get: two decimals with trailing zeros trimmed (`0.75`, `3`,
@@ -494,6 +508,11 @@ redrawn: rewriting boundaries someone edited by hand, because a file was opened,
 would be worse. **Distribute evenly** is the one-click fix.
 
 **STYLE** — how the tile and its curves look:
+
+In **Inspect** mode, clicking marks the sample being reported with a red dot, so
+the table of forty channels beside it is anchored to something visible — the
+click lands on whichever curve was nearest, which is not always the one you were
+aiming at. The dot comes off when you leave Inspect or make another tile active.
 
 - *Tile display* — legend, grid, log Y and point markers. These used to be at
   the bottom of PARAMS, which split "what is plotted" and "how it looks" across
@@ -960,6 +979,16 @@ slowing down.
 roughly two points per horizontal pixel before it crosses the boundary, so a tile
 draws ~1200 points whether the channel holds ten thousand samples or ten million.
 
+**Turning a 3D cube only re-projects it.** A rotation changes two angles and
+nothing else, but it used to go through the full tile rebuild: three channels
+re-read from the core per run, their bounds recomputed, the samples re-thinned,
+every draw item destroyed and recreated — on every mouse-move of a drag. The
+normalised cube and the pen assignment are cached, and a rotation re-projects
+into the items it already has. At 25 runs of 1 814 projected points that is
+**5.2 ms → 0.7 ms** of arithmetic per step, before counting the Qt items it no
+longer builds and throws away. Zoom and pan already worked this way; rotate was
+the one that did not.
+
 **A redraw that changes nothing costs nothing.** Once a page holds a lot of
 data, what makes the window feel slow is not drawing a curve but deciding to
 draw one that is already on screen. Four things were doing exactly that, and
@@ -1000,6 +1029,12 @@ hid every zoom whose lower edge scaled with its width, so zooming in around the
 origin kept whatever resolution the curve already had. The key and its
 arithmetic live in `aoeviewer/scales.py`, which imports no Qt, and are tested in
 `tests/test_redraw.py`.
+
+**Colouring by ISO does not load the ISO column.** `iso_values()` reads the
+first record of each block through the index and touches no column memory — the
+683x saving described below. Naming the ISO parameter as a channel the tile
+needed undid exactly that, parsing the whole of MACH across every run of a
+550 MB file to answer a question the header had already answered.
 
 **A file opened once is opened fast afterwards.** An AOE file stores one record
 per line — every parameter of one time step, side by side — and this program
@@ -1230,7 +1265,7 @@ the fingerprint, which is capped, while the parse it replaces is not.
 
 ```bash
 make test                                  # 1687 C++ checks
-python -m unittest discover -s tests -v    # 394 Python tests
+python -m unittest discover -s tests -v    # 415 Python tests
 make bench                                 # parser microbenchmark
 python tools/bench_app.py FILE...          # end-to-end, on real files
 ```

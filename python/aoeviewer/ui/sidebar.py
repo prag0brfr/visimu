@@ -18,9 +18,12 @@ from PySide6.QtWidgets import QAbstractButton, QSizePolicy, QVBoxLayout, QWidget
 
 from ..theme import RAIL_FONT_PT, Theme
 
-RAIL_WIDTH = 24
-MIN_BUTTON_HEIGHT = 46
-TEXT_PADDING = 18
+# The rail is pure chrome down the left edge, so it gives up space first: it
+# has to be wide enough to read a rotated word in and no wider. TEXT_PADDING is
+# the slack around that word, and it was set when the text was larger.
+RAIL_WIDTH = 21
+MIN_BUTTON_HEIGHT = 34
+TEXT_PADDING = 10
 
 
 class VerticalTabButton(QAbstractButton):
@@ -119,7 +122,7 @@ class TabRail(QWidget):
         self.setAutoFillBackground(True)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 6, 0, 6)
+        layout.setContentsMargins(0, 4, 0, 4)
         layout.setSpacing(1)
 
         for index, label in enumerate(labels):

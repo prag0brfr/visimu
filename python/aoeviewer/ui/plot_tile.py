@@ -27,6 +27,7 @@ import pyqtgraph as pg
 from pyqtgraph.graphicsItems.GraphicsWidgetAnchor import GraphicsWidgetAnchor
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPolygonF
+from PySide6.QtWidgets import QSizePolicy
 
 from ..model import (
     AppState,
@@ -62,9 +63,7 @@ from ..scales import (  # noqa: F401
 # Annotations are furniture the engineer places deliberately; a band or a
 # marker hidden behind whichever curve happens to cross it is not doing its job.
 AREA_Z = 5          # shaded bands: translucent, so the data still reads through
-AREA_LABEL_Z = 6    # a band's caption, above its own wash
 MARKER_Z = 10       # marker lines and their dots
-MARKER_LABEL_Z = 11
 GRID_3D_Z = -20     # the back walls of a 3D box, behind everything
 
 # Most rows a legend may have. pyqtgraph builds a QGraphicsGridLayout with two
@@ -73,6 +72,93 @@ GRID_3D_Z = -20     # the back walls of a 3D box, behind everything
 # responding rather than merely slowed down. Past this the legend says how many
 # more there are, which is the only useful thing a list that long can say.
 MAX_LEGEND_ROWS = 60
+
+# The dot marking the sample the Inspect panel is reporting. Above the curves
+# and the markers, because its whole job is to be findable; red because nothing
+# in the palette is, so it never reads as one more curve.
+INSPECT_DOT_Z = 40
+INSPECT_DOT_SIZE = 9.0
+INSPECT_DOT_COLOUR = "#ff2d2d"
+
+# The legend, above all of it. It is a key rather than a reading of the data,
+# and now that it is painted on an opaque card the card must not be underneath
+# the curves it explains -- a trace crossing over the panel would put a line
+# through the very swatches meant to identify it.
+LEGEND_Z = 50
+
+# Padding between a label's text and the edge of the ground painted behind it,
+# in viewport pixels. Also the slack that makes a one-word caption easy to grab.
+LABEL_PAD = 3.0
+
+# How opaque that ground is. Not fully: a caption is furniture laid on the plot,
+# and a little of the trace showing through is what keeps it reading as part of
+# the same picture rather than as a hole punched in it. Enough that the text
+# never has to compete with a curve underneath.
+LABEL_GROUND_ALPHA = 0.88
+
+
+def _label_brush(colour: str):
+    """The same ground as paint_label_ground(), for pyqtgraph's own TextItems.
+
+    TextItem draws its own fill, so it takes a brush rather than a paint call;
+    keeping both in one place is what stops the crosshair readout and the
+    captions drifting apart.
+    """
+    ground = QColor(colour)
+    ground.setAlphaF(LABEL_GROUND_ALPHA)
+    return pg.mkBrush(ground)
+
+
+# The legend gets a more opaque ground than a caption does, and its own border.
+# A caption is a word or two that the eye separates from the data by its shape
+# alone; the legend is a block of rows whose swatches are themselves drawn in
+# the curve colours, so any trace showing through it reads as one more entry.
+# Still short of fully opaque, so you can still tell what it is covering.
+LEGEND_GROUND_ALPHA = 0.94
+
+# Room between the legend's frame and its rows. pyqtgraph's legend has none,
+# which was invisible while there was no ground behind it and looks cramped the
+# moment there is -- the text would sit flush against the border.
+LEGEND_PAD = 5
+
+
+def legend_ground(theme) -> dict:
+    """How the card the legend sits on is filled, framed and written on.
+
+    Returned as the keyword arguments LegendItem takes, so the same call
+    describes a legend being built and one being re-themed.
+
+    Framed as well as filled, unlike a caption: at 94% opacity over a plot of
+    the same background colour the panel has no visible edge at all where it
+    covers an empty part of the tile, and the edge is the thing that tells the
+    user where the legend stops and the data starts.
+    """
+    ground = QColor(theme.plot_background)
+    ground.setAlphaF(LEGEND_GROUND_ALPHA)
+    return {
+        "brush": pg.mkBrush(ground),
+        "pen": pg.mkPen(theme.plot_grid, width=1.0),
+        "labelTextColor": theme.plot_foreground,
+    }
+
+
+def paint_label_ground(painter, rect: QRectF, colour: str) -> None:
+    """Fill a rounded panel behind text drawn over the data.
+
+    Every readout on a tile does this -- the crosshair figures, the slope, the
+    captions -- because none of them were legible without it: text drawn
+    straight onto the curves was dark on dark wherever a trace ran under it, and
+    the eye read the two as one object. The fill is the plot background, so the
+    label reads as a card laid on the plot rather than as another colour in the
+    data.
+    """
+    ground = QColor(colour)
+    ground.setAlphaF(LABEL_GROUND_ALPHA)
+    painter.save()
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QBrush(ground))
+    painter.drawRoundedRect(rect, 2.0, 2.0)
+    painter.restore()
 
 # pyqtgraph takes axis label styling as CSS-ish keyword arguments. Named here so
 # every setLabel call is styled the same way; a label left unstyled falls back to
@@ -129,6 +215,37 @@ class DraggableLegend(pg.LegendItem):
     def __init__(self, on_moved, **kwargs):
         pg.LegendItem.__init__(self, **kwargs)
         self._on_moved = on_moved
+        # pyqtgraph lays the rows out flush with the item's edge. With nothing
+        # painted behind them that went unnoticed; with a ground and a border it
+        # is the difference between a card and a box drawn round some text.
+        try:
+            self.layout.setContentsMargins(LEGEND_PAD, LEGEND_PAD,
+                                           LEGEND_PAD, LEGEND_PAD)
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+
+    def set_ground(self, brush=None, pen=None, labelTextColor=None) -> None:
+        """Fill, frame and write on the panel behind the entries.
+
+        Fill and frame go through opts rather than setBrush()/setPen(), whose
+        names have come and gone across pyqtgraph versions; paint() has read
+        opts['brush'] and opts['pen'] throughout. The text colour does need its
+        setter, because it has to reach the rows already laid out.
+        """
+        try:
+            self.opts["brush"] = brush
+            self.opts["pen"] = pen
+        except (AttributeError, TypeError):
+            return
+        if labelTextColor is not None:
+            try:
+                self.setLabelTextColor(labelTextColor)
+            except (AttributeError, RuntimeError, TypeError):
+                pass
+        try:
+            self.update()
+        except (AttributeError, RuntimeError):
+            pass
 
     def mouseDragEvent(self, event):
         # Implemented rather than delegated: pyqtgraph's own handler is gated
@@ -272,9 +389,10 @@ class TextOverlay(GraphicsWidgetAnchor, pg.GraphicsObject):
     zoom is not a note; something that has to move with the data is a marker.
     """
 
-    def __init__(self, on_moved=None):
+    def __init__(self, on_moved=None, background: str = "#000000"):
         pg.GraphicsObject.__init__(self)
         GraphicsWidgetAnchor.__init__(self)
+        self._background = background
         self._notes = []
         self._rect = QRectF(0, 0, 1, 1)
         # Where each visible note was last painted, so a click can be matched
@@ -297,6 +415,11 @@ class TextOverlay(GraphicsWidgetAnchor, pg.GraphicsObject):
         if on_moved is not None:
             self.setAcceptHoverEvents(True)
 
+    def set_background(self, colour: str) -> None:
+        """Follow the theme: the ground under a caption is the plot's own."""
+        self._background = colour
+        self.update()
+
     def set_notes(self, notes, rect: QRectF) -> None:
         self._notes = [n for n in notes if n.visible and n.text]
         self._rect = QRectF(rect)
@@ -318,23 +441,34 @@ class TextOverlay(GraphicsWidgetAnchor, pg.GraphicsObject):
             font.setPointSizeF(max(4.0, float(note.size)))
             font.setBold(bool(note.bold))
             painter.setFont(font)
-            painter.setPen(QPen(QColor(note.color)))
 
             metrics = painter.fontMetrics()
             x = width * float(note.x)
             top = height * float(note.y)
-            y = top + metrics.ascent()
             lines = str(note.text).splitlines() or [""]
-            widest = 0.0
+            widest = max((float(metrics.horizontalAdvance(line))
+                          for line in lines), default=0.0)
+            # A few pixels of slack: it is the grab area as well as the ground,
+            # and a one-word caption has to stay easy to catch.
+            box = QRectF(x - LABEL_PAD, top - LABEL_PAD,
+                         widest + 2 * LABEL_PAD,
+                         metrics.lineSpacing() * len(lines) + 2 * LABEL_PAD)
+
+            # An opaque ground under the text. Drawn straight onto the curves,
+            # a caption competed with whatever it happened to land on: dark text
+            # over a dark trace, and the eye reading the two as one object. The
+            # plot background is the right fill because it is what the tile is
+            # already made of, so the note reads as a card laid on the plot
+            # rather than as another colour in the data.
+            paint_label_ground(painter, box, self._background)
+
+            painter.setPen(QPen(QColor(note.color)))
+            y = top + metrics.ascent()
             for line in lines:
                 painter.drawText(QPointF(x, y), line)
-                widest = max(widest, float(metrics.horizontalAdvance(line)))
                 y += metrics.lineSpacing()
 
-            # A few pixels of slack so a one-word caption is still easy to grab.
-            boxes.append((note, QRectF(x - 3.0, top - 3.0,
-                                       widest + 6.0,
-                                       metrics.lineSpacing() * len(lines) + 6.0)))
+            boxes.append((note, box))
 
         self._boxes = boxes
 
@@ -412,7 +546,7 @@ class CurveEntry:
     cap to evict a column at any moment.
     """
 
-    __slots__ = ("x", "y", "label", "key", "curve_key")
+    __slots__ = ("x", "y", "label", "key", "curve_key", "source_x")
 
     def __init__(self, x: np.ndarray, y: np.ndarray, label: str, key: str,
                  curve_key: str = ""):
@@ -425,6 +559,11 @@ class CurveEntry:
         # these to decide whether a draw item still shows the same curves and so
         # can be kept; see PlotTile._reuse_signature().
         self.curve_key = curve_key
+        # 3D only. There `x` holds *projected* screen coordinates, because that
+        # is what a click has to be hit-tested against, and this carries the x
+        # parameter's own values for the same samples so the click can still be
+        # reported in real units. None on a 2D tile, where `x` already is them.
+        self.source_x = None
 
 
 class DrawGroup:
@@ -453,6 +592,37 @@ class DrawGroup:
         self.item = item
         self.entries: List[CurveEntry] = []
         self.sampled_for = None
+
+
+class _ProjectedCurve:
+    """One run of a 3D tile, in the form a rotation can reuse.
+
+    The normalised cube coordinates rather than the samples: normalising needs
+    the bounds across every selected run, which is a whole pass over the data,
+    and it does not depend on the angle. `source_x` is the x parameter's own
+    values for the same thinned samples, so a click on the projection can be
+    reported back in the units the Inspect panel reads.
+    """
+
+    __slots__ = ("key", "nx", "ny", "nz", "source_x", "label", "style_key")
+
+    def __init__(self, key, nx, ny, nz, source_x, label, style_key):
+        self.key = key
+        self.nx, self.ny, self.nz = nx, ny, nz
+        self.source_x = source_x
+        self.label = label
+        self.style_key = style_key
+
+
+class _Projection:
+    """A 3D tile's angle-independent state: the cube, and who draws what."""
+
+    __slots__ = ("bounds", "groups")
+
+    def __init__(self, bounds, groups):
+        self.bounds = bounds
+        # [(DrawGroup, [_ProjectedCurve, ...])], in draw order.
+        self.groups = groups
 
 
 class _GroupPlan:
@@ -553,6 +723,8 @@ class PlotTile(pg.PlotWidget):
     _rotating_from = None
     _gizmo = None
     _texts = None
+    _projection = None
+    _inspect_dot = None
     _nav_action = None
 
     def __init__(self, session: Session, state: AppState, index: int,
@@ -569,22 +741,53 @@ class PlotTile(pg.PlotWidget):
         self._overlays: List[pg.GraphicsObject] = []
         self._suppress_range_event = False
 
+        # A window can never be made smaller than the sum of its parts, and a
+        # 5x5 page is twenty-five plot widgets. QGraphicsView asks for a
+        # generous minimum by default, so twenty-five of them added up to more
+        # than a laptop screen is wide -- which is why the window could not be
+        # shrunk, and why some Linux window managers refused to maximise it at
+        # all rather than grant a geometry the widget said it could not accept.
+        # A tile this small is not useful to read, but it is the grid's job to
+        # decide that, not the tile's job to make the window unusable.
+        self.setMinimumSize(60, 45)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+
         plot = self.getPlotItem()
         plot.setMenuEnabled(False)
-        plot.setClipToView(True)
-        # Downsampling is ours, not pyqtgraph's -- theirs is stride-based and
-        # would drop exactly the transients this tool exists to show.
+
+        # clipToView is deliberately OFF, and this is a correctness matter
+        # rather than a preference. pyqtgraph's implementation says of itself
+        # that it "presumes that x-values have uniform spacing": it takes
+        # dx = (x[-1] - x[0]) / (len(x) - 1) and slices the array by index
+        # arithmetic from that. Curves that share a pen are drawn as one
+        # polyline here -- several runs concatenated with a NaN between them --
+        # so x runs 0..100, NaN, 0..100, NaN, 0..100, and both the spacing and
+        # the ordering that slice depends on are false. It cut most of the runs
+        # out of the item and the tile came back missing curves.
+        #
+        # That is why it showed up first in ISO colouring: colouring by ISO
+        # value is what makes many runs share one pen, so a handful of runs was
+        # enough to trigger it. Nothing is lost by turning it off -- the core
+        # already decimates to the visible x range before the data crosses into
+        # Python, which is the same saving done correctly.
+        #
+        # Downsampling is ours for the same reason: pyqtgraph's is stride-based
+        # and would drop exactly the transients this tool exists to show.
         plot.setDownsampling(auto=False, mode="peak")
         plot.showGrid(x=True, y=True, alpha=0.25)
 
         self._redraw_timer = QTimer(self)
         self._redraw_timer.setSingleShot(True)
         self._redraw_timer.setInterval(25)
-        self._redraw_timer.timeout.connect(self._resample_visible)
+        self._redraw_timer.timeout.connect(self._on_redraw_timer)
 
         self.sigRangeChanged.connect(self._on_range_changed)
 
-        self._crosshair_label = pg.TextItem(anchor=(0, 1))
+        # fill= is the whole point: the readout follows the cursor across the
+        # curves, and without a ground behind it the figures were dark text on
+        # a dark trace wherever one happened to be.
+        self._crosshair_label = pg.TextItem(
+            anchor=(0, 1), fill=_label_brush(theme.plot_background))
         self._crosshair_label.setFont(plot_font(PLOT_LABEL_PT))
         self._crosshair_label.setVisible(False)
         plot.addItem(self._crosshair_label, ignoreBounds=True)
@@ -600,7 +803,19 @@ class PlotTile(pg.PlotWidget):
         self._slope_item.setVisible(False)
         plot.addItem(self._slope_item, ignoreBounds=True)
 
-        self._slope_text = pg.TextItem(anchor=(0, 1), color="#ffb300")
+        # The sample the Inspect panel is reporting. One item, reused: created
+        # per click it would be a scene item added and removed on every press.
+        self._inspect_dot = pg.ScatterPlotItem(
+            size=INSPECT_DOT_SIZE, symbol="o",
+            brush=pg.mkBrush(INSPECT_DOT_COLOUR),
+            pen=pg.mkPen(INSPECT_DOT_COLOUR, width=1.0),
+        )
+        self._inspect_dot.setZValue(INSPECT_DOT_Z)
+        self._inspect_dot.setVisible(False)
+        plot.addItem(self._inspect_dot, ignoreBounds=True)
+
+        self._slope_text = pg.TextItem(anchor=(0, 1), color="#ffb300",
+                                       fill=_label_brush(theme.plot_background))
         self._slope_text.setFont(plot_font(PLOT_LABEL_PT))
         self._slope_text.setZValue(31)
         self._slope_text.setVisible(False)
@@ -614,7 +829,8 @@ class PlotTile(pg.PlotWidget):
         self._gizmo.anchor(itemPos=(0, 1), parentPos=(0, 1), offset=(10, -10))
         self._gizmo.setVisible(False)
 
-        self._texts = TextOverlay(self._on_text_moved)
+        self._texts = TextOverlay(self._on_text_moved,
+                                  background=theme.plot_background)
         self._texts.setParentItem(plot.getViewBox())
         self._texts.setPos(0, 0)
 
@@ -622,6 +838,11 @@ class PlotTile(pg.PlotWidget):
         self.apply_mouse_mode()
 
     # ------------------------------------------------------------- helpers
+
+    @property
+    def index(self) -> int:
+        """Position of this tile in the page, for the grid to report against."""
+        return self._index
 
     @property
     def tile_state(self) -> TileState:
@@ -637,6 +858,17 @@ class PlotTile(pg.PlotWidget):
         self._border_active = None
         if self._gizmo is not None:
             self._gizmo.set_theme(theme)
+        if self._texts is not None:
+            self._texts.set_background(theme.plot_background)
+        # The ground painted behind every on-plot readout is the plot's own
+        # background, so it has to follow the theme with it -- a light card left
+        # on a dark plot is worse than no card.
+        brush = _label_brush(theme.plot_background)
+        for item in (self._crosshair_label, self._slope_text):
+            try:
+                item.fill = brush
+            except (AttributeError, RuntimeError):
+                pass
         self.setBackground(theme.plot_background)
         plot = self.getPlotItem()
         for axis_name in ("left", "bottom"):
@@ -658,8 +890,13 @@ class PlotTile(pg.PlotWidget):
         names = [tile.x_param] + list(tile.y_params)
         if tile.plot3d and tile.z_param:
             names.append(tile.z_param)
-        if tile.color_mode == ColorMode.ISO and tile.color_iso_param:
-            names.append(tile.color_iso_param)
+        # Colouring by ISO does *not* put the ISO parameter here, and that is
+        # the point. iso_values() reads the first record of each block through
+        # the index -- it touches no column memory at all, which is what made
+        # the ISO scan 683x faster than loading the column and taking sample
+        # zero. Preloading it would parse the whole of, say, MACH across every
+        # run of a 550 MB file to answer a question already answered from the
+        # header, and then hold it against the memory cap.
 
         # An area or marker defined on another parameter still has to be drawn
         # here, as a highlighted span or a dot, so its reference channel has to
@@ -725,6 +962,11 @@ class PlotTile(pg.PlotWidget):
         """
         mode = self._state.mouse_mode
         view = self.getPlotItem().vb
+
+        if mode != MouseMode.CROSSHAIR:
+            # The dot marks what the Inspect panel is reporting, and outside
+            # Inspect the panel is not reporting anything.
+            self.clear_inspect_dot()
 
         if mode in (MouseMode.SELECT, MouseMode.CROSSHAIR):
             view.setMouseEnabled(x=False, y=False)
@@ -814,22 +1056,39 @@ class PlotTile(pg.PlotWidget):
 
     # ---------------------------------------------------------- ISO lookup
 
-    def _iso_labels(self, iso_param: str) -> Dict[Tuple[int, int], str]:
-        """(file, sim) -> ISO label, computed once per rebuild.
+    def _iso_labels(self, iso_param: str):
+        """(file, sim) -> ISO label, plus label -> where it sits in the legend.
 
-        Looking this up per curve would call into the core for every parameter
-        of every run; the value is constant within a run, so once per run is
-        enough.
+        Looking the label up per curve would call into the core for every
+        parameter of every run; the value is constant within a run, so once per
+        run is enough.
+
+        The second half is what keeps the legend still. Legend rows are emitted
+        in the order the draw groups are built, and that order used to be the
+        order the groups were first *seen* while walking the selected runs --
+        so which ISO group came first depended on which run happened to be
+        selected. Tick one run off and the rows reshuffled: 0-10, 10-15, 15-20
+        became 15-20, 0-10, 10-15, with the right colours on the right curves
+        and the legend in an order nobody chose.
+
+        So each label is ranked by something intrinsic to it instead. Grouped,
+        that is the interval's position in the grouping the user set up;
+        ungrouped, it is the value itself, which sorts ascending. Computed in
+        this same pass because both come out of the same lookup, and this
+        lookup is the expensive one.
         """
         labels: Dict[Tuple[int, int], str] = {}
+        ranks: Dict[str, float] = {}
         if not iso_param:
-            return labels
+            return labels, ranks
 
         iso_state = self._state.iso_states.get(iso_param)
         grouped = bool(iso_state and iso_state.grouped and iso_state.groups)
         groups = iso_state.groups if grouped else []
 
-        for file_index in {f for f, _s in self._state.selected_sims}:
+        # Sorted, not a bare set. Set iteration order is not something to
+        # build a legend on, even when small integers make it look sorted.
+        for file_index in sorted({f for f, _s in self._state.plotted_sims()}):
             values = self._session.iso_values(file_index, iso_param)
             for sim_index in range(values.size):
                 value = float(values[sim_index])
@@ -837,16 +1096,25 @@ class PlotTile(pg.PlotWidget):
                     continue
                 if grouped:
                     label = ""
-                    for name, low, high, _active in groups:
+                    rank = 0.0
+                    for index, (name, low, high, _active) in enumerate(groups):
                         if low <= value <= high:
-                            label = name
+                            label, rank = name, float(index)
                             break
                     if not label:
                         continue
                 else:
                     label = self._session.format_value(value)
+                    rank = value
                 labels[(file_index, sim_index)] = label
-        return labels
+                # The lowest wins, because two runs can carry the same label
+                # and a row's place must not depend on which was visited
+                # first. Ungrouped, two distinct values can also format to one
+                # label -- 0.751 and 0.752 both read "0.75" -- and then the
+                # smaller of them is what the row is sorted by.
+                if label not in ranks or rank < ranks[label]:
+                    ranks[label] = rank
+        return labels, ranks
 
     def _style_key(self, tile: TileState, param: str, sim_key: str,
                    iso_label: str) -> str:
@@ -888,6 +1156,8 @@ class PlotTile(pg.PlotWidget):
         while giving the drag somewhere to report to.
         """
         if isinstance(self._legend, DraggableLegend):
+            # Already built, but the theme may have changed under it since.
+            self._legend.set_ground(**legend_ground(self._theme))
             return
         if plot.legend is not None:
             scene = plot.legend.scene()
@@ -896,8 +1166,10 @@ class PlotTile(pg.PlotWidget):
             plot.legend = None
 
         legend = DraggableLegend(self._on_legend_moved, offset=(10, 10),
-                                 labelTextSize="{0}pt".format(PLOT_LEGEND_PT))
+                                 labelTextSize="{0}pt".format(PLOT_LEGEND_PT),
+                                 **legend_ground(self._theme))
         legend.setParentItem(plot.getViewBox())
+        legend.setZValue(LEGEND_Z)
         plot.legend = legend
         self._legend = legend
 
@@ -964,6 +1236,9 @@ class PlotTile(pg.PlotWidget):
         previous_groups = self._groups
         self._groups = []
         self._curves = {}
+        # Rebuilt below if this is still a 3D tile. Dropped first either way:
+        # a cache that outlived the thing it describes is worse than none.
+        self._projection = None
 
         for overlay in self._overlays:
             plot.removeItem(overlay)
@@ -1020,7 +1295,7 @@ class PlotTile(pg.PlotWidget):
         plot.getViewBox().setAspectLocked(False)
         self._gizmo.setVisible(False)
 
-        if tile.is_empty() or not self._state.selected_sims:
+        if tile.is_empty() or not self._state.plotted_sims():
             self._drop_groups(previous_groups)
             if self._legend is not None:
                 self._legend.setVisible(False)
@@ -1034,7 +1309,6 @@ class PlotTile(pg.PlotWidget):
 
         if tile.show_legend:
             self._ensure_legend(plot)
-            self._place_legend(tile)
             self._legend.setVisible(True)
         elif self._legend is not None:
             self._legend.setVisible(False)
@@ -1043,13 +1317,13 @@ class PlotTile(pg.PlotWidget):
         # every visible tile, so the data is already resident by the time this
         # runs -- see PlotGrid.required_channels() and MainWindow.refresh_plots().
         by_file: Dict[int, List[int]] = {}
-        for file_index, sim_index in sorted(self._state.selected_sims):
+        for file_index, sim_index in self._state.plotted_sims():
             by_file.setdefault(file_index, []).append(sim_index)
 
-        iso_labels = (
+        iso_labels, iso_ranks = (
             self._iso_labels(tile.color_iso_param)
             if tile.color_mode == ColorMode.ISO
-            else {}
+            else ({}, {})
         )
 
         styles = self._state.styles
@@ -1070,6 +1344,11 @@ class PlotTile(pg.PlotWidget):
         # not true until this loop has finished.
         plans: Dict[tuple, _GroupPlan] = {}
         order: List[tuple] = []
+        # Where each group belongs in the legend. Kept separately from `order`
+        # because a group's place is decided by the curves in it, and which
+        # curves those are is not known until the walk below has finished.
+        ranks: Dict[tuple, tuple] = {}
+        param_rank = {name: index for index, name in enumerate(tile.y_params)}
 
         for file_index, sims in sorted(by_file.items()):
             handle = self._session.file(file_index)
@@ -1136,6 +1415,35 @@ class PlotTile(pg.PlotWidget):
                         order.append(group_key)
                     plan.entries.append(entry)
 
+                    # Rank by what the curve *is*, never by when it turned up.
+                    # Whichever field the colour mode is keying on leads, since
+                    # that is what the legend rows are distinguishing.
+                    if tile.color_mode == ColorMode.ISO:
+                        rank = (iso_ranks.get(iso_label, float("inf")),
+                                param_rank.get(param, 0),
+                                file_index, sim_index)
+                    elif tile.color_mode == ColorMode.PARAMETER:
+                        rank = (param_rank.get(param, 0),
+                                file_index, sim_index)
+                    else:
+                        rank = (file_index, sim_index,
+                                param_rank.get(param, 0))
+                    seen_rank = ranks.get(group_key)
+                    if seen_rank is None or rank < seen_rank:
+                        ranks[group_key] = rank
+
+        # The fix for the reshuffling legend. Rows are emitted in the order the
+        # groups are built -- pyqtgraph fills the legend from addItem(), and an
+        # adopted item has its row put back in the same loop -- so this sort is
+        # the legend's order. Before it, that order was the order the groups
+        # were first seen while walking the selected runs, which is why ticking
+        # one run off could turn 0-10, 10-15, 15-20 into 15-20, 0-10, 10-15:
+        # the right colours on the right curves, in an order nobody chose.
+        #
+        # Stable, so anything the ranks genuinely tie on keeps the order it
+        # was found in rather than swapping about between rebuilds.
+        order.sort(key=lambda key: ranks[key])
+
         self._adopt_groups(plot, previous_groups,
                            [plans[k] for k in order])
 
@@ -1145,6 +1453,15 @@ class PlotTile(pg.PlotWidget):
                 hidden_rows))
             plot.addItem(spacer)
             self._groups.append(DrawGroup(spacer))
+
+        # Placed now, not before the rows were added. A legend anchored while
+        # empty and then filled changes size under its own anchor, and
+        # pyqtgraph re-derives the anchor from whichever corner the item is
+        # nearest -- so a legend dragged to the middle crept a little further
+        # on every rebuild until it was back against an edge. Its final size is
+        # only known once its rows are in it.
+        if tile.show_legend and self._legend is not None:
+            self._place_legend(tile)
 
         # The view is the user's. A rebuild happens for all sorts of reasons
         # that say nothing about what should be on screen -- restyling a curve,
@@ -1275,7 +1592,7 @@ class PlotTile(pg.PlotWidget):
         if self._legend is not None:
             self._legend.setVisible(False)
 
-        if tile.is_empty() or not self._state.selected_sims:
+        if tile.is_empty() or not self._state.plotted_sims():
             self._gizmo.setVisible(False)
             return
 
@@ -1283,7 +1600,7 @@ class PlotTile(pg.PlotWidget):
         series = []
         x_bounds = y_bounds = z_bounds = None
 
-        for file_index, sim_index in sorted(self._state.selected_sims):
+        for file_index, sim_index in self._state.plotted_sims():
             handle = self._session.file(file_index)
             if handle is None or sim_index >= handle.simulation_count:
                 continue
@@ -1325,10 +1642,11 @@ class PlotTile(pg.PlotWidget):
         self._draw_3d_grid(plot, tile, x_bounds, y_bounds, z_bounds)
 
         styles = self._state.styles
-        iso_labels = (
+        # The ranks are the 2D legend's ordering; a projection has no legend.
+        iso_labels, _iso_ranks = (
             self._iso_labels(tile.color_iso_param)
             if tile.color_mode == ColorMode.ISO
-            else {}
+            else ({}, {})
         )
 
         # Grouped by pen exactly as the 2D path is, and for the same reason: a
@@ -1346,20 +1664,16 @@ class PlotTile(pg.PlotWidget):
             dash = styles.dash_for(style_key)
             width = styles.width_for(style_key)
 
-            sx, sy, _depth = self.project_3d(
+            key = "{0}|{1}|{2}".format(file_index, sim_index, tile.z_param)
+            member = _ProjectedCurve(
+                key,
                 self._normalise(x, x_bounds),
                 self._normalise(y, y_bounds),
                 self._normalise(z, z_bounds),
-                tile.azimuth, tile.elevation,
+                np.asarray(x, dtype=np.float32),
+                "{0} · {1}".format(sim.sim_id, file_name),
+                style_key,
             )
-            sx = np.asarray(sx, dtype=np.float32)
-            sy = np.asarray(sy, dtype=np.float32)
-
-            key = "{0}|{1}|{2}".format(file_index, sim_index, tile.z_param)
-            # The stored x/y are the *projected* coordinates, which is what the
-            # cursor and inspect code needs to hit-test against what is drawn.
-            self._curves[key] = CurveEntry(
-                sx, sy, "{0} · {1}".format(sim.sim_id, file_name), style_key)
 
             group_key = (color, dash, width)
             if group_key not in groups:
@@ -1369,23 +1683,99 @@ class PlotTile(pg.PlotWidget):
                 pen.setStyle(_PEN_STYLES.get(dash, Qt.PenStyle.SolidLine))
                 pen.setCosmetic(True)
                 pens[group_key] = pen
-            pieces = groups[group_key]
-            if pieces:
-                pieces.append((gap, gap))
-            pieces.append((sx, sy))
+            groups[group_key].append(member)
 
-        for group_key, pieces in groups.items():
-            cx = np.concatenate([p[0] for p in pieces])
-            cy = np.concatenate([p[1] for p in pieces])
-            item = pg.PlotDataItem(cx, cy, pen=pens[group_key], antialias=True,
-                                   connect="finite")
+        # Everything above depends on the selection, the parameters and the
+        # styling -- none of which a rotation changes. It is kept so that
+        # turning the cube only has to re-project: see _reproject_3d().
+        plan = []
+        for group_key, members in groups.items():
+            item = pg.PlotDataItem(
+                pen=pens[group_key],
+                # antialias, unlike the 2D path. There the curves arrive
+                # decimated to pixel resolution so smoothing buys nothing for
+                # real cost; here a projected trajectory is a sparse wireframe
+                # of long diagonals, which is the case antialiasing is for.
+                antialias=True, connect="finite",
+            )
             plot.addItem(item)
             group = DrawGroup(item)
-            # Nothing re-samples a 3D tile -- the thinning happens once, above --
-            # so the group holds only the item, for removal on the next rebuild.
             self._groups.append(group)
+            plan.append((group, members))
 
+        self._projection = _Projection(
+            (x_bounds, y_bounds, z_bounds), plan)
+        self._project_into_items(tile)
         self._apply_3d_view(tile)
+
+    def _project_into_items(self, tile: TileState) -> None:
+        """Turn the cached cube into screen coordinates at the current angle.
+
+        The only part of a 3D tile that a rotation actually changes, and the
+        reason the cache above exists.
+        """
+        cache = self._projection
+        if cache is None:
+            return
+        x_bounds, y_bounds, z_bounds = cache.bounds
+        gap = np.array([np.nan], dtype=np.float32)
+
+        for group, members in cache.groups:
+            pieces_x, pieces_y = [], []
+            for member in members:
+                sx, sy, _depth = self.project_3d(
+                    member.nx, member.ny, member.nz,
+                    tile.azimuth, tile.elevation)
+                sx = np.asarray(sx, dtype=np.float32)
+                sy = np.asarray(sy, dtype=np.float32)
+
+                # The stored x/y are the *projected* coordinates: that is what
+                # the cursor and the click have to hit-test against, because it
+                # is what is drawn. `source_x` carries the x parameter's own
+                # values alongside, so a click can be reported back in the
+                # units the rest of the application speaks.
+                entry = CurveEntry(sx, sy, member.label, member.style_key,
+                                   member.key)
+                entry.source_x = member.source_x
+                self._curves[member.key] = entry
+
+                if pieces_x:
+                    pieces_x.append(gap)
+                    pieces_y.append(gap)
+                pieces_x.append(sx)
+                pieces_y.append(sy)
+
+            if pieces_x:
+                group.item.setData(np.concatenate(pieces_x),
+                                   np.concatenate(pieces_y),
+                                   connect="finite")
+        del x_bounds, y_bounds, z_bounds
+
+    def _reproject_3d(self) -> bool:
+        """Redraw a turned cube without rebuilding it. True if it was done.
+
+        rotate_3d() used to call rebuild(), on every mouse-move of a drag: that
+        re-read three channels per run from the core, recomputed their bounds,
+        re-thinned them, destroyed and recreated every draw item, and rebuilt
+        the grid -- to change two angles. Everything but the projection and the
+        grid is the same at every angle, so only those are redone here.
+        """
+        tile = self.tile_state
+        if self._projection is None or not tile.plot3d:
+            return False
+
+        plot = self.getPlotItem()
+        # The box and its tick labels turn with the cube, so they are the one
+        # other thing that has to be redrawn.
+        for overlay in self._overlays:
+            plot.removeItem(overlay)
+        self._overlays = []
+        self._update_gizmo(tile, *self._projection.bounds)
+        self._draw_3d_grid(plot, tile, *self._projection.bounds)
+
+        self._project_into_items(tile)
+        self._refresh_texts()
+        return True
 
     def _draw_3d_grid(self, plot, tile: TileState, x_bounds, y_bounds, z_bounds) -> None:
         """Grid lines and tick values on the back walls of the data box.
@@ -1475,7 +1865,9 @@ class PlotTile(pg.PlotWidget):
 
             for index, value in enumerate(values):
                 text = pg.TextItem(projection.format_tick(value, step),
-                                   color=label_colour, anchor=(0.5, 0.5))
+                                   color=label_colour, anchor=(0.5, 0.5),
+                                   fill=_label_brush(
+                                       self._theme.plot_background))
                 text.setFont(plot_font(PLOT_LABEL_PT))
                 text.setPos(float(label_x[index]), float(label_y[index]))
                 text.setZValue(GRID_3D_Z + 1)
@@ -1569,7 +1961,8 @@ class PlotTile(pg.PlotWidget):
         # so the tilt is clamped rather than wrapped.
         tile.elevation = max(-89.0, min(89.0, tile.elevation + d_elevation))
         self._state.dirty = True
-        self.rebuild()
+        if not self._reproject_3d():
+            self.rebuild()
 
     # --------------------------------------------------------- resampling
 
@@ -1579,6 +1972,25 @@ class PlotTile(pg.PlotWidget):
         self._store_view_range()
         if self._redraw_timer is not None:
             self._redraw_timer.start()
+        else:
+            self.view_changed.emit()
+
+    def _on_redraw_timer(self) -> None:
+        """The coalesced end of a pan or a zoom.
+
+        pyqtgraph emits sigRangeChanged continuously while the mouse drags, and
+        the resampling was already debounced onto this timer for that reason.
+        `view_changed` was not, and it has two listeners that do real work: the
+        SCALE boxes rewrite themselves from the range, and the Inspect tab
+        recomputes the statistics of the visible window -- which reads every
+        selected channel. Both were running per pixel of a drag to show figures
+        nobody can read until the mouse stops.
+
+        The stored range is still updated on every event (above), so nothing
+        that reads tile.x_min while dragging sees a stale number; only the
+        announcement waits.
+        """
+        self._resample_visible()
         self.view_changed.emit()
 
     def _store_view_range(self) -> None:
@@ -1852,13 +2264,17 @@ class PlotTile(pg.PlotWidget):
 
             if marker.x_param == tile.x_param:
                 movable = self._annotations_movable()
+                # No label. pyqtgraph builds an InfLineLabel from `label` and
+                # forwards labelOpts straight to TextItem, which takes neither
+                # a CSS "font-size" nor much else -- passing one raised on
+                # every rebuild, and an exception inside _draw_overlays aborts
+                # PlotGrid.refresh() partway through the page, which is why a
+                # dragged band moved on the tile under the cursor and nowhere
+                # else. Captions are text notes now; see model.Marker.
                 line = pg.InfiniteLine(
                     pos=marker.position,
                     angle=90,
                     pen=pg.mkPen(marker.color, width=1.5, style=Qt.PenStyle.DashLine),
-                    label=marker.label or None,
-                    labelOpts={"color": marker.color, "position": 0.92,
-                               "font-size": "{0}pt".format(PLOT_LABEL_PT)},
                     movable=movable,
                     hoverPen=pg.mkPen(marker.color, width=3.0),
                 )
@@ -1900,15 +2316,6 @@ class PlotTile(pg.PlotWidget):
                 region.setZValue(AREA_Z)
                 plot.addItem(region, ignoreBounds=True)
                 self._overlays.append(region)
-                if area.label:
-                    caption = pg.TextItem(area.label, color=area.color,
-                                          anchor=(0.5, 0.0))
-                    caption.setFont(plot_font(PLOT_LABEL_PT))
-                    caption.setPos((area.x_min + area.x_max) * 0.5,
-                                   self._view_top())
-                    caption.setZValue(AREA_LABEL_Z)
-                    plot.addItem(caption, ignoreBounds=True)
-                    self._overlays.append(caption)
             else:
                 self._draw_area_segments(plot, area)
 
@@ -1949,14 +2356,6 @@ class PlotTile(pg.PlotWidget):
         area.x_min, area.x_max = low, high
         self._state.dirty = True
         self.annotation_moved.emit()
-
-    def _view_top(self) -> float:
-        """Data y of the top of the visible area, for captions."""
-        try:
-            (_x_low, _x_high), (_y_low, y_high) = self.getPlotItem().vb.viewRange()
-        except (TypeError, ValueError):
-            return 0.0
-        return float(y_high)
 
     def _draw_area_segments(self, plot, area) -> None:
         """An area from another x parameter, drawn as highlighted curve spans.
@@ -2247,31 +2646,85 @@ class PlotTile(pg.PlotWidget):
         x_span = (x_high - x_low) or 1.0
         y_span = (y_high - y_low) or 1.0
 
+        projected = self.tile_state.plot3d
         best_key = None
         best_distance = None
         best_x = target_x
+        best_point = None
 
         for key, entry in self._curves.items():
             if entry.x.size == 0:
                 continue
-            index = Session.nearest_index(entry.x, target_x)
-            if index >= entry.y.size:
-                continue
-            dx = (float(entry.x[index]) - target_x) / x_span
-            dy = (float(entry.y[index]) - target_y) / y_span
-            distance = dx * dx + dy * dy
+
+            if projected:
+                # A projected trajectory is not monotonic in either screen
+                # axis, so there is nothing to binary-search: nearest_index()
+                # assumes a sorted array and on a 3D tile returned whichever
+                # sample its bisection happened to land on. Every point of the
+                # thinned path is scanned instead, which is a few thousand at
+                # most because the thinning is against the tile's pixel budget.
+                count = min(entry.x.size, entry.y.size)
+                dx = (entry.x[:count].astype(np.float64) - target_x) / x_span
+                dy = (entry.y[:count].astype(np.float64) - target_y) / y_span
+                squared = dx * dx + dy * dy
+                index = int(np.argmin(squared))
+                distance = float(squared[index])
+                # What the rest of the application means by "where": the x
+                # parameter's own value, not the screen coordinate the click
+                # landed on. Without this the Inspect panel searched the TIME
+                # column for a projection coordinate and reported whatever
+                # sample that happened to find.
+                source = entry.source_x
+                reported = (float(source[index])
+                            if source is not None and index < source.size
+                            else float(entry.x[index]))
+            else:
+                index = Session.nearest_index(entry.x, target_x)
+                if index >= entry.y.size:
+                    continue
+                dx = (float(entry.x[index]) - target_x) / x_span
+                dy = (float(entry.y[index]) - target_y) / y_span
+                distance = dx * dx + dy * dy
+                reported = float(entry.x[index])
+
             if best_distance is None or distance < best_distance:
                 best_distance = distance
                 best_key = key
-                best_x = float(entry.x[index])
+                best_x = reported
+                best_point = (float(entry.x[index]), float(entry.y[index]))
 
         if best_key is None:
             return
+        # In drawn coordinates, which on a 3D tile are the projected ones --
+        # the dot has to land on the curve the click picked, wherever that is.
+        if best_point is not None:
+            self._show_inspect_dot(*best_point)
+
         try:
             file_index, sim_index, _param = best_key.split("|", 2)
         except ValueError:
             return
         self.point_inspected.emit(int(file_index), int(sim_index), best_x)
+
+    def _show_inspect_dot(self, x: float, y: float) -> None:
+        """Mark the sample the Inspect panel is reporting.
+
+        The panel lists forty channels of one run at one instant, and without
+        this there is nothing on the plot saying which instant -- the click
+        lands on whichever curve was nearest, which is not always the one you
+        were aiming at, and a table of numbers cannot tell you that.
+        """
+        if self._inspect_dot is None:
+            return
+        self._inspect_dot.setData([x], [y])
+        self._inspect_dot.setVisible(True)
+
+    def clear_inspect_dot(self) -> None:
+        """Take the mark off. Leaving Inspect, or another tile becoming the
+        active one: in both cases the panel is no longer reporting this point,
+        so a dot still sitting on it is a claim that is no longer true."""
+        if self._inspect_dot is not None:
+            self._inspect_dot.setVisible(False)
 
     def mouseDoubleClickEvent(self, event) -> None:
         """Refit the view, honouring whichever axes are locked."""

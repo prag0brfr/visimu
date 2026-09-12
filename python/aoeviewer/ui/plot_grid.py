@@ -8,10 +8,13 @@ from typing import Dict, List, Set
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QGridLayout, QWidget
 
+from ..logging_setup import get_logger
 from ..model import AppState
 from ..session import Session
 from ..theme import Theme
 from .plot_tile import PlotTile
+
+_log = get_logger("grid")
 
 
 class PlotGrid(QWidget):
@@ -121,13 +124,20 @@ class PlotGrid(QWidget):
             return {}
 
         by_file: Dict[int, List[str]] = {}
-        for file_index, _sim in self._state.selected_sims:
+        for file_index, _sim in self._state.plotted_sims():
             by_file.setdefault(file_index, sorted(names))
         return by_file
 
-    def selected_sims_by_file(self) -> Dict[int, List[int]]:
+    def plotted_sims_by_file(self) -> Dict[int, List[int]]:
+        """The runs that will be drawn, grouped by file.
+
+        Renamed from selected_sims_by_file when the ISO filters stopped writing
+        into the DATA selection: "selected" is now one of the two constraints
+        rather than the answer, and a preload keyed on the wrong one of them
+        would read columns for runs nothing is going to draw.
+        """
         by_file: Dict[int, List[int]] = {}
-        for file_index, sim_index in sorted(self._state.selected_sims):
+        for file_index, sim_index in self._state.plotted_sims():
             by_file.setdefault(file_index, []).append(sim_index)
         return by_file
 
@@ -136,9 +146,36 @@ class PlotGrid(QWidget):
             tile.show_placeholder(message)
 
     def refresh(self) -> None:
-        """Rebuild every tile's curves from the current state."""
+        """Rebuild every tile's curves from the current state.
+
+        One tile failing must not stop the others. A rebuild reaches a lot of
+        drawing code, and when something in it raised -- a marker label
+        pyqtgraph would not accept, in the case that prompted this -- the loop
+        stopped at that tile: every tile after it kept whatever it was showing
+        before, silently. That read as "the plot did not update", which is a
+        much harder thing to diagnose than "one tile is empty and the log says
+        why".
+        """
         for tile in self._tiles:
-            tile.rebuild()
+            try:
+                tile.rebuild()
+            except Exception:
+                _log.exception("tile %d failed to rebuild", tile.index)
+                try:
+                    tile.show_placeholder("this tile could not be drawn")
+                except Exception:
+                    pass
+
+    def clear_inspect_dots(self, keep: int = -1) -> None:
+        """Take the inspect mark off every tile but `keep`.
+
+        Only one tile is being inspected at a time -- the panel reports one
+        run at one instant -- so a dot left behind on the tile you clicked
+        before is a claim about a reading that is no longer on screen.
+        """
+        for index, tile in enumerate(self._tiles):
+            if index != keep:
+                tile.clear_inspect_dot()
 
     def refresh_texts(self) -> None:
         """Repaint the captions only.

@@ -894,29 +894,31 @@ class TestMultiIsoState(unittest.TestCase):
 
 
 class TestMarkerModel(unittest.TestCase):
-    def test_describe_prefers_the_label(self):
+    def test_describe_names_the_condition(self):
+        # A marker has no caption of its own any more: pyqtgraph anchors an
+        # InfiniteLine's label to the line, so it sat on the data with nothing
+        # behind it, and editing one rebuilt the tile and deleted the item being
+        # edited. Text notes do captions properly. What is left is the condition
+        # the marker states, which is what the list needs to show.
         from aoeviewer.model import Marker
 
         marker = Marker(x_param="TIME", position=5.0)
         self.assertEqual(marker.describe(), "TIME = 5")
-        marker.label = "Rotation"
-        self.assertEqual(marker.describe(), "Rotation")
+        self.assertFalse(hasattr(marker, "label"))
 
-    def test_round_trip_keeps_label_and_dot_size(self):
+    def test_round_trip_keeps_the_dot_size(self):
         from aoeviewer.model import AppState, Marker, load_workspace, save_workspace
 
         state = AppState()
-        state.markers.append(
-            Marker(x_param="TIME", position=5.0, label="Rotation", dot_size=12.0)
-        )
+        state.markers.append(Marker(x_param="TIME", position=5.0, dot_size=12.0))
         handle, path = tempfile.mkstemp(suffix=".aoews")
         os.close(handle)
         try:
             save_workspace(path, state, [], {}, {})
             restored = AppState()
             restored.load_dict(load_workspace(path))
-            self.assertEqual(restored.markers[0].label, "Rotation")
             self.assertAlmostEqual(restored.markers[0].dot_size, 12.0)
+            self.assertEqual(restored.markers[0].x_param, "TIME")
         finally:
             os.remove(path)
 

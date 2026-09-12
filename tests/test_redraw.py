@@ -38,7 +38,9 @@ from aoeviewer import scales
 from aoeviewer import theme as theme_module
 from aoeviewer.model import MAX_TILES, AppState
 from aoeviewer.scales import resample_key
+from aoeviewer.ui import main_window
 from aoeviewer.ui import panels
+from aoeviewer.ui import plot_grid as pg_grid
 from aoeviewer.ui import plot_tile as pt
 
 
@@ -1043,16 +1045,54 @@ class TestIsoTreePerformance(unittest.TestCase):
 
         self.assertIs(node_named(panel, "MACH"), node)
 
-    def test_a_changed_selection_does_rebuild(self):
+    def test_a_changed_selection_is_written_in_place(self):
+        # It used to rebuild, and that is what made the tree blink every time a
+        # value was toggled: ticking a box told the window the selection had
+        # changed, the window refreshed the visible panel -- this one -- and
+        # several hundred widget items were destroyed and remade under the
+        # cursor, taking the scroll position with them. Only the ticks moved,
+        # so only the ticks are written.
         panel = make_iso_panel()
         iso = panel._state.iso_state("MACH")
         panel._rebuild_tree()
         node = node_named(panel, "MACH")
+        child = node.child(0)
 
         iso.value_enabled[panel._distinct("MACH")[0]] = False
         panel._rebuild_tree()
 
+        self.assertIs(node_named(panel, "MACH"), node)
+        self.assertIs(node_named(panel, "MACH").child(0), child)
+        self.assertEqual(child.checkState(0), Qt.CheckState.Unchecked)
+
+    def test_the_badge_follows_the_ticks_that_moved(self):
+        # The heading counts what is ticked, so it is as stale as the checkbox.
+        # An in-place update that left "12 of 12" over eleven ticked values
+        # would be worse than the rebuild it replaced.
+        panel = make_iso_panel()
+        iso = panel._state.iso_state("MACH")
+        panel._rebuild_tree()
+        before = node_named(panel, "MACH").text(0)
+
+        iso.value_enabled[panel._distinct("MACH")[0]] = False
+        panel._rebuild_tree()
+
+        self.assertNotEqual(node_named(panel, "MACH").text(0), before)
+
+    def test_a_new_parameter_still_rebuilds(self):
+        # The in-place path is only for ticks. A parameter arriving changes
+        # which rows exist, and no amount of checkbox writing produces a row
+        # that is not there.
+        panel = make_iso_panel()
+        panel._state.iso_state("MACH")
+        panel._rebuild_tree()
+        node = node_named(panel, "MACH")
+
+        panel._state.iso_state("WEIGHT")
+        panel._rebuild_tree()
+
         self.assertIsNot(node_named(panel, "MACH"), node)
+        self.assertIsNotNone(node_named(panel, "WEIGHT"))
 
     def test_building_the_tree_does_not_fire_the_check_handler(self):
         # Every setCheckState during a rebuild raises itemChanged exactly as a
@@ -1365,6 +1405,263 @@ class TestUngrouping(unittest.TestCase):
         self.assertEqual(node.child(0).checkState(0), Qt.CheckState.Unchecked)
 
 
+class TestInspectDot(unittest.TestCase):
+    """The mark showing which sample the Inspect panel is reporting.
+
+    The panel lists forty channels of one run at one instant, and the click
+    lands on whichever curve was nearest -- which is not always the one you were
+    aiming at. A table of numbers cannot tell you that; a dot on the plot can.
+    """
+
+    def setUp(self):
+        self.tile = make_tile()
+        self.tile._inspect_dot = qt_stubs.PlotDataItem()
+        self.tile._inspect_dot.setVisible(False)
+
+    def test_it_appears_at_the_sample(self):
+        self.tile._show_inspect_dot(3.0, 7.0)
+        self.assertTrue(self.tile._inspect_dot.opts["visible"])
+        self.assertEqual(self.tile._inspect_dot.data_calls[-1], ([3.0], [7.0]))
+
+    def test_clearing_hides_it(self):
+        self.tile._show_inspect_dot(3.0, 7.0)
+        self.tile.clear_inspect_dot()
+        self.assertFalse(self.tile._inspect_dot.opts["visible"])
+
+    def test_clearing_a_tile_that_never_had_one_is_harmless(self):
+        # Class-level default: the early resizeEvent pyqtgraph fires during
+        # construction can reach this before __init__ has made the item.
+        tile = make_tile()
+        tile._inspect_dot = None
+        tile.clear_inspect_dot()          # must not raise
+
+    def test_leaving_inspect_takes_the_mark_off(self):
+        # Outside Inspect the panel is not reporting anything, so a dot still
+        # sitting on a sample is a claim that is no longer true.
+        from aoeviewer.model import MouseMode
+
+        self.tile._show_inspect_dot(1.0, 2.0)
+        self.tile._state.mouse_mode = MouseMode.PAN
+        self.tile.apply_mouse_mode()
+        self.assertFalse(self.tile._inspect_dot.opts["visible"])
+
+    def test_staying_in_inspect_leaves_it(self):
+        from aoeviewer.model import MouseMode
+
+        self.tile._state.mouse_mode = MouseMode.CROSSHAIR
+        self.tile._show_inspect_dot(1.0, 2.0)
+        self.tile.apply_mouse_mode()
+        self.assertTrue(self.tile._inspect_dot.opts["visible"])
+
+
+class TestProjectionCache(unittest.TestCase):
+    """Turning a 3D cube must not rebuild it.
+
+    rotate_3d() called rebuild() on every mouse-move of a drag: three channels
+    re-read from the core per run, their bounds recomputed, the samples
+    re-thinned, every draw item destroyed and recreated -- to change two
+    angles. Nothing but the projection depends on the angle.
+    """
+
+    def setUp(self):
+        self.tile = make_tile()
+        self.tile._gizmo = qt_stubs._Any()
+        self.tile._texts = None
+        self.tile.tile_state.plot3d = True
+        self.tile.tile_state.x_param = "TIME"
+        self.tile.tile_state.y_params = ["ALT"]
+        self.tile.tile_state.z_param = "MACH"
+
+        cube = np.linspace(0.0, 1.0, 64, dtype=np.float32)
+        self.group = pt.DrawGroup(qt_stubs.PlotDataItem())
+        member = pt._ProjectedCurve(
+            "0|0|MACH", cube, cube, cube,
+            np.linspace(10.0, 20.0, 64, dtype=np.float32), "run", "sim::a")
+        self.tile._projection = pt._Projection(
+            ((0.0, 1.0), (0.0, 1.0), (0.0, 1.0)), [(self.group, [member])])
+
+    def test_without_a_cache_it_declines(self):
+        # The caller falls back to a full rebuild, which is what builds one.
+        self.tile._projection = None
+        self.assertFalse(self.tile._reproject_3d())
+
+    def test_on_a_2d_tile_it_declines(self):
+        self.tile.tile_state.plot3d = False
+        self.assertFalse(self.tile._reproject_3d())
+
+    def test_it_redraws_without_replacing_the_items(self):
+        plot = self.tile.getPlotItem()
+        plot.added = []
+        plot.removed = []
+
+        self.assertTrue(self.tile._reproject_3d())
+
+        self.assertGreater(len(self.group.item.data_calls), 0)
+        # The curve item is written to, not rebuilt. Whatever the grid adds is
+        # its own business -- the box turns with the cube.
+        self.assertNotIn(self.group.item, plot.added)
+        self.assertNotIn(self.group.item, plot.removed)
+
+    def test_a_new_angle_gives_new_points(self):
+        self.tile.tile_state.azimuth = 0.0
+        self.tile._reproject_3d()
+        first = self.group.item.data_calls[-1]
+
+        self.tile.tile_state.azimuth = 90.0
+        self.tile._reproject_3d()
+        second = self.group.item.data_calls[-1]
+
+        self.assertFalse(np.allclose(first[0], second[0]))
+
+    def test_the_curve_entries_follow(self):
+        # They hold the projected coordinates, which is what a click is
+        # hit-tested against -- so a stale one would inspect the old angle.
+        self.tile._projection.groups[0][1][0]
+        self.tile.tile_state.azimuth = 0.0
+        self.tile._reproject_3d()
+        before = self.tile._curves["0|0|MACH"].x.copy()
+
+        self.tile.tile_state.azimuth = 90.0
+        self.tile._reproject_3d()
+
+        self.assertFalse(np.allclose(before, self.tile._curves["0|0|MACH"].x))
+
+    def test_the_entry_carries_the_x_parameter_too(self):
+        self.tile._reproject_3d()
+        entry = self.tile._curves["0|0|MACH"]
+        self.assertIsNotNone(entry.source_x)
+        self.assertAlmostEqual(float(entry.source_x[0]), 10.0)
+        self.assertAlmostEqual(float(entry.source_x[-1]), 20.0)
+
+
+class TestInspectOnAProjection(unittest.TestCase):
+    """A click on a 3D tile has to be reported in the x parameter's units.
+
+    `x` there holds projected screen coordinates, because that is what the
+    click lands on. Reporting one of those meant the Inspect panel searched the
+    TIME column for a projection coordinate.
+    """
+
+    def setUp(self):
+        self.tile = make_tile()
+        self.tile.tile_state.plot3d = True
+        # A path that doubles back, which is the normal shape of a trajectory
+        # and the thing a binary search cannot handle.
+        projected_x = np.array([0.0, 1.0, 2.0, 1.0, 0.0], dtype=np.float32)
+        projected_y = np.array([0.0, 1.0, 0.0, -1.0, 0.0], dtype=np.float32)
+        entry = pt.CurveEntry(projected_x, projected_y, "run", "sim::a",
+                              "0|0|MACH")
+        entry.source_x = np.array([10.0, 11.0, 12.0, 13.0, 14.0],
+                                  dtype=np.float32)
+        self.tile._curves = {"0|0|MACH": entry}
+
+        # _inspect_at maps the click through Qt's scene, which the stubs have
+        # no coordinate system for. The point is handed through unchanged, so
+        # the test can express the click directly in view coordinates.
+        self.tile.mapToScene = lambda point: point
+        self.tile.sceneBoundingRect = lambda: _AlwaysContains()
+        self.tile.getPlotItem().vb.mapSceneToView = lambda point: point
+        self.tile.getPlotItem().vb._range = [[-1.0, 3.0], [-2.0, 2.0]]
+
+    def test_the_reported_value_is_in_source_units(self):
+        seen = []
+        self.tile.point_inspected.connect(
+            lambda f, s, x: seen.append((f, s, x)))
+        # Aim at the fourth point of the path: projected (1, -1), which a
+        # search on x alone cannot tell from the second point at (1, 1).
+        self.tile._inspect_at(_ScenePoint(1.0, -1.0))
+
+        self.assertEqual(len(seen), 1)
+        self.assertAlmostEqual(seen[0][2], 13.0, places=4)
+
+    def test_the_dot_lands_in_drawn_coordinates(self):
+        self.tile._inspect_dot = qt_stubs.PlotDataItem()
+        self.tile._inspect_at(_ScenePoint(1.0, -1.0))
+        x, y = self.tile._inspect_dot.data_calls[-1]
+        self.assertAlmostEqual(x[0], 1.0, places=4)
+        self.assertAlmostEqual(y[0], -1.0, places=4)
+
+
+class _AlwaysContains:
+    """A scene rect that accepts every click, for tests with no real scene."""
+
+    def contains(self, _point):
+        return True
+
+
+class _ScenePoint:
+    """A click position the tile can map, with the stubs standing in for Qt.
+
+    PlotTile._inspect_at goes position -> scene -> view; with no real scene the
+    stubs cannot do that, so the tile is patched in make_tile()'s spirit: the
+    point reports itself as already being in view coordinates.
+    """
+
+    def __init__(self, x, y):
+        self._x, self._y = float(x), float(y)
+
+    def x(self):
+        return self._x
+
+    def y(self):
+        return self._y
+
+    def toPoint(self):
+        return self
+
+
+class TestLabelGround(unittest.TestCase):
+    """Readouts drawn over the curves need something behind them.
+
+    Text drawn straight onto the data was dark on dark wherever a trace ran
+    under it, and the eye read the two as one object.
+    """
+
+    def test_the_ground_is_the_plot_background(self):
+        # Not a colour of its own: the label has to read as a card laid on the
+        # plot rather than as another colour in the data.
+        brush = pt._label_brush("#0e1013")
+        self.assertIsNotNone(brush)
+
+    def test_it_is_not_fully_opaque(self):
+        # A little of the trace showing through is what keeps the label part of
+        # the same picture instead of a hole punched in it.
+        self.assertLess(pt.LABEL_GROUND_ALPHA, 1.0)
+        self.assertGreater(pt.LABEL_GROUND_ALPHA, 0.7)
+
+    def test_there_is_padding_between_text_and_edge(self):
+        # Also the slack that keeps a one-word caption easy to grab.
+        self.assertGreater(pt.LABEL_PAD, 0.0)
+
+
+class TestAnnotationsHaveNoCaptions(unittest.TestCase):
+    """Markers and bands lost their own labels, and had to.
+
+    pyqtgraph builds an InfLineLabel from `label` and forwards labelOpts
+    straight to TextItem, which accepts neither a CSS "font-size" nor much
+    else. Passing one raised on every rebuild -- and an exception inside
+    _draw_overlays aborted PlotGrid.refresh() partway through the page, which
+    is why a dragged band moved on the tile under the cursor and nowhere else.
+    """
+
+    def test_no_marker_carries_a_caption(self):
+        from aoeviewer.model import AreaBand, Marker
+
+        self.assertFalse(hasattr(Marker(), "label"))
+        self.assertFalse(hasattr(AreaBand(), "label"))
+
+    def test_nothing_passes_label_options_to_pyqtgraph(self):
+        source = (os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "python", "aoeviewer", "ui", "plot_tile.py"))
+        with open(source, encoding="utf-8") as handle:
+            text = handle.read()
+        # The keyword, not the word: the comment explaining why it is gone
+        # naturally names it.
+        self.assertNotIn("labelOpts=", text)
+        self.assertNotIn("label=marker.label", text)
+
+
 class TestTypeScale(unittest.TestCase):
     """The stylesheet is a format string, and a mistake in one is silent.
 
@@ -1406,6 +1703,1307 @@ class TestTypeScale(unittest.TestCase):
         # and the drawing code was left guessing a fallback.
         font = theme_module.plot_font(theme_module.PLOT_LABEL_PT)
         self.assertGreater(font.pointSizeF(), 0)
+
+
+class TestLegendGround(unittest.TestCase):
+    """The legend sits on a card, like every other readout on a tile.
+
+    It was the one thing still drawn straight onto the data: rows of text with
+    curve-coloured swatches beside them, over curves of those same colours.
+    Nothing said where the key stopped and the plot started.
+    """
+
+    def setUp(self):
+        self.tile = make_tile()
+
+    def _legend(self):
+        plot = self.tile.getPlotItem()
+        self.tile._ensure_legend(plot)
+        return self.tile._legend
+
+    def test_it_is_built_with_a_fill_and_a_border(self):
+        legend = self._legend()
+        self.assertIsNotNone(legend.opts["brush"])
+        # Framed as well as filled: at this opacity, over an empty part of the
+        # tile, a fill of the plot's own background colour has no visible edge.
+        self.assertIsNotNone(legend.opts["pen"])
+
+    def test_the_fill_is_more_opaque_than_a_caption(self):
+        # A caption is a word the eye separates by its shape; the legend is a
+        # block whose swatches are themselves drawn in the curve colours, so a
+        # trace showing through it reads as one more entry.
+        self.assertGreater(pt.LEGEND_GROUND_ALPHA, pt.LABEL_GROUND_ALPHA)
+        self.assertLessEqual(pt.LEGEND_GROUND_ALPHA, 1.0)
+
+    def test_the_text_takes_the_plot_foreground(self):
+        # It is written on the plot background now, not on the data.
+        legend = self._legend()
+        self.assertEqual(legend.opts["labelTextColor"],
+                         self.tile._theme.plot_foreground)
+
+    def test_the_rows_are_not_flush_with_the_frame(self):
+        legend = self._legend()
+        self.assertEqual(legend.layout.getContentsMargins(),
+                         (pt.LEGEND_PAD,) * 4)
+        self.assertGreater(pt.LEGEND_PAD, 0)
+
+    def test_it_sits_above_the_curves_it_explains(self):
+        # An opaque card underneath the data would be worse than none: a trace
+        # crossing it would draw a line through the swatches identifying it.
+        legend = self._legend()
+        self.assertGreater(legend.zValue(), pt.MARKER_Z)
+        self.assertGreater(legend.zValue(), pt.AREA_Z)
+
+    def test_a_theme_change_repaints_the_card(self):
+        # _ensure_legend returns early once the legend exists, so without this
+        # a dark card stayed behind the legend on a light plot.
+        legend = self._legend()
+        first = legend.opts["brush"]
+
+        light = _Theme()
+        light.plot_background = "#ffffff"
+        light.plot_foreground = "#22262b"
+        light.plot_grid = "#d5dbe1"
+        self.tile._theme = light
+        self.tile._ensure_legend(self.tile.getPlotItem())
+
+        self.assertIs(legend, self.tile._legend)     # not rebuilt
+        self.assertIsNot(legend.opts["brush"], first)
+        self.assertEqual(legend.opts["labelTextColor"], "#22262b")
+
+    def test_the_ground_follows_the_theme_rather_than_a_colour_of_its_own(self):
+        for theme in (theme_module.DARK, theme_module.LIGHT):
+            ground = pt.legend_ground(theme)
+            self.assertEqual(ground["labelTextColor"], theme.plot_foreground)
+            self.assertIsNotNone(ground["brush"])
+            self.assertIsNotNone(ground["pen"])
+
+
+class _Sim:
+    def __init__(self, index, sim_id):
+        self.index = index
+        self.sim_id = sim_id
+        self.name = sim_id
+        self.key = "f0::" + sim_id
+
+
+class _FileHandle:
+    def __init__(self, index, name, sim_ids):
+        self.index = index
+        self.name = name
+        self.path = "/study/" + name
+        self.simulations = [_Sim(i, s) for i, s in enumerate(sim_ids)]
+        self.simulation_count = len(self.simulations)
+
+
+class _ListSession:
+    """A session with files, runs and parameters, for the list panels."""
+
+    def __init__(self, params=("TIME", "ALT", "MACH"), sims=("R1", "R2", "R3")):
+        self.parameters = list(params)
+        self.files = [_FileHandle(0, "flight_a.aoe", sims)]
+
+    def file(self, index):
+        return self.files[index] if 0 <= index < len(self.files) else None
+
+    def label(self, name):
+        return name + " [-]"
+
+    def iso_distinct(self, name):
+        return np.array([], dtype=np.float32)
+
+    def format_value(self, value):
+        return "{0:g}".format(value)
+
+
+def make_data_panel(session=None):
+    panel = object.__new__(panels.DataPanel)
+    panel._session = session or _ListSession()
+    panel._state = AppState()
+    panel._updating = False
+    panel._tree_state = None
+    panel.tree = qt_stubs.QTreeWidget()
+    panel.tree.itemChanged.connect(
+        lambda item, col=0: panel._on_item_changed(item, col))
+    return panel
+
+
+def make_param_panel(session=None):
+    panel = object.__new__(panels.ParameterPanel)
+    panel._session = session or _ListSession()
+    panel._state = AppState()
+    panel._updating = False
+    panel._list_state = None
+    panel.x_combo = qt_stubs.QComboBox()
+    panel.y_list = qt_stubs.QListWidget()
+    panel.filter_edit = qt_stubs.QLineEdit()
+    panel.y_list.itemChanged.connect(panel._on_y_changed)
+    panel.x_combo.currentTextChanged.connect(panel._on_x_changed)
+    return panel
+
+
+def sim_rows(panel):
+    rows = []
+    for index in range(panel.tree.topLevelItemCount()):
+        parent = panel.tree.topLevelItem(index)
+        for child_index in range(parent.childCount()):
+            rows.append(parent.child(child_index))
+    return rows
+
+
+class _DrawSession:
+    """Enough of a session for PlotTile.rebuild() to run end to end.
+
+    Everything it answers is constant except the ISO values, which is the
+    point: those decide the legend, and they are deliberately given out of
+    order so that "the order the runs were walked in" and "the order the groups
+    belong in" are different answers.
+    """
+
+    parameters = ["TIME", "ALT", "MACH"]
+
+    def __init__(self, iso_values=(18.0, 5.0, 12.0), runs=None):
+        self._iso = list(iso_values)
+        names = runs or ["R{0}".format(i) for i in range(len(self._iso))]
+        self.files = [_FileHandle(0, "flight_a.aoe", names)]
+
+    def file(self, index):
+        return self.files[0] if index == 0 else None
+
+    def label(self, name):
+        return name
+
+    def unit(self, _name):
+        return ""
+
+    def channel(self, _file, _sim, _name):
+        return np.arange(10, dtype=np.float32)
+
+    def iso_values(self, _file, _name):
+        return np.array(self._iso, dtype=np.float32)
+
+    def iso_distinct(self, _name):
+        return np.array(sorted(self._iso), dtype=np.float32)
+
+    def format_value(self, value):
+        return "{0:g}".format(value)
+
+    def decimate(self, x, y, _target, _range):
+        return x, y
+
+
+def make_drawable_tile(session=None):
+    """A PlotTile that can actually run rebuild(), legend and all."""
+    tile = make_tile()
+    tile._session = session or _DrawSession()
+    tile._slope_item = qt_stubs.PlotDataItem()
+    tile._slope_text = qt_stubs.PlotDataItem()
+    tile._crosshair_label = qt_stubs.PlotDataItem()
+    tile._gizmo = qt_stubs.PlotDataItem()
+    tile._texts = None
+    tile._projection = None
+    tile._inspect_dot = None
+    tile._nav_action = None
+    tile._suppress_range_event = False
+    return tile
+
+
+def legend_names(tile):
+    legend = tile.getPlotItem().legend
+    return [name for _item, name in legend.rows] if legend is not None else []
+
+
+def file_node(panel, name):
+    for index in range(panel.tree.topLevelItemCount()):
+        node = panel.tree.topLevelItem(index)
+        if node.text(0) == name:
+            return node
+    raise AssertionError("no file row named " + name)
+
+
+def click_box(item, state):
+    """Do what a click on a checkbox does: set it, and let itemChanged fire."""
+    item.setCheckState(0, state)
+
+
+class TestSelectingAWholeFile(unittest.TestCase):
+    """One box per file, because Plot all is every file at once.
+
+    With three studies open, "all of them" is rarely the question anyone is
+    asking -- and the file row is both where you look to find out how much of a
+    file is plotted and the obvious place to say "all of it". So it carries a
+    real tristate box: ticked means every run, cleared means none, and partly
+    ticked means the selection stops somewhere inside. The third state is the
+    one that earns it; without it a half-selected file has to claim to be
+    either on or off, and both are lies.
+    """
+
+    def setUp(self):
+        self.session = _ListSession(sims=("R1", "R2", "R3"))
+        self.session.files.append(_FileHandle(1, "flight_b.aoe", ("S1", "S2")))
+        self.panel = make_data_panel(self.session)
+        self.panel.refresh()
+
+    def selected(self):
+        return sorted(self.panel._state.selected_sims)
+
+    def test_ticking_a_file_plots_all_of_its_runs(self):
+        click_box(file_node(self.panel, "flight_a.aoe"), Qt.CheckState.Checked)
+        self.assertEqual(self.selected(), [(0, 0), (0, 1), (0, 2)])
+
+    def test_it_leaves_the_other_files_alone(self):
+        # The whole point of the feature: Plot all already did every file.
+        click_box(file_node(self.panel, "flight_b.aoe"), Qt.CheckState.Checked)
+        self.assertEqual(self.selected(), [(1, 0), (1, 1)])
+
+    def test_clearing_a_file_plots_none_of_its_runs(self):
+        self.panel._set_all(True)
+        click_box(file_node(self.panel, "flight_a.aoe"),
+                  Qt.CheckState.Unchecked)
+        self.assertEqual(self.selected(), [(1, 0), (1, 1)])
+
+    def test_the_run_boxes_follow(self):
+        click_box(file_node(self.panel, "flight_a.aoe"), Qt.CheckState.Checked)
+        node = file_node(self.panel, "flight_a.aoe")
+        for index in range(node.childCount()):
+            self.assertEqual(node.child(index).checkState(0),
+                             Qt.CheckState.Checked)
+
+    def test_a_partly_selected_file_reads_as_partly_selected(self):
+        self.panel._state.set_selected(0, 1, True)
+        self.panel.refresh()
+        self.assertEqual(file_node(self.panel, "flight_a.aoe").checkState(0),
+                         Qt.CheckState.PartiallyChecked)
+        self.assertEqual(file_node(self.panel, "flight_b.aoe").checkState(0),
+                         Qt.CheckState.Unchecked)
+
+    def test_a_fully_selected_file_reads_as_checked(self):
+        self.panel._set_file(0, True)
+        self.assertEqual(file_node(self.panel, "flight_a.aoe").checkState(0),
+                         Qt.CheckState.Checked)
+
+    def test_ticking_one_run_updates_the_file_row(self):
+        # The row above now says something that may no longer be true, and it
+        # is derived, so it has to be re-derived.
+        node = file_node(self.panel, "flight_a.aoe")
+        click_box(node.child(0), Qt.CheckState.Checked)
+        self.assertEqual(node.checkState(0), Qt.CheckState.PartiallyChecked)
+
+        click_box(node.child(1), Qt.CheckState.Checked)
+        click_box(node.child(2), Qt.CheckState.Checked)
+        self.assertEqual(node.checkState(0), Qt.CheckState.Checked)
+
+        click_box(node.child(0), Qt.CheckState.Unchecked)
+        self.assertEqual(node.checkState(0), Qt.CheckState.PartiallyChecked)
+
+    def test_the_file_row_does_not_write_its_runs_back(self):
+        # Re-deriving the parent sets a checkbox, which raises itemChanged
+        # exactly as a click does. Unguarded, ticking one run would be read as
+        # a click on its file row and select the other two.
+        node = file_node(self.panel, "flight_a.aoe")
+        click_box(node.child(0), Qt.CheckState.Checked)
+        self.assertEqual(self.selected(), [(0, 0)])
+
+    def test_selecting_a_whole_file_is_one_signal(self):
+        # Not one per run: the window reloads and redraws on this, and a
+        # fifty-run file would have done it fifty times.
+        fired = []
+        self.panel.selection_changed.connect(lambda: fired.append(1))
+        self.panel._set_file(0, True)
+        self.assertEqual(len(fired), 1)
+
+    def test_an_empty_file_is_not_partly_anything(self):
+        self.session.files.append(_FileHandle(2, "empty.aoe", ()))
+        self.panel.refresh()
+        self.assertEqual(file_node(self.panel, "empty.aoe").checkState(0),
+                         Qt.CheckState.Unchecked)
+
+    def test_a_file_that_has_gone_is_not_an_error(self):
+        # The tree and the session part company for a moment when a file is
+        # removed, and a derived value must not raise in that window.
+        node = file_node(self.panel, "flight_b.aoe")
+        self.session.files.pop()
+        self.panel._sync_file_node(node)          # must not raise
+        self.panel._set_file(1, True)             # must not raise
+
+    def test_plot_all_still_means_every_file(self):
+        self.panel._set_all(True)
+        self.assertEqual(self.selected(),
+                         [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1)])
+        for name in ("flight_a.aoe", "flight_b.aoe"):
+            self.assertEqual(file_node(self.panel, name).checkState(0),
+                             Qt.CheckState.Checked)
+
+    def test_plot_none_still_means_every_file(self):
+        self.panel._set_all(True)
+        self.panel._set_all(False)
+        self.assertEqual(self.selected(), [])
+        for name in ("flight_a.aoe", "flight_b.aoe"):
+            self.assertEqual(file_node(self.panel, name).checkState(0),
+                             Qt.CheckState.Unchecked)
+
+    def test_the_file_tick_is_not_part_of_the_tree_signature(self):
+        # It is derived from the runs, so it can never be the reason the rows
+        # have to be rebuilt -- and if it were, selecting a file would blink
+        # the tree again.
+        before = self.panel._tree_signature()
+        self.panel._set_file(0, True)
+        self.assertEqual(self.panel._tree_signature(), before)
+
+
+class TestListsDoNotBlink(unittest.TestCase):
+    """Ticking a box must not rebuild the list the box is in.
+
+    This was a loop with a cost. A tick told the window the selection had
+    changed; the window marked every panel stale and refreshed the visible one;
+    the visible one is the panel that was just clicked, and its refresh cleared
+    the widget and built it again. So every checkbox flickered its own list --
+    and took the scroll position, the expanded state and the current item with
+    it, which on a study of a few hundred runs means finding your place again
+    on every single tick.
+
+    The fix is to separate what the rows ARE from what is TICKED in them: only
+    the second can change on a selection, and the second is writable in place.
+    """
+
+    def test_ticking_a_run_keeps_the_same_tree_items(self):
+        panel = make_data_panel()
+        panel.refresh()
+        before = sim_rows(panel)
+
+        panel._state.set_selected(0, 1, True)
+        panel.refresh()
+
+        self.assertEqual([id(row) for row in sim_rows(panel)],
+                         [id(row) for row in before])
+
+    def test_the_tick_still_arrives(self):
+        # In place is not the same as not at all.
+        panel = make_data_panel()
+        panel.refresh()
+        panel._state.set_selected(0, 2, True)
+        panel.refresh()
+
+        rows = sim_rows(panel)
+        self.assertEqual(rows[2].checkState(0), Qt.CheckState.Checked)
+        self.assertEqual(rows[0].checkState(0), Qt.CheckState.Unchecked)
+
+    def test_an_unchanged_refresh_writes_no_checkbox(self):
+        # Each box is written only when it is wrong, so a refresh arriving for
+        # a reason that changed no selection paints nothing at all.
+        panel = make_data_panel()
+        panel._state.set_selected(0, 0, True)
+        panel.refresh()
+        rows = sim_rows(panel)
+        before = [row.check_writes for row in rows]
+
+        for _ in range(10):
+            panel.refresh()
+
+        self.assertEqual([row.check_writes for row in rows], before)
+
+    def test_a_new_file_does_rebuild(self):
+        # The in-place path is for ticks. A file arriving changes which rows
+        # exist, and no amount of checkbox writing produces a row that is not
+        # there.
+        session = _ListSession()
+        panel = make_data_panel(session)
+        panel.refresh()
+        before = sim_rows(panel)
+
+        session.files.append(_FileHandle(1, "flight_b.aoe", ("R1",)))
+        panel.refresh()
+
+        self.assertEqual(len(sim_rows(panel)), 4)
+        self.assertNotIn(id(sim_rows(panel)[0]), [id(row) for row in before])
+
+    def test_a_renamed_run_does_rebuild(self):
+        # The name is in the row, so it is in the signature.
+        session = _ListSession()
+        panel = make_data_panel(session)
+        panel.refresh()
+        session.files[0].simulations[0].name = "takeoff"
+        panel.refresh()
+        self.assertEqual(sim_rows(panel)[0].text(0), "takeoff")
+
+    def test_syncing_ticks_does_not_fire_the_handler(self):
+        # Every setCheckState raises itemChanged exactly as a click does.
+        # Unguarded, syncing would write the boxes straight back into the state
+        # -- harmless while they agree, and a loop the moment they do not.
+        panel = make_data_panel()
+        panel.refresh()
+        panel._state.set_selected(0, 1, True)
+        fired = []
+        panel.tree.itemChanged.connect(lambda *a: fired.append(a))
+        panel.refresh()
+        self.assertEqual(fired, [])
+
+    def test_ticking_a_parameter_keeps_the_same_list_items(self):
+        panel = make_param_panel()
+        panel.refresh()
+        before = [panel.y_list.item(i) for i in range(panel.y_list.count())]
+
+        panel._state.tile.y_params = ["ALT"]
+        panel.refresh()
+
+        self.assertEqual(
+            [id(panel.y_list.item(i)) for i in range(panel.y_list.count())],
+            [id(item) for item in before])
+
+    def test_the_parameter_tick_still_arrives(self):
+        panel = make_param_panel()
+        panel.refresh()
+        panel._state.tile.y_params = ["MACH"]
+        panel.refresh()
+
+        states = {panel.y_list.item(i).data(Qt.ItemDataRole.UserRole):
+                  panel.y_list.item(i).checkState()
+                  for i in range(panel.y_list.count())}
+        self.assertEqual(states["MACH"], Qt.CheckState.Checked)
+        self.assertEqual(states["ALT"], Qt.CheckState.Unchecked)
+
+    def test_switching_tile_moves_the_x_combo_without_a_rebuild(self):
+        # The common case: clicking another tile refreshes this panel, and the
+        # parameters are the same four hundred they were a moment ago.
+        panel = make_param_panel()
+        panel._state.tile.x_param = "TIME"
+        panel.refresh()
+        before = [panel.y_list.item(i) for i in range(panel.y_list.count())]
+
+        panel._state.tile.x_param = "MACH"
+        panel.refresh()
+
+        self.assertEqual(panel.x_combo.currentData(), "MACH")
+        self.assertEqual(
+            [id(panel.y_list.item(i)) for i in range(panel.y_list.count())],
+            [id(item) for item in before])
+
+    def test_a_new_parameter_does_rebuild_the_list(self):
+        session = _ListSession()
+        panel = make_param_panel(session)
+        panel.refresh()
+        session.parameters.append("NZ")
+        panel.refresh()
+        self.assertEqual(panel.y_list.count(), 4)
+
+    def test_a_changed_alias_does_rebuild_the_list(self):
+        # The displayed label is what the row says, so renaming a channel has
+        # to reach the row even though the parameter set is unchanged.
+        session = _ListSession()
+        panel = make_param_panel(session)
+        panel.refresh()
+        session.label = lambda name: "renamed " + name
+        panel.refresh()
+        self.assertTrue(panel.y_list.item(0).text().startswith("renamed"))
+
+
+class TestFirstSwitchToIsoColouring(unittest.TestCase):
+    """Choosing ISO must settle which ISO before the table is built from it.
+
+    ISO mode with no ISO parameter named is not a state: _style_entries() and
+    the tile's own colouring both test that name, and both fall back to
+    colouring by simulation when it is empty. The default WAS committed -- but
+    by apply_parameter_defaults(), which runs inside refresh_plots(), i.e.
+    after style_changed has already reached the window. One step too late for
+    the table: the plots came back coloured by ISO while CURVES still listed
+    runs, under a dropdown already showing the parameter it had picked.
+    """
+
+    def setUp(self):
+        self.panel = object.__new__(panels.StylePanel)
+        self.panel._session = _ListSession()
+        self.panel._state = AppState()
+        self.panel._updating = False
+        self.panel._table_signature = None
+        self.panel._row_keys = []
+        self.panel.table = qt_stubs.QTableWidget(0, 4)
+        self.panel.refresh = lambda: None      # only the commit is under test
+        self.panel.style_changed
+
+    def test_choosing_iso_names_the_parameter(self):
+        from aoeviewer.model import ColorMode
+
+        self.panel._on_mode_changed(int(ColorMode.ISO))
+
+        tile = self.panel._state.tile
+        self.assertEqual(tile.color_mode, ColorMode.ISO)
+        self.assertTrue(tile.color_iso_param)
+
+    def test_it_prefers_a_parameter_already_set_up_as_an_iso(self):
+        from aoeviewer.model import ColorMode
+
+        self.panel._state.iso_state("MACH")
+        self.panel._on_mode_changed(int(ColorMode.ISO))
+
+        self.assertEqual(self.panel._state.tile.color_iso_param, "MACH")
+
+    def test_the_entries_are_iso_entries_not_run_entries(self):
+        # The symptom exactly: with the name still empty, _style_entries() fell
+        # through to the simulation branch and CURVES listed runs.
+        from aoeviewer.model import ColorMode
+
+        self.panel._on_mode_changed(int(ColorMode.ISO))
+        for _label, key in self.panel._style_entries():
+            self.assertTrue(key.startswith("iso::"), key)
+
+    def test_a_choice_already_made_is_left_alone(self):
+        from aoeviewer.model import ColorMode
+
+        self.panel._state.tile.color_iso_param = "ALT"
+        self.panel._on_mode_changed(int(ColorMode.ISO))
+        self.assertEqual(self.panel._state.tile.color_iso_param, "ALT")
+
+    def test_the_dropdown_and_the_commit_agree(self):
+        # Two readers of one rule. A panel that displayed one parameter while
+        # the tile adopted another is the confusion this prevents.
+        state = self.panel._state
+        state.iso_state("MACH")
+        params = self.panel._session.parameters
+        self.assertEqual(state.default_iso_param(params), "MACH")
+
+        state.apply_parameter_defaults(params)
+        from aoeviewer.model import ColorMode
+        state.tile.color_mode = ColorMode.ISO
+        state.tile.color_iso_param = ""
+        state.apply_parameter_defaults(params)
+        self.assertEqual(state.tile.color_iso_param,
+                         state.default_iso_param(params))
+
+    def test_no_parameters_means_no_choice_to_make(self):
+        from aoeviewer.model import ColorMode
+
+        self.panel._session.parameters = []
+        self.panel._on_mode_changed(int(ColorMode.ISO))
+        self.assertEqual(self.panel._state.tile.color_iso_param, "")
+
+
+class TestAnnotationMoveReachesEveryTile(unittest.TestCase):
+    """A band is global, so a drag that reaches one tile is a wrong picture.
+
+    _apply_annotation_move() refreshed the two annotation panels and then the
+    grid. When AreaPanel.refresh() raised -- on the caption field removed from
+    the model -- the grid refresh never ran: the band moved on the tile under
+    the cursor, pyqtgraph having already dragged that item, and stayed put on
+    every other tile. One exception, two bugs, and only one of them looked like
+    an exception.
+    """
+
+    def test_the_plots_are_refreshed_before_the_lists(self):
+        source = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "python", "aoeviewer", "ui", "main_window.py")
+        with open(source, encoding="utf-8") as handle:
+            body = handle.read()
+        start = body.index("def _apply_annotation_move")
+        block = body[start:body.index("\n    def ", start + 10)]
+        self.assertLess(block.index("self.grid.refresh()"),
+                        block.index("self.marker_panel"))
+
+    def test_a_failing_panel_does_not_stop_the_others(self):
+        class Boom:
+            def refresh(self):
+                raise RuntimeError("no")
+
+        class Fine:
+            def __init__(self):
+                self.refreshed = 0
+
+            def refresh(self):
+                self.refreshed += 1
+
+        fine = Fine()
+        # The failure is logged, which is the point of it -- quieten the log
+        # for the length of the test so the suite's output stays readable.
+        import logging
+        main_window._log.setLevel(logging.CRITICAL + 1)
+        try:
+            self.assertFalse(main_window.MainWindow._refresh_now(Boom()))
+        finally:
+            main_window._log.setLevel(logging.NOTSET)
+        self.assertTrue(main_window.MainWindow._refresh_now(fine))
+        self.assertEqual(fine.refreshed, 1)
+
+    def test_a_panel_without_a_refresh_is_not_an_error(self):
+        self.assertFalse(main_window.MainWindow._refresh_now(None))
+        self.assertFalse(main_window.MainWindow._refresh_now(object()))
+
+
+class _AnnotationSession:
+    parameters = ["TIME", "ALPHA"]
+
+    def label(self, name):
+        return name
+
+
+class TestAddingAnnotations(unittest.TestCase):
+    """Adding a marker or a band must not raise.
+
+    It did, and the failure was as bad as it gets: an unhandled exception in a
+    Qt slot takes the process down, so the button closed the application. The
+    cause was a leftover from removing the caption field -- AreaPanel._describe
+    still read item.label to build the row text, and refresh() calls it for
+    every band in the list, so the first Add killed it.
+    """
+
+    def setUp(self):
+        self.state = AppState()
+        self.session = _AnnotationSession()
+
+    def test_adding_a_band_lists_it(self):
+        panel = panels.AreaPanel(self.session, self.state)
+        panel._add()                      # must not raise
+        self.assertEqual(len(self.state.areas), 1)
+        self.assertEqual(panel.list.count(), 1)
+
+    def test_adding_a_marker_lists_it(self):
+        panel = panels.MarkerPanel(self.session, self.state)
+        panel._add()                      # must not raise
+        self.assertEqual(len(self.state.markers), 1)
+        self.assertEqual(panel.list.count(), 1)
+
+    def test_a_band_is_described_by_its_span(self):
+        # The span is what identifies a band now that there is no caption, so
+        # the row has to carry the parameter and both ends of it.
+        from aoeviewer.model import AreaBand
+
+        panel = panels.AreaPanel(self.session, self.state)
+        text = panel._describe(AreaBand(x_param="TIME", x_min=2.0, x_max=5.0))
+        self.assertIn("TIME", text)
+        self.assertIn("2", text)
+        self.assertIn("5", text)
+
+    def test_neither_panel_reads_a_caption_off_the_model(self):
+        # The field is gone from both dataclasses; anything still reaching for
+        # it raises AttributeError at exactly the wrong moment.
+        from aoeviewer.model import AreaBand, Marker
+
+        area_panel = panels.AreaPanel(self.session, self.state)
+        marker_panel = panels.MarkerPanel(self.session, self.state)
+        area_panel._describe(AreaBand())
+        marker_panel._describe(Marker())
+
+    def test_refreshing_a_full_list_is_safe(self):
+        # refresh() calls _describe once per item, which is how one stale
+        # attribute reached every band at once.
+        panel = panels.AreaPanel(self.session, self.state)
+        for _ in range(5):
+            panel._add()
+        panel.refresh()
+        self.assertEqual(panel.list.count(), 5)
+
+
+class TestLegendOrderIsIntrinsic(unittest.TestCase):
+    """Legend rows must not reshuffle when a run is added or removed.
+
+    Rows are emitted in the order the draw groups are built -- pyqtgraph fills
+    the legend from addItem(), and an adopted item has its row put back in the
+    same loop -- and that order used to be the order the groups were first
+    *seen* while walking the selected runs. So which ISO group came first
+    depended on which runs happened to be selected: tick one off and
+    0-10, 10-15, 15-20 became 15-20, 0-10, 10-15, with the right colours on
+    the right curves and the legend in an order nobody chose.
+
+    The ISO values here are deliberately out of order -- run 0 carries 18, the
+    top group -- so "walk order" and "belongs-here order" are different
+    answers and the test can tell them apart.
+    """
+
+    GROUPS = [("group 0 - 10", 0.0, 10.0, True),
+              ("group 10 - 15", 10.0, 15.0, True),
+              ("group 15 - 20", 15.0, 20.0, True)]
+
+    def setUp(self):
+        from aoeviewer.model import ColorMode
+
+        self.session = _DrawSession(iso_values=(18.0, 5.0, 12.0))
+        self.tile = make_drawable_tile(self.session)
+        state = self.tile._state
+        state.selected_sims.update({(0, 0), (0, 1), (0, 2)})
+
+        tile = state.tile
+        tile.x_param, tile.y_params = "TIME", ["ALT"]
+        tile.color_mode = ColorMode.ISO
+        tile.color_iso_param = "MACH"
+        tile.show_legend = True
+        tile.legend_show_iso = True
+
+    def group_iso(self):
+        iso = self.tile._state.iso_state("MACH")
+        iso.grouped = True
+        iso.groups = list(self.GROUPS)
+
+    def test_grouped_rows_follow_the_grouping_the_user_set_up(self):
+        self.group_iso()
+        self.tile.rebuild()
+        self.assertEqual(
+            legend_names(self.tile),
+            ["ALT | MACH = group 0 - 10",
+             "ALT | MACH = group 10 - 15",
+             "ALT | MACH = group 15 - 20"])
+
+    def test_removing_a_run_does_not_reshuffle_the_rest(self):
+        # The reported symptom, exactly.
+        self.group_iso()
+        self.tile.rebuild()
+        before = legend_names(self.tile)
+
+        self.tile._state.selected_sims.discard((0, 1))   # the 0-10 run
+        self.tile.rebuild()
+
+        self.assertEqual(legend_names(self.tile),
+                         [name for name in before if "0 - 10" not in name])
+
+    def test_adding_a_run_back_restores_its_place(self):
+        self.group_iso()
+        self.tile._state.selected_sims.discard((0, 1))
+        self.tile.rebuild()
+        self.tile._state.selected_sims.add((0, 1))
+        self.tile.rebuild()
+        self.assertEqual(
+            legend_names(self.tile),
+            ["ALT | MACH = group 0 - 10",
+             "ALT | MACH = group 10 - 15",
+             "ALT | MACH = group 15 - 20"])
+
+    def test_the_order_does_not_depend_on_which_run_is_walked_first(self):
+        # Same three groups, the runs carrying them permuted. The legend must
+        # come out identical, which is the whole claim.
+        self.group_iso()
+        self.tile.rebuild()
+        expected = legend_names(self.tile)
+
+        for values in ((5.0, 12.0, 18.0), (12.0, 18.0, 5.0),
+                       (18.0, 12.0, 5.0)):
+            self.session._iso = list(values)
+            self.tile.rebuild()
+            self.assertEqual(legend_names(self.tile), expected, values)
+
+    def test_ungrouped_values_are_ordered_by_value(self):
+        # No grouping: the rows are the values themselves, and ascending is the
+        # only order anyone expects of a list of numbers.
+        self.tile.rebuild()
+        self.assertEqual(
+            legend_names(self.tile),
+            ["ALT | MACH = 5", "ALT | MACH = 12", "ALT | MACH = 18"])
+
+    def test_a_run_in_no_group_goes_last_rather_than_anywhere(self):
+        # It is still plotted -- the grouping decides colour, not whether a run
+        # is drawn -- but it has no ISO label, so its row cannot be placed
+        # among the groups. Last is the one position that says so, and it is
+        # where an unrankable row belongs however the runs are walked.
+        self.group_iso()
+        self.session._iso = [18.0, 5.0, 99.0]     # 99 is in no group
+        self.tile.rebuild()
+        self.assertEqual(legend_names(self.tile),
+                         ["ALT | MACH = group 0 - 10",
+                          "ALT | MACH = group 15 - 20",
+                          "ALT"])
+
+    def test_parameter_mode_follows_the_tile_s_own_parameter_order(self):
+        from aoeviewer.model import ColorMode
+
+        tile = self.tile._state.tile
+        tile.color_mode = ColorMode.PARAMETER
+        tile.legend_show_iso = False
+        tile.y_params = ["MACH", "ALT"]
+        self.tile.rebuild()
+        self.assertEqual(legend_names(self.tile), ["MACH", "ALT"])
+
+        tile.y_params = ["ALT", "MACH"]
+        self.tile.rebuild()
+        self.assertEqual(legend_names(self.tile), ["ALT", "MACH"])
+
+    def test_simulation_mode_follows_file_then_run(self):
+        from aoeviewer.model import ColorMode
+
+        tile = self.tile._state.tile
+        tile.color_mode = ColorMode.SIMULATION
+        tile.legend_show_iso = False
+        tile.legend_show_sim = True
+        self.tile.rebuild()
+        self.assertEqual(legend_names(self.tile),
+                         ["ALT | R0", "ALT | R1", "ALT | R2"])
+
+
+class TestTheTwoConstraintsAreIndependent(unittest.TestCase):
+    """The DATA tab and the ISO tab narrow the same picture from two sides.
+
+    They used to share one piece of state. Applying an ISO filter walked every
+    run in every file calling set_selected(), so switching a filter on rewrote
+    the DATA tab: ask for a mass between 50000 and 100000 and every run in that
+    band joined the plot whether or not you had chosen it, and every run
+    outside it was unticked whether or not you had. Two controls, one variable,
+    each overwriting the other's answer.
+
+    Now each records its own answer and a run is drawn only if both admit it.
+    """
+
+    MASS = [40000.0, 75000.0, 120000.0]
+
+    def setUp(self):
+        self.state = AppState()
+        self.files = [(0, 3)]
+
+    def values_for(self, _file_index, _param):
+        return np.array(self.MASS, dtype=np.float32)
+
+    def band(self, low_on=False, mid_on=True, high_on=False):
+        """A MASS grouping with only the chosen bands active."""
+        iso = self.state.iso_state("MASS")
+        iso.active = True
+        iso.grouped = True
+        iso.groups = [("low", 0.0, 50000.0, low_on),
+                      ("mid", 50000.0, 100000.0, mid_on),
+                      ("high", 100000.0, 200000.0, high_on)]
+        self.state.resolve_iso_filters(self.files, self.values_for)
+        return iso
+
+    def test_a_filter_narrows_the_data_choice_rather_than_replacing_it(self):
+        self.state.set_selected(0, 0, True)      # 40000, outside the band
+        self.state.set_selected(0, 1, True)      # 75000, inside it
+        self.band()
+        self.assertEqual(self.state.plotted_sims(), ((0, 1),))
+
+    def test_a_filter_does_not_touch_the_data_ticks(self):
+        self.state.set_selected(0, 0, True)
+        self.state.set_selected(0, 1, True)
+        self.band()
+        self.assertEqual(sorted(self.state.selected_sims), [(0, 0), (0, 1)])
+
+    def test_a_filter_never_adds_a_run_the_user_did_not_choose(self):
+        # Run 1 is in the band and untouched in DATA. The band is a filter, not
+        # a selection: it can only take runs away.
+        self.band()
+        self.assertEqual(self.state.plotted_sims(), ())
+        self.assertEqual(self.state.selected_sims, set())
+
+    def test_widening_a_filter_still_adds_nothing(self):
+        self.band(low_on=True, high_on=True)
+        self.assertEqual(self.state.plotted_sims(), ())
+
+    def test_ticking_a_filtered_out_run_puts_it_on_no_tile(self):
+        # Stated in the report: a run whose ISO value is not selected must not
+        # appear, however firmly it is ticked.
+        self.band()
+        self.state.set_selected(0, 2, True)      # 120000, above the band
+        self.assertFalse(self.state.is_plotted(0, 2))
+        self.assertEqual(self.state.plotted_sims(), ())
+
+    def test_ticking_a_run_does_not_touch_the_filters(self):
+        iso = self.band()
+        before = (iso.active, iso.grouped, list(iso.groups),
+                  dict(iso.value_enabled))
+        self.state.set_selected(0, 2, True)
+        self.assertEqual((iso.active, iso.grouped, list(iso.groups),
+                          dict(iso.value_enabled)), before)
+
+    def test_both_halves_are_required(self):
+        self.band()
+        for pair, expected in (((0, 0), False),    # ticked later, outside
+                               ((0, 1), False),    # inside, not ticked
+                               ((0, 2), False)):
+            self.assertEqual(self.state.is_plotted(*pair), expected, pair)
+
+        self.state.set_selected(0, 1, True)
+        self.assertTrue(self.state.is_plotted(0, 1))
+
+    def test_it_says_how_many_runs_are_held_back(self):
+        # The number that explains a plot shorter than the DATA tab suggests.
+        for sim in range(3):
+            self.state.set_selected(0, sim, True)
+        self.band()
+        self.assertEqual(self.state.excluded_by_iso(), 2)
+
+    def test_nothing_is_held_back_when_no_filter_is_active(self):
+        self.state.set_selected(0, 0, True)
+        self.state.resolve_iso_filters(self.files, self.values_for)
+        self.assertEqual(self.state.excluded_by_iso(), 0)
+        self.assertFalse(self.state.iso_filters_resolved())
+
+    def test_no_active_filter_costs_nothing_to_represent(self):
+        # None rather than a set of every run: "no filter" is then free to
+        # represent and free to keep up to date when a file arrives.
+        self.state.resolve_iso_filters(self.files, self.values_for)
+        self.assertIsNone(self.state._iso_admitted)
+        self.assertTrue(self.state.iso_admitted(0, 99))
+
+    def test_an_ungrouped_filter_selects_by_value(self):
+        iso = self.state.iso_state("MASS")
+        iso.active = True
+        iso.value_enabled = {40000.0: False, 75000.0: True, 120000.0: False}
+        for sim in range(3):
+            self.state.set_selected(0, sim, True)
+        self.state.resolve_iso_filters(self.files, self.values_for)
+        self.assertEqual(self.state.plotted_sims(), ((0, 1),))
+
+    def test_a_value_never_ticked_is_shown(self):
+        # Absent means on: a value the user has not touched is not a value they
+        # excluded.
+        iso = self.state.iso_state("MASS")
+        iso.active = True
+        for sim in range(3):
+            self.state.set_selected(0, sim, True)
+        self.state.resolve_iso_filters(self.files, self.values_for)
+        self.assertEqual(len(self.state.plotted_sims()), 3)
+
+    def test_filters_combine_with_and(self):
+        # Adding a second filter must narrow, not widen.
+        mass = self.state.iso_state("MASS")
+        mass.active = True
+        mass.value_enabled = {40000.0: True, 75000.0: True, 120000.0: False}
+        alt = self.state.iso_state("ALT")
+        alt.active = True
+        alt.value_enabled = {0.0: False, 1.0: True, 2.0: True}
+
+        def values_for(_file_index, param):
+            if param == "MASS":
+                return np.array(self.MASS, dtype=np.float32)
+            return np.array([0.0, 1.0, 2.0], dtype=np.float32)
+
+        for sim in range(3):
+            self.state.set_selected(0, sim, True)
+        self.state.resolve_iso_filters(self.files, values_for)
+        # MASS admits 0 and 1; ALT admits 1 and 2; both admit only 1.
+        self.assertEqual(self.state.plotted_sims(), ((0, 1),))
+
+    def test_an_inactive_filter_does_not_narrow(self):
+        iso = self.state.iso_state("MASS")
+        iso.active = False
+        iso.value_enabled = {40000.0: False, 75000.0: False, 120000.0: False}
+        self.state.set_selected(0, 0, True)
+        self.state.resolve_iso_filters(self.files, self.values_for)
+        self.assertEqual(self.state.plotted_sims(), ((0, 0),))
+
+    def test_a_run_with_no_value_for_the_parameter_is_excluded(self):
+        self.MASS = [40000.0, float("nan"), 120000.0]
+        for sim in range(3):
+            self.state.set_selected(0, sim, True)
+        iso = self.state.iso_state("MASS")
+        iso.active = True
+        self.state.resolve_iso_filters(self.files, self.values_for)
+        self.assertFalse(self.state.is_plotted(0, 1))
+
+    def test_a_short_iso_column_excludes_the_runs_it_does_not_cover(self):
+        self.MASS = [75000.0]                   # one value, three runs
+        for sim in range(3):
+            self.state.set_selected(0, sim, True)
+        iso = self.state.iso_state("MASS")
+        iso.active = True
+        self.state.resolve_iso_filters(self.files, self.values_for)
+        self.assertEqual(self.state.plotted_sims(), ((0, 0),))
+
+
+class TestPlottedSimsCache(unittest.TestCase):
+    """Every tile asks this on every rebuild; it must not recompute per tile."""
+
+    def setUp(self):
+        self.state = AppState()
+        for sim in range(50):
+            self.state.set_selected(0, sim, True)
+
+    def test_repeated_asks_are_the_same_object(self):
+        first = self.state.plotted_sims()
+        for _ in range(25):
+            self.assertIs(self.state.plotted_sims(), first)
+
+    def test_ticking_a_run_invalidates_it(self):
+        before = self.state.plotted_sims()
+        self.state.set_selected(0, 99, True)
+        self.assertIsNot(self.state.plotted_sims(), before)
+        self.assertIn((0, 99), self.state.plotted_sims())
+
+    def test_clearing_the_selection_invalidates_it(self):
+        self.state.plotted_sims()
+        self.state.clear_selection()
+        self.assertEqual(self.state.plotted_sims(), ())
+
+    def test_resolving_the_filters_invalidates_it(self):
+        self.state.plotted_sims()
+        iso = self.state.iso_state("MASS")
+        iso.active = True
+        iso.value_enabled = {float(v): v < 10 for v in range(50)}
+        self.state.resolve_iso_filters(
+            [(0, 50)], lambda _f, _p: np.arange(50, dtype=np.float32))
+        self.assertEqual(len(self.state.plotted_sims()), 10)
+
+    def test_writing_the_set_directly_is_still_noticed(self):
+        # Tests and older code reach for selected_sims itself. Going through
+        # set_selected() is what invalidates the cache properly; this is the
+        # cheap backstop that catches the rest.
+        self.state.plotted_sims()
+        self.state.selected_sims.add((1, 0))
+        self.assertIn((1, 0), self.state.plotted_sims())
+
+    def test_dropping_a_file_moves_the_iso_answer_with_it(self):
+        # The admitted set is indexed by file too. Left unshifted it would
+        # start admitting the wrong runs of the wrong files.
+        state = AppState()
+        state.set_selected(0, 0, True)
+        state.set_selected(1, 0, True)
+        state.set_selected(1, 1, True)
+        iso = state.iso_state("MASS")
+        iso.active = True
+        iso.value_enabled = {0.0: True, 1.0: False}
+        state.resolve_iso_filters(
+            [(0, 2), (1, 2)], lambda _f, _p: np.array([0.0, 1.0], "f4"))
+        self.assertEqual(state.plotted_sims(), ((0, 0), (1, 0)))
+
+        state.drop_file(0)
+        self.assertEqual(state.plotted_sims(), ((0, 0),))
+        self.assertTrue(state.iso_admitted(0, 0))
+        self.assertFalse(state.iso_admitted(0, 1))
+
+
+class TestIsoAdmits(unittest.TestCase):
+    """One filter's verdict on one value, which is all the rest is built on."""
+
+    def setUp(self):
+        self.state = AppState()
+        self.iso = self.state.iso_state("MASS")
+
+    def test_a_grouped_value_needs_its_group_active(self):
+        self.iso.grouped = True
+        self.iso.groups = [("low", 0.0, 10.0, True), ("high", 10.0, 20.0, False)]
+        self.assertTrue(self.state.iso_admits(self.iso, 5.0))
+        self.assertFalse(self.state.iso_admits(self.iso, 15.0))
+
+    def test_a_shared_edge_belongs_to_the_earlier_group(self):
+        # Inclusive at both ends, first claim wins -- the rule isogroups owns
+        # and the core applies, so the plot and the group counts agree.
+        self.iso.grouped = True
+        self.iso.groups = [("low", 0.0, 10.0, True), ("high", 10.0, 20.0, False)]
+        self.assertTrue(self.state.iso_admits(self.iso, 10.0))
+
+    def test_a_value_in_no_group_is_excluded(self):
+        self.iso.grouped = True
+        self.iso.groups = [("low", 0.0, 10.0, True)]
+        self.assertFalse(self.state.iso_admits(self.iso, 99.0))
+
+    def test_nan_is_excluded(self):
+        self.assertFalse(self.state.iso_admits(self.iso, float("nan")))
+
+    def test_grouping_switched_on_with_no_intervals_admits_by_value(self):
+        # A grouped parameter with no groups matches nothing, so the value
+        # branch is the safe reading of it rather than excluding everything.
+        self.iso.grouped = True
+        self.iso.groups = []
+        self.assertTrue(self.state.iso_admits(self.iso, 5.0))
+
+
+class TestFilteredRunsAreNotDrawn(unittest.TestCase):
+    """The end of the chain: a held-back run puts no curve on a tile."""
+
+    def setUp(self):
+        from aoeviewer.model import ColorMode
+
+        self.session = _DrawSession(iso_values=(40000.0, 75000.0, 120000.0))
+        self.tile = make_drawable_tile(self.session)
+        state = self.tile._state
+        for sim in range(3):
+            state.set_selected(0, sim, True)
+
+        tile = state.tile
+        tile.x_param, tile.y_params = "TIME", ["ALT"]
+        tile.color_mode = ColorMode.SIMULATION
+        tile.show_legend = True
+        tile.legend_show_sim = True
+
+    def band(self):
+        state = self.tile._state
+        iso = state.iso_state("MASS")
+        iso.active = True
+        iso.grouped = True
+        iso.groups = [("low", 0.0, 50000.0, False),
+                      ("mid", 50000.0, 100000.0, True),
+                      ("high", 100000.0, 200000.0, False)]
+        state.resolve_iso_filters([(0, 3)], self.session.iso_values)
+
+    def test_all_three_runs_draw_without_a_filter(self):
+        self.tile.rebuild()
+        self.assertEqual(legend_names(self.tile),
+                         ["ALT | R0", "ALT | R1", "ALT | R2"])
+
+    def test_only_the_admitted_run_draws_with_one(self):
+        self.band()
+        self.tile.rebuild()
+        self.assertEqual(legend_names(self.tile), ["ALT | R1"])
+
+    def test_the_tile_reads_as_empty_when_the_filter_excludes_everything(self):
+        state = self.tile._state
+        iso = state.iso_state("MASS")
+        iso.active = True
+        iso.grouped = True
+        iso.groups = [("none", 0.0, 1.0, True)]
+        state.resolve_iso_filters([(0, 3)], self.session.iso_values)
+
+        self.tile.rebuild()
+        self.assertEqual(legend_names(self.tile), [])
+        self.assertEqual(self.tile._curves, {})
+
+    def test_the_preload_asks_only_for_runs_that_will_be_drawn(self):
+        # Reading columns for runs nothing is going to draw is the cost of
+        # keying the preload on the wrong one of the two constraints.
+        self.band()
+        grid = object.__new__(pg_grid.PlotGrid)
+        grid._state = self.tile._state
+        grid._tiles = [self.tile]
+        self.assertEqual(grid.plotted_sims_by_file(), {0: [1]})
+
+
+class TestTheIsoPanelDoesNotSelectRuns(unittest.TestCase):
+    """apply_filter() declares a filter. It does not choose runs."""
+
+    def test_it_leaves_the_data_selection_alone(self):
+        panel = make_iso_panel()
+        panel.apply_filter = panels.IsoPanel.apply_filter.__get__(panel)
+        panel._state.set_selected(0, 0, True)
+        iso = panel._state.iso_state("MACH")
+        iso.active = True
+
+        panel.apply_filter()
+
+        self.assertEqual(sorted(panel._state.selected_sims), [(0, 0)])
+
+    def test_it_says_that_the_filters_changed(self):
+        panel = make_iso_panel()
+        panel.apply_filter = panels.IsoPanel.apply_filter.__get__(panel)
+        fired = []
+        panel.filter_changed.connect(lambda: fired.append(1))
+        panel.apply_filter()
+        self.assertEqual(len(fired), 1)
+
+
+class TestHeldBackRunsAreMarked(unittest.TestCase):
+    """A ticked run that is not on screen has to say why.
+
+    Two independent constraints is the right model and it has one cost: a run
+    can be firmly ticked in DATA and still be on no tile. Unmarked, that is
+    indistinguishable from a bug -- the checkbox claims the run is plotted and
+    the plot disagrees.
+    """
+
+    def setUp(self):
+        self.session = _ListSession(sims=("R0", "R1", "R2"))
+        self.panel = make_data_panel(self.session)
+        state = self.panel._state
+        for sim in range(3):
+            state.set_selected(0, sim, True)
+        self.panel.refresh()
+
+    def held(self):
+        return [bool(row.data(0, panels._HELD_BACK_ROLE))
+                for row in sim_rows(self.panel)]
+
+    def filter_to(self, admitted):
+        state = self.panel._state
+        iso = state.iso_state("MASS")
+        iso.active = True
+        iso.value_enabled = {float(v): v in admitted for v in range(3)}
+        state.resolve_iso_filters(
+            [(0, 3)], lambda _f, _p: np.arange(3, dtype=np.float32))
+
+    def test_nothing_is_marked_without_a_filter(self):
+        self.assertEqual(self.held(), [False, False, False])
+
+    def test_the_excluded_rows_are_marked(self):
+        self.filter_to({1})
+        self.panel.refresh()
+        self.assertEqual(self.held(), [True, False, True])
+
+    def test_the_mark_comes_off_when_the_filter_widens(self):
+        self.filter_to({1})
+        self.panel.refresh()
+        self.filter_to({0, 1, 2})
+        self.panel.refresh()
+        self.assertEqual(self.held(), [False, False, False])
+
+    def test_an_unticked_row_is_not_marked(self):
+        # It is not held back, it was simply not chosen. Marking it would say
+        # the filter is responsible for something the user did.
+        self.filter_to({1})
+        self.panel._state.set_selected(0, 0, False)
+        self.panel.refresh()
+        self.assertEqual(self.held(), [False, False, True])
+
+    def test_the_reason_is_on_hover(self):
+        self.filter_to({1})
+        self.panel.refresh()
+        rows = sim_rows(self.panel)
+        self.assertIn("held back by an ISO filter", rows[0].toolTip(0))
+        self.assertNotIn("held back", rows[1].toolTip(0))
+
+    def test_the_original_tooltip_comes_back(self):
+        rows = sim_rows(self.panel)
+        before = rows[0].toolTip(0)
+        self.filter_to({1})
+        self.panel.refresh()
+        self.filter_to({0, 1, 2})
+        self.panel.refresh()
+        self.assertEqual(sim_rows(self.panel)[0].toolTip(0), before)
+
+    def test_the_ticks_themselves_are_untouched(self):
+        # The filter dims rows. It does not untick them -- that is the DATA
+        # tab's state and the ISO tab does not own it.
+        self.filter_to({1})
+        self.panel.refresh()
+        for row in sim_rows(self.panel):
+            self.assertEqual(row.checkState(0), Qt.CheckState.Checked)
+
+    def test_marking_writes_nothing_when_nothing_changed(self):
+        self.filter_to({1})
+        self.panel.refresh()
+        rows = sim_rows(self.panel)
+        before = [row.data(0, panels._HELD_BACK_ROLE) for row in rows]
+        tips = [row.toolTip(0) for row in rows]
+
+        for _ in range(5):
+            self.panel.refresh()
+
+        self.assertEqual([row.data(0, panels._HELD_BACK_ROLE) for row in rows],
+                         before)
+        self.assertEqual([row.toolTip(0) for row in rows], tips)
+
+
+class TestIsoLabelRanks(unittest.TestCase):
+    """The ranks that order the legend, read straight off the lookup.
+
+    Computed in the same pass as the labels because both come out of the same
+    per-run ISO read, and that read is the expensive part.
+    """
+
+    def setUp(self):
+        self.tile = make_drawable_tile()
+        self.tile._state.selected_sims.update({(0, 0), (0, 1), (0, 2)})
+
+    def test_grouped_labels_rank_by_their_place_in_the_grouping(self):
+        iso = self.tile._state.iso_state("MACH")
+        iso.grouped = True
+        iso.groups = [("low", 0.0, 10.0, True),
+                      ("mid", 10.0, 15.0, True),
+                      ("high", 15.0, 20.0, True)]
+
+        _labels, ranks = self.tile._iso_labels("MACH")
+        self.assertEqual(ranks, {"low": 0.0, "mid": 1.0, "high": 2.0})
+
+    def test_ungrouped_labels_rank_by_value(self):
+        _labels, ranks = self.tile._iso_labels("MACH")
+        self.assertEqual(ranks, {"18": 18.0, "5": 5.0, "12": 12.0})
+
+    def test_two_runs_sharing_a_label_rank_by_the_lower_one(self):
+        # A row's place must not depend on which of its runs was visited
+        # first, and ungrouped, two distinct values can format to one label.
+        self.tile._session = _DrawSession(iso_values=(0.752, 0.751))
+        self.tile._session.format_value = lambda value: "{0:.2f}".format(value)
+        self.tile._state.selected_sims.clear()
+        self.tile._state.selected_sims.update({(0, 0), (0, 1)})
+
+        _labels, ranks = self.tile._iso_labels("MACH")
+        self.assertEqual(list(ranks), ["0.75"])
+        self.assertAlmostEqual(ranks["0.75"], 0.751, places=6)
+
+    def test_no_iso_parameter_is_two_empty_maps(self):
+        labels, ranks = self.tile._iso_labels("")
+        self.assertEqual((labels, ranks), ({}, {}))
 
 
 if __name__ == "__main__":

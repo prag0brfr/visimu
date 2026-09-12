@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
+from . import isogroups
+
 MAX_TILES = 25  # a 5x5 grid
 
 # Half-extent of the default 3D view. The normalised cube's half-diagonal is
@@ -122,13 +124,20 @@ class Marker:
     position: float = 0.0
     visible: bool = True
     color: str = "#ff3333"
-    label: str = ""
     # Size of the dot drawn on tiles whose x axis is a different parameter.
     dot_size: float = 9.0
 
+    # No caption field. Markers and bands carried one, drawn on the plot, and it
+    # was the wrong place for it twice over: pyqtgraph anchors an InfiniteLine's
+    # label to the line, so it sat on top of the data with nothing behind it,
+    # and every keystroke while editing it rebuilt the tile and deleted the item
+    # being edited. Text notes already do captions properly -- placed where you
+    # want them, on an opaque ground, dragged rather than typed into a box -- so
+    # a band that needs naming gets a note beside it. Workspaces written when
+    # the field existed still load: the reader keeps only the fields this class
+    # declares, so the old key is ignored rather than refused.
+
     def describe(self) -> str:
-        if self.label:
-            return self.label
         return "{0} = {1:g}".format(self.x_param or "?", self.position)
 
 
@@ -142,14 +151,11 @@ class AreaBand:
     color: str = "#3380ff"
     alpha: float = 0.20
     visible: bool = True
-    # Optional caption, as markers have. A band marking "rotation" or
-    # "second segment climb" is far more use with the phase named on it than
-    # as an anonymous stripe you have to remember the meaning of.
-    label: str = ""
+
+    # No caption field -- see Marker above for why. Name a band with a text note
+    # placed over it.
 
     def describe(self) -> str:
-        if self.label:
-            return self.label
         return "{0} in [{1:g}, {2:g}]".format(self.x_param or "?",
                                               self.x_min, self.x_max)
 
@@ -577,10 +583,20 @@ class AppState:
         self.active_page: int = 0
         self.active_tile: int = 0
 
-        # (file_index, sim_index) pairs currently plotted.
+        # (file_index, sim_index) pairs ticked in the DATA tab. One of the two
+        # constraints on what is drawn; the ISO filters are the other, and
+        # plotted_sims() is where they meet.
         self.selected_sims: Set[Tuple[int, int]] = set()
 
         self.iso_states: Dict[str, IsoState] = {}
+
+        # Which runs the ISO filters admit, or None while none is active.
+        # Derived from iso_states and the files, so it is not saved -- the
+        # filters are, and resolve_iso_filters() rebuilds this from them
+        # whenever the loaded files change.
+        self._iso_admitted: Optional[Set[Tuple[int, int]]] = None
+        self._plotted: Optional[Tuple[Tuple[int, int], ...]] = None
+        self._plotted_from: int = -1
         self.styles = StyleRegistry()
         self.markers: List[Marker] = []
         self.areas: List[AreaBand] = []
@@ -618,6 +634,75 @@ class AppState:
         if param not in self.iso_states:
             self.iso_states[param] = IsoState(param=param)
         return self.iso_states[param]
+
+    def iso_admits(self, iso: "IsoState", value: float) -> bool:
+        """Does one ISO filter let a run holding this value through?"""
+        if value != value:      # NaN: the run has no value for this parameter
+            return False
+        if iso.grouped and iso.groups:
+            index = isogroups.group_of(iso.groups, value)
+            return index is not None and iso.groups[index][3]
+        return iso.value_enabled.get(float(value), True)
+
+    def resolve_iso_filters(self, files, values_for) -> None:
+        """Work out which runs the ISO filters admit, and remember it.
+
+        The ISO tab and the DATA tab are independent constraints, and this
+        computes the ISO half on its own. It used to be written *into* the DATA
+        selection -- a pass over every run calling set_selected() -- so
+        applying a filter silently reticked the DATA tab: ask for a mass
+        between 50000 and 100000 and every run in that band joined the plot
+        whether or not you had chosen it, and every run outside it was
+        unticked whether or not you had. Two controls, one piece of state, and
+        each one overwriting the other's answer.
+
+        Recorded separately instead, so neither tab can move the other's
+        checkboxes, and plotted_sims() intersects the two to decide what is
+        drawn. Filters still combine with AND -- adding a second one should
+        narrow the set, not widen it.
+
+        `files` is an iterable of (file_index, simulation_count) and
+        `values_for(file_index, param)` returns that file's ISO column, both
+        passed in because this module knows nothing about sessions. One column
+        read per parameter per file, and each reads only the first record of
+        every block, so this stays cheap on large files.
+        """
+        self._plotted = None
+        filters = self.active_iso_filters()
+        if not filters:
+            # None rather than a set of every run. "No filter" then costs
+            # nothing to represent and nothing to keep up to date when a file
+            # arrives, which is the common case by a wide margin.
+            self._iso_admitted = None
+            return
+
+        admitted: Set[Tuple[int, int]] = set()
+        for file_index, count in files:
+            columns = [(iso, values_for(file_index, iso.param))
+                       for iso in filters]
+            for sim_index in range(count):
+                for iso, column in columns:
+                    if sim_index >= len(column):
+                        break
+                    if not self.iso_admits(iso, float(column[sim_index])):
+                        break
+                else:
+                    admitted.add((file_index, sim_index))
+        self._iso_admitted = admitted
+
+    def iso_filters_resolved(self) -> bool:
+        """True when an ISO filter is narrowing the selection."""
+        return self._iso_admitted is not None
+
+    def iso_admitted(self, file_index: int, sim_index: int) -> bool:
+        """Do the ISO filters admit this run, ignoring the DATA tab?
+
+        The question the DATA tab asks to explain itself: a row that is ticked
+        but answers False here is the reason a run the user chose is not on
+        screen.
+        """
+        return (self._iso_admitted is None
+                or (file_index, sim_index) in self._iso_admitted)
 
     # ------------------------------------------------------ global limits
 
@@ -722,6 +807,26 @@ class AppState:
         return next((p for p in available if p.upper().startswith("TIME")),
                     available[0])
 
+    def default_iso_param(self, available: Sequence[str]) -> str:
+        """The parameter to colour by when a tile has chosen ISO but not which.
+
+        One owner for the rule, because it is read in two places that must not
+        disagree: here, to commit the choice, and the STYLE panel, to show it
+        in the dropdown before it is committed. A panel that displayed one
+        parameter while the tile adopted another is exactly the confusion this
+        prevents.
+
+        A parameter the user has already set up in the ISO tab comes first --
+        having configured it is the clearest statement of interest available --
+        and otherwise the same default the x axis gets, so the answer is never
+        empty while anything is loaded.
+        """
+        if not available:
+            return ""
+        names = set(available)
+        configured = [p for p in self.iso_states if p in names]
+        return configured[0] if configured else self.default_x_param(available)
+
     def apply_parameter_defaults(self, available: Sequence[str]) -> bool:
         """Fill in the choices a tile needs but the user has not made.
 
@@ -760,10 +865,9 @@ class AppState:
                 # the parameter it needs never was, and the curves come out one
                 # colour with nothing to say why.
                 if tile.color_mode == ColorMode.ISO and not tile.color_iso_param:
-                    configured = [p for p in self.iso_states if p in names]
-                    if configured or available:
-                        tile.color_iso_param = (configured[0] if configured
-                                                else default_x)
+                    chosen = self.default_iso_param(available)
+                    if chosen:
+                        tile.color_iso_param = chosen
                         changed = True
 
         if changed:
@@ -933,19 +1037,79 @@ class AppState:
             self.selected_sims.add(pair)
         else:
             self.selected_sims.discard(pair)
+        self._plotted = None
         self.dirty = True
+
+    def clear_selection(self) -> None:
+        self.selected_sims.clear()
+        self._plotted = None
+        self.dirty = True
+
+    def is_plotted(self, file_index: int, sim_index: int) -> bool:
+        """Will this run be drawn?
+
+        Ticked in the DATA tab *and* admitted by every active ISO filter. Both
+        halves, which is the whole point: a run whose ISO value is filtered out
+        stays off every tile however firmly it is ticked, and a run the ISO
+        filters admit stays off until it is ticked.
+        """
+        pair = (file_index, sim_index)
+        if pair not in self.selected_sims:
+            return False
+        return self._iso_admitted is None or pair in self._iso_admitted
+
+    def plotted_sims(self) -> Tuple[Tuple[int, int], ...]:
+        """Every run that will be drawn, in order.
+
+        Cached, because this is the hot question: every tile asks it on every
+        rebuild, and a page of twenty-five tiles asks twenty-five times for an
+        answer that cannot have changed in between.
+
+        Invalidated by set_selected() and by resolve_iso_filters(), which are
+        the two doors this can change through -- and also whenever the number
+        of ticked runs no longer matches what the cache was built from, which
+        catches selected_sims being written directly. A same-sized swap done
+        that way would slip past; nothing in the application does one, and
+        going through set_selected() is why.
+        """
+        if self._plotted is None or self._plotted_from != len(self.selected_sims):
+            if self._iso_admitted is None:
+                pairs = self.selected_sims
+            else:
+                pairs = self.selected_sims & self._iso_admitted
+            self._plotted = tuple(sorted(pairs))
+            self._plotted_from = len(self.selected_sims)
+        return self._plotted
+
+    def excluded_by_iso(self) -> int:
+        """How many ticked runs the ISO filters are holding back.
+
+        The number that explains a plot which came back shorter than the DATA
+        tab suggests it should.
+        """
+        if self._iso_admitted is None:
+            return 0
+        return len(self.selected_sims) - len(self.plotted_sims())
 
     def selection_for_file(self, file_index: int) -> List[int]:
         return sorted(s for f, s in self.selected_sims if f == file_index)
 
     def drop_file(self, file_index: int) -> None:
         """Forget selections for a removed file and shift higher indices down."""
-        remapped = set()
-        for f, s in self.selected_sims:
-            if f == file_index:
-                continue
-            remapped.add((f - 1, s) if f > file_index else (f, s))
-        self.selected_sims = remapped
+        def remap(pairs):
+            moved = set()
+            for f, s in pairs:
+                if f == file_index:
+                    continue
+                moved.add((f - 1, s) if f > file_index else (f, s))
+            return moved
+
+        self.selected_sims = remap(self.selected_sims)
+        # The ISO answer is indexed by file too, so it has to move with it or
+        # it would start admitting the wrong runs of the wrong files.
+        if self._iso_admitted is not None:
+            self._iso_admitted = remap(self._iso_admitted)
+        self._plotted = None
 
     # ---------------------------------------------------------- workspace
 
@@ -961,13 +1125,13 @@ class AppState:
             "markers": [
                 {"x_param": m.x_param, "position": m.position,
                  "visible": m.visible, "color": m.color,
-                 "label": m.label, "dot_size": m.dot_size}
+                 "dot_size": m.dot_size}
                 for m in self.markers
             ],
             "areas": [
                 {"x_param": a.x_param, "x_min": a.x_min, "x_max": a.x_max,
-                 "color": a.color, "alpha": a.alpha, "visible": a.visible,
-                 "label": a.label}
+                 "color": a.color, "alpha": a.alpha,
+                 "visible": a.visible}
                 for a in self.areas
             ],
             "global_x_limits": {k: list(v) for k, v in self.global_x_limits.items()},
@@ -979,6 +1143,11 @@ class AppState:
         self.pages = pages or [PageState()]
         self.active_page = int(data.get("active_page", 0))
         self.selected_sims = {tuple(pair) for pair in data.get("selected_sims", [])}
+        # The ISO answer is derived, never saved. Whatever it was, it described
+        # the files the last workspace had open; MainWindow.refresh_all()
+        # rebuilds it once the new ones are known.
+        self._iso_admitted = None
+        self._plotted = None
         self.styles.load_dict(data.get("styles", {}))
         self.dark_mode = bool(data.get("dark_mode", True))
         self.mouse_mode = MouseMode(int(data.get("mouse_mode", int(MouseMode.SELECT))))

@@ -682,32 +682,34 @@ class TestAnnotationStability(unittest.TestCase):
     x_param changes only when someone changes it.
     """
 
-    def test_area_describe_prefers_its_label(self):
+    def test_area_describe_names_its_span(self):
+        # Bands have no caption of their own any more -- every keystroke while
+        # typing one rebuilt the tile and deleted the item being edited, so it
+        # vanished as it was written. Text notes do captions properly. What is
+        # left is the span, which is what the list needs to show.
         band = AreaBand(x_param="TIME", x_min=10.0, x_max=20.0)
-        self.assertIn("TIME", band.describe())
-        band.label = "second segment"
-        self.assertEqual(band.describe(), "second segment")
+        self.assertEqual(band.describe(), "TIME in [10, 20]")
+        self.assertFalse(hasattr(band, "label"))
 
-    def test_area_label_survives_a_round_trip(self):
-        state = AppState()
-        state.areas.append(AreaBand(x_param="TIME", x_min=1.0, x_max=2.0,
-                                    label="rotation"))
-        restored = AppState()
-        restored.load_dict(state.to_dict())
-        self.assertEqual(restored.areas[0].label, "rotation")
+    def test_workspaces_written_with_labels_still_load(self):
+        """A workspace saved while bands and markers had captions must open.
 
-    def test_workspaces_written_before_labels_still_load(self):
-        """An old workspace has no 'label' key, and must not fail to open."""
+        The reader keeps only the fields the dataclass declares, so the retired
+        key is ignored rather than refused -- the same mechanism that lets a
+        workspace from a *newer* build open in an older one.
+        """
         legacy = {
             "areas": [{"x_param": "TIME", "x_min": 0.0, "x_max": 1.0,
-                       "color": "#3380ff", "alpha": 0.2, "visible": True}],
+                       "color": "#3380ff", "alpha": 0.2, "visible": True,
+                       "label": "rotation"}],
             "markers": [{"x_param": "TIME", "position": 5.0, "visible": True,
-                         "color": "#ff3333"}],
+                         "color": "#ff3333", "label": "Vr"}],
         }
         state = AppState()
         state.load_dict(legacy)
-        self.assertEqual(state.areas[0].label, "")
+        self.assertEqual(state.areas[0].x_param, "TIME")
         self.assertEqual(state.markers[0].position, 5.0)
+        self.assertFalse(hasattr(state.areas[0], "label"))
 
     def test_unknown_keys_from_a_newer_version_are_ignored(self):
         """Opening a workspace from a later build must not raise."""
