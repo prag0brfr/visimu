@@ -823,13 +823,39 @@ formulas.</p>
 
 <h4>Element-wise functions</h4>
 <p>One sample at a time.</p>
-<p><code>abs sqrt sin cos tan asin acos atan exp log log10 floor ceil round
+<p><code>abs sqrt sin cos tan asin acos atan exp log ln log10 floor ceil round
 sign deg rad</code><br>
 <code>min(a,b) max(a,b) atan2(a,b) pow(a,b) mod(a,b) hypot(a,b)</code><br>
 <code>clamp(x, lo, hi)</code> &nbsp; <code>if(condition, a, b)</code></p>
 <p><code>min(a,b)</code> and <code>max(a,b)</code> compare two channels sample
 by sample. Given a <i>single</i> argument the same names mean something else
 &mdash; see reductions below.</p>
+
+<h4>The three logarithms</h4>
+<p>Which one you get is the easiest thing here to assume wrongly, so it is
+spelled out. There are two functions under three names.</p>
+<table cellpadding="3">
+<tr><td><b>log(x)</b></td><td><b>Natural</b> logarithm, base
+<i>e</i>&nbsp;=&nbsp;2.71828&hellip; &mdash; <i>not</i> base 10. This follows C
+and Fortran rather than a pocket calculator.</td></tr>
+<tr><td><b>ln(x)</b></td><td>Exactly the same function as <code>log</code>,
+under the name most engineering texts use. Write whichever reads better;
+<code>log(x)</code> and <code>ln(x)</code> give identical results.</td></tr>
+<tr><td><b>log10(x)</b></td><td>Base-10 logarithm. This is the one to use for
+decibels, orders of magnitude and anything you would read off a log axis.</td></tr>
+</table>
+<p>All three return <code>nan</code> for an argument that is zero or negative,
+rather than an infinity: a NaN breaks the line where the data is out of domain,
+whereas an infinity would destroy the plot's y range. Their inverse is
+<code>exp(x)</code> for <code>log</code> and <code>ln</code>, and
+<code>pow(10, x)</code> for <code>log10</code>.</p>
+<p>Related but different: the <b>Log Y</b> checkbox in the STYLE tab draws an
+existing channel on a base-10 axis and leaves the data alone. Use that to look
+at a channel logarithmically; use these functions when you want the logarithm
+<i>itself</i> as a channel &mdash; to take a slope off it, say.</p>
+<p><code>DECIBELS = 20 * log10(AMPLITUDE / AMP_REF)</code><br>
+<code>DECADES = log10(ALTITUDE)</code><br>
+<code>TAU = -1 / deriv(ln(ENERGY), TIME)</code></p>
 
 <h4>Series functions</h4>
 <p>These look at the whole channel, not one sample at a time.</p>
@@ -1694,6 +1720,13 @@ class IsoPanel(QWidget):
             # old ones is the usual way here, and the plot just comes back short
             # with nothing to explain it.
             parts.append("{0} outside the groups".format(outside))
+
+        # A filter that is applicable and admits nothing is the other way a
+        # restored workspace goes quiet: the parameter is there, the intervals
+        # are there, and no run falls in a ticked one. Said here because the
+        # node is where the user is looking when they wonder why.
+        if name in self._state.iso_empty_params():
+            parts.append("no run satisfies it")
 
         return "   ".join(parts)
 
@@ -2642,6 +2675,26 @@ class ScalePanel(QWidget):
         apply_y.clicked.connect(self._apply_y_everywhere)
         layout.addWidget(apply_y)
 
+        # Two constrained y parameters on one y axis cannot both be satisfied.
+        # Rather than invent a compromise, the tile is left free and this says
+        # so -- and offers the compromise as something the user chooses.
+        self.conflict_label = QLabel("")
+        self.conflict_label.setObjectName("Error")
+        self.conflict_label.setWordWrap(True)
+        self.conflict_label.setVisible(False)
+        layout.addWidget(self.conflict_label)
+
+        self.conflict_button = QPushButton("Use the range that covers both")
+        self.conflict_button.setToolTip(
+            "Lock this tile to the smallest window containing every one of its "
+            "constrained parameters. It is this tile's own lock, not a new "
+            "variable-wide constraint, so the other tiles keep the scales they "
+            "were given."
+        )
+        self.conflict_button.clicked.connect(self._resolve_conflict_with_union)
+        self.conflict_button.setVisible(False)
+        layout.addWidget(self.conflict_button)
+
         reset = QPushButton("Unlock both and auto-fit")
         reset.setToolTip(
             "Unlocks this tile and releases any variable-wide constraint on "
@@ -2708,16 +2761,40 @@ class ScalePanel(QWidget):
             ):
                 spin.setEnabled(locked)
 
+            conflict = self._state.y_limit_conflict(tile)
+            if conflict:
+                names = ", ".join(
+                    "{0} [{1:.6g}, {2:.6g}]".format(p, low, high)
+                    for p, low, high in conflict
+                )
+                self.conflict_label.setText(
+                    "This tile draws {0} constrained parameters on one y axis, "
+                    "and they ask for different ranges: {1}. No single range "
+                    "satisfies them, so none is imposed and the tile auto-fits "
+                    "to show all of its data. Lock it by hand, or take the "
+                    "range below.".format(len(conflict), names)
+                )
+            self.conflict_label.setVisible(bool(conflict))
+            self.conflict_button.setVisible(bool(conflict))
+
+            note = getattr(self, "scale_note", "")
             self.global_list.clear()
+            conflicted = {p for p, _l, _h in conflict}
             for axis, table in (("X", self._state.global_x_limits),
                                 ("Y", self._state.global_y_limits)):
                 for name in sorted(table):
                     low, high = table[name]
+                    mark = ("   (conflicts on this tile)"
+                            if axis == "Y" and name in conflicted else "")
                     self.global_list.addItem(
-                        "{0}  {1}: [{2:.6g}, {3:.6g}]".format(axis, name, low, high)
+                        "{0}  {1}: [{2:.6g}, {3:.6g}]{4}".format(
+                            axis, name, low, high, mark)
                     )
             if self.global_list.count() == 0:
                 self.global_list.addItem("none")
+            if note:
+                self.global_list.addItem(note)
+                self.scale_note = ""
         finally:
             self._updating = False
 
@@ -2797,12 +2874,48 @@ class ScalePanel(QWidget):
         self.refresh()
         self.scale_changed.emit()
 
+    def _resolve_conflict_with_union(self) -> None:
+        """Lock this tile to the window covering every constrained parameter.
+
+        The union is a reasonable answer when the parameters share a scale and a
+        useless one when they do not, so it is offered rather than imposed. It
+        is written to the tile, not to the variables: declaring it variable-wide
+        would push this tile's compromise onto the very tiles whose scales the
+        constraints were set to fix.
+        """
+        tile = self._state.tile
+        conflict = self._state.y_limit_conflict(tile)
+        if not conflict:
+            return
+        tile.lock_y = True
+        tile.y_min = min(low for _p, low, _h in conflict)
+        tile.y_max = max(high for _p, _l, high in conflict)
+        tile.view_initialised = False
+        self._state.dirty = True
+        self.refresh()
+        self.scale_changed.emit()
+
     def _apply_y_everywhere(self) -> None:
         tile = self._state.tile
         if not tile.y_params:
             return
+        # Applying from a tile with several y parameters gives all of them the
+        # same window, which replaces any different window they already had.
+        # That is what the button says it does, but it is worth naming the ones
+        # that changed underneath: the user is looking at this tile, not at the
+        # others this is about to rescale.
+        replaced = sorted(
+            param for param in tile.y_params
+            if self._state.global_y_limits.get(param) not in
+            (None, (tile.y_min, tile.y_max))
+        )
         for param in tile.y_params:
             self._state.set_global_y_limit(param, tile.y_min, tile.y_max)
+        if replaced:
+            self.scale_note = "Replaced the range already set for {0}.".format(
+                ", ".join(replaced))
+        else:
+            self.scale_note = ""
         wanted = set(tile.y_params)
         for page in self._state.pages:
             for other in page.tiles:

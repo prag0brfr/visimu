@@ -140,6 +140,29 @@ def _draw_save(painter: QPainter, color: QColor) -> None:
     painter.drawRect(QRectF(30, 54, 42, 32))   # the label
 
 
+def _draw_save_as(painter: QPainter, color: QColor) -> None:
+    """The save body, narrowed, with a plus beside it.
+
+    Same silhouette as Save so the pair reads as one family, plus the universal
+    mark for "a new one" -- which is the only difference that matters.
+    """
+    painter.setPen(_pen(color, 8.0))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    body = QPainterPath()
+    body.moveTo(12, 14)
+    body.lineTo(54, 14)
+    body.lineTo(68, 28)
+    body.lineTo(68, 86)
+    body.lineTo(12, 86)
+    body.closeSubpath()
+    painter.drawPath(body)
+    painter.drawRect(QRectF(26, 14, 26, 20))   # the shutter
+    painter.drawRect(QRectF(24, 58, 32, 28))   # the label
+    # The plus, clear of the body.
+    painter.drawLine(QPointF(84, 26), QPointF(84, 54))
+    painter.drawLine(QPointF(70, 40), QPointF(98, 40))
+
+
 def _draw_image(painter: QPainter, color: QColor) -> None:
     painter.setPen(_pen(color, 8.0))
     painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -214,6 +237,7 @@ _PAINTERS: Dict[str, Callable[[QPainter, QColor], None]] = {
     "zoom": _draw_zoom,
     "open": _draw_open,
     "save": _draw_save,
+    "save-as": _draw_save_as,
     "image": _draw_image,
     "table": _draw_table,
     "fit": _draw_fit,

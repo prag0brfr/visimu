@@ -163,4 +163,10 @@ echo
 echo "Next:"
 echo "  PYTHONPATH=python $PYTHON -m aoeviewer    run from source"
 echo "  ./build.sh test                           run the self-tests"
-echo "  $PYTHON packaging/build_exe.py            build the standalone binary"
+echo "  $PYTHON packaging/build_exe.py            build the standalone binary (one folder)"
+echo
+echo "  Add --onefile for a single binary instead of a folder:"
+echo "    $PYTHON packaging/build_exe.py --onefile"
+echo "  It is one file to copy, but every launch unpacks ~60 MB to a temp"
+echo "  directory first, so it starts in seconds rather than instantly."
+echo "  Unless you specifically need one file, take the folder."

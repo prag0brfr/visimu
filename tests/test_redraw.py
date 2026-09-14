@@ -20,6 +20,7 @@ edge cases than the drawing does.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import unittest
@@ -36,7 +37,8 @@ from PySide6.QtCore import Qt  # noqa: E402  (the stub installed above)
 from aoeviewer import isogroups
 from aoeviewer import scales
 from aoeviewer import theme as theme_module
-from aoeviewer.model import MAX_TILES, AppState
+from aoeviewer import model
+from aoeviewer.model import MAX_TILES, AppState, StyleRegistry
 from aoeviewer.scales import resample_key
 from aoeviewer.ui import main_window
 from aoeviewer.ui import panels
@@ -2683,14 +2685,55 @@ class TestTheTwoConstraintsAreIndependent(unittest.TestCase):
         self.state.resolve_iso_filters(self.files, self.values_for)
         self.assertFalse(self.state.is_plotted(0, 1))
 
-    def test_a_short_iso_column_excludes_the_runs_it_does_not_cover(self):
+    def test_a_short_iso_column_does_not_exclude_the_runs_it_does_not_cover(self):
+        """A filter says nothing about a run it has no value for.
+
+        This asserted the opposite until ISO filters became part of a saved
+        workspace. Excluding the uncovered runs is defensible read on its own
+        and wrong in every case it actually arises: a filter on a parameter only
+        some files carry hid every run of the others, and a workspace whose ISO
+        parameter had since disappeared opened to an empty plot with nothing to
+        explain it. A NaN *in* the column is still an exclusion -- the column is
+        there and the run has no value -- which the test above pins down.
+        """
         self.MASS = [75000.0]                   # one value, three runs
         for sim in range(3):
             self.state.set_selected(0, sim, True)
         iso = self.state.iso_state("MASS")
         iso.active = True
         self.state.resolve_iso_filters(self.files, self.values_for)
-        self.assertEqual(self.state.plotted_sims(), ((0, 0),))
+        self.assertEqual(self.state.plotted_sims(), ((0, 0), (0, 1), (0, 2)))
+
+    def test_a_filter_on_an_absent_parameter_filters_nothing(self):
+        """The workspace-restore case: the parameter is gone entirely."""
+        def values_for(_file_index, param):
+            if param == "MASS":
+                return np.array(self.MASS, dtype=np.float32)
+            return np.array([], dtype=np.float32)
+
+        for sim in range(3):
+            self.state.set_selected(0, sim, True)
+        iso = self.state.iso_state("NOT_IN_ANY_FILE")
+        iso.active = True
+        iso.value_enabled = {1.0: False}        # would exclude, if it applied
+        self.state.resolve_iso_filters(self.files, values_for)
+        self.assertEqual(self.state.plotted_sims(), ((0, 0), (0, 1), (0, 2)))
+        self.assertEqual(self.state.iso_inapplicable_params(),
+                         {"NOT_IN_ANY_FILE"})
+        self.assertEqual(self.state.excluded_by_iso(), 0)
+
+    def test_a_filter_no_run_satisfies_is_reported_as_empty(self):
+        """Applicable, and admits nothing. Legitimate, but worth saying."""
+        for sim in range(3):
+            self.state.set_selected(0, sim, True)
+        iso = self.state.iso_state("MASS")
+        iso.active = True
+        iso.grouped = True
+        iso.groups = [("900000 - 1000000", 900000.0, 1000000.0, True)]
+        self.state.resolve_iso_filters(self.files, self.values_for)
+        self.assertEqual(self.state.plotted_sims(), ())
+        self.assertEqual(self.state.iso_empty_params(), {"MASS"})
+        self.assertFalse(self.state.iso_inapplicable_params())
 
 
 class TestPlottedSimsCache(unittest.TestCase):
@@ -3008,3 +3051,701 @@ class TestIsoLabelRanks(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestWorkspaceKeepsTheDefinitions(unittest.TestCase):
+    """Aliases, formulas and ISO filters survive a save and load.
+
+    All three were absent from the workspace file. Formulas were written but
+    aliases were passed as an empty mapping by the writer, and ISO filters were
+    not written at all -- so a study whose whole point was three mass bands and
+    a derived channel came back as a bare layout. These tests pin down the file
+    format, and the next class pins down what happens when the data on the far
+    side of the load no longer matches.
+    """
+
+    def _state_with_filters(self):
+        state = AppState()
+        state.set_selected(0, 0, True)
+        state.set_selected(0, 2, True)
+
+        ungrouped = state.iso_state("MACH")
+        ungrouped.active = True
+        ungrouped.value_enabled = {0.75: True, 0.8: False, 0.85: True}
+
+        grouped = state.iso_state("MASS")
+        grouped.active = True
+        grouped.grouped = True
+        grouped.group_count = 3
+        grouped.groups = [
+            ("light", 40000.0, 60000.0, True),
+            ("medium", 60000.0, 80000.0, False),
+            ("heavy", 80000.0, 100000.0, True),
+        ]
+        return state
+
+    def test_iso_filters_round_trip(self):
+        saved = self._state_with_filters().to_dict()
+        loaded = AppState()
+        loaded.load_dict(saved)
+
+        self.assertEqual(sorted(loaded.iso_states), ["MACH", "MASS"])
+
+        mach = loaded.iso_states["MACH"]
+        self.assertTrue(mach.active)
+        self.assertFalse(mach.grouped)
+        # Float keys, not the strings a JSON object would have handed back.
+        self.assertEqual(mach.value_enabled,
+                         {0.75: True, 0.8: False, 0.85: True})
+        self.assertTrue(all(isinstance(v, float) for v in mach.value_enabled))
+
+        mass = loaded.iso_states["MASS"]
+        self.assertTrue(mass.grouped)
+        self.assertEqual(mass.group_count, 3)
+        self.assertEqual(mass.groups, [
+            ("light", 40000.0, 60000.0, True),
+            ("medium", 60000.0, 80000.0, False),
+            ("heavy", 80000.0, 100000.0, True),
+        ])
+
+    def test_it_survives_a_trip_through_real_json(self):
+        """The keys must be portable, not just Python-round-trippable."""
+        text = json.dumps(self._state_with_filters().to_dict())
+        loaded = AppState()
+        loaded.load_dict(json.loads(text))
+        self.assertEqual(loaded.iso_states["MACH"].value_enabled,
+                         {0.75: True, 0.8: False, 0.85: True})
+        self.assertEqual(len(loaded.iso_states["MASS"].groups), 3)
+
+    def test_the_derived_answer_is_not_saved(self):
+        """What the filters *admit* describes the old files, so it is dropped."""
+        state = self._state_with_filters()
+        state.resolve_iso_filters(
+            [(0, 3)], lambda _f, _p: np.array([50000.0, 70000.0, 90000.0],
+                                              dtype=np.float32))
+        self.assertTrue(state.iso_filters_resolved())
+        loaded = AppState()
+        loaded.load_dict(state.to_dict())
+        self.assertFalse(loaded.iso_filters_resolved())
+
+    def test_a_workspace_without_iso_states_still_loads(self):
+        """Files written before filters were saved must open unchanged."""
+        old = self._state_with_filters().to_dict()
+        del old["iso_states"]
+        loaded = AppState()
+        loaded.load_dict(old)
+        self.assertEqual(loaded.iso_states, {})
+        self.assertEqual(sorted(loaded.selected_sims), [(0, 0), (0, 2)])
+
+    def test_save_workspace_writes_formulas_and_aliases(self):
+        import tempfile
+        state = self._state_with_filters()
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "w.aoews")
+            model.save_workspace(
+                path, state, ["/data/a.aoe"],
+                {"CLIMB": "deriv(ALTITUDE, TIME)"},
+                {"Angle of attack": "ALPHA"},
+            )
+            data = model.load_workspace(path)
+        self.assertEqual(data["computed"], {"CLIMB": "deriv(ALTITUDE, TIME)"})
+        self.assertEqual(data["aliases"], {"Angle of attack": "ALPHA"})
+        self.assertEqual(data["files"], ["/data/a.aoe"])
+        self.assertEqual(len(data["iso_states"]), 2)
+
+
+class TestWorkspaceLoadsAgainstDifferentData(unittest.TestCase):
+    """The load must survive data that no longer matches the workspace.
+
+    A workspace outlives the run it was made from: the solver is re-run with
+    fewer channels, a file is replaced, a parameter is renamed. None of that may
+    raise, and none of it may silently empty the plot.
+    """
+
+    def test_a_malformed_iso_entry_is_skipped_not_fatal(self):
+        loaded = AppState()
+        loaded.load_dict({"iso_states": [
+            {"param": "GOOD", "active": True},
+            {"param": ""},                       # no name
+            {"active": True},                    # no name at all
+            "not a dict",
+            None,
+            {"param": "ALSO_GOOD", "group_count": "not a number"},
+        ]})
+        self.assertEqual(sorted(loaded.iso_states), ["ALSO_GOOD", "GOOD"])
+        self.assertEqual(loaded.iso_states["ALSO_GOOD"].group_count, 3)
+
+    def test_junk_values_and_groups_are_dropped_individually(self):
+        loaded = AppState()
+        loaded.load_dict({"iso_states": [{
+            "param": "MASS",
+            "value_enabled": [[1.0, True], ["oops", True], [2.0, False], "x"],
+            "groups": [["ok", 10.0, 20.0, True],
+                       ["bad", "low", 20.0, True],
+                       ["short", 1.0],
+                       ["reversed", 90.0, 80.0, True]],
+        }]})
+        iso = loaded.iso_states["MASS"]
+        self.assertEqual(iso.value_enabled, {1.0: True, 2.0: False})
+        self.assertEqual([g[0] for g in iso.groups], ["ok", "reversed"])
+        # A reversed interval is normalised rather than refused.
+        self.assertEqual(iso.groups[1][1:3], (80.0, 90.0))
+
+    def test_non_finite_values_do_not_reach_the_file(self):
+        state = AppState()
+        iso = state.iso_state("MASS")
+        iso.value_enabled = {1.0: True, float("nan"): True, float("inf"): False}
+        written = state.to_dict()["iso_states"][0]["value_enabled"]
+        self.assertEqual(written, [[1.0, True]])
+        # And the file is real JSON, which NaN would not be.
+        self.assertNotIn("NaN", json.dumps(state.to_dict()))
+
+    def test_a_grouped_filter_that_lost_its_intervals_is_demoted(self):
+        loaded = AppState()
+        loaded.load_dict({"iso_states": [
+            {"param": "MASS", "grouped": True, "groups": []},
+        ]})
+        iso = loaded.iso_states["MASS"]
+        self.assertFalse(iso.grouped)
+
+    def test_a_restored_filter_on_a_vanished_parameter_plots_everything(self):
+        """The headline case. Nothing raises, and nothing disappears."""
+        loaded = AppState()
+        loaded.load_dict({
+            "selected_sims": [[0, 0], [0, 1], [0, 2]],
+            "iso_states": [{"param": "GONE", "active": True,
+                            "grouped": True,
+                            "groups": [["band", 1.0, 2.0, True]]}],
+        })
+        loaded.resolve_iso_filters(
+            [(0, 3)], lambda _f, _p: np.array([], dtype=np.float32))
+        self.assertEqual(loaded.plotted_sims(), ((0, 0), (0, 1), (0, 2)))
+        self.assertEqual(loaded.iso_inapplicable_params(), {"GONE"})
+
+    def test_a_restored_grouping_no_value_satisfies_says_so(self):
+        loaded = AppState()
+        loaded.load_dict({
+            "selected_sims": [[0, 0], [0, 1]],
+            "iso_states": [{"param": "MASS", "active": True, "grouped": True,
+                            "groups": [["band", 1.0, 2.0, True]]}],
+        })
+        loaded.resolve_iso_filters(
+            [(0, 2)], lambda _f, _p: np.array([50000.0, 70000.0],
+                                              dtype=np.float32))
+        self.assertEqual(loaded.plotted_sims(), ())
+        self.assertEqual(loaded.iso_empty_params(), {"MASS"})
+        self.assertEqual(loaded.excluded_by_iso(), 2)
+
+    def test_a_mixed_study_keeps_the_files_that_lack_the_parameter(self):
+        """File 0 carries MASS, file 1 does not. File 1 is not punished."""
+        loaded = AppState()
+        for sim in range(2):
+            loaded.set_selected(0, sim, True)
+            loaded.set_selected(1, sim, True)
+        iso = loaded.iso_state("MASS")
+        iso.active = True
+        iso.grouped = True
+        iso.groups = [("heavy", 60000.0, 100000.0, True)]
+
+        def values_for(file_index, _param):
+            if file_index == 0:
+                return np.array([50000.0, 70000.0], dtype=np.float32)
+            return np.array([], dtype=np.float32)
+
+        loaded.resolve_iso_filters([(0, 2), (1, 2)], values_for)
+        # File 0: only the 70000 run passes. File 1: both, unfiltered.
+        self.assertEqual(loaded.plotted_sims(), ((0, 1), (1, 0), (1, 1)))
+
+
+class TestPaletteOrder(unittest.TestCase):
+    """The first three colours are fixed, in every colouring mode."""
+
+    def test_the_first_three_are_red_blue_dark_green(self):
+        self.assertEqual(model.PALETTE[:3], ("#e8232a", "#1f6fe0", "#1a7a3c"))
+
+    def test_no_cyan_among_the_leading_colours(self):
+        """Cyan and the lighter green are the same colour at one pixel wide."""
+        for colour in model.PALETTE[:6]:
+            red = int(colour[1:3], 16)
+            green = int(colour[3:5], 16)
+            blue = int(colour[5:7], 16)
+            cyanish = green > 150 and blue > 150 and red < 120
+            self.assertFalse(cyanish, "{0} reads as cyan".format(colour))
+
+    def test_every_mode_allocates_the_same_first_three(self):
+        """Allocation is by order of first use, so the keys must not matter."""
+        expected = list(model.PALETTE[:3])
+        for keys in (
+            ["sim::a", "sim::b", "sim::c"],
+            ["param::ALPHA", "param::MACH", "param::NZ"],
+            ["iso::MASS::low", "iso::MASS::mid", "iso::MASS::high"],
+        ):
+            registry = StyleRegistry()
+            self.assertEqual([registry.color_for(k) for k in keys], expected)
+
+    def test_the_palette_has_no_duplicates(self):
+        self.assertEqual(len(set(model.PALETTE)), len(model.PALETTE))
+
+    def test_the_inspect_dot_is_not_a_palette_colour(self):
+        """It marks a sample; it must not read as one more curve."""
+        from aoeviewer.ui import plot_tile
+        self.assertNotIn(plot_tile.INSPECT_DOT_COLOUR.lower(),
+                         [c.lower() for c in model.PALETTE])
+
+
+class _FakeAction:
+    def __init__(self):
+        self.text = ""
+        self.tip = ""
+
+    def setText(self, text):
+        self.text = text
+
+    def setToolTip(self, tip):
+        self.tip = tip
+
+
+class _FakeSession:
+    """Just enough of a session to answer what the definitions are."""
+
+    def __init__(self, computed=None, aliases=None, plain=()):
+        self._computed = dict(computed or {})
+        self._aliases = dict(aliases or {})
+        self._plain = list(plain)
+
+    @property
+    def parameters(self):
+        return sorted(set(self._plain) | set(self._computed) | set(self._aliases))
+
+    def is_computed(self, name):
+        return name in self._computed
+
+    def computed_source(self, name):
+        return self._computed[name]
+
+    def resolve(self, name):
+        return self._aliases.get(name, name)
+
+    @property
+    def files(self):
+        return []
+
+
+class _WindowStub:
+    """A stand-in for MainWindow carrying only what these methods touch.
+
+    The Qt stubs do not run a real main window, and building one would test the
+    widget toolkit rather than the behaviour. The methods under test are bound
+    manually instead, which is the same trick the redraw-guard test above uses.
+    """
+
+    def __init__(self, session=None, path=None, dirty=False):
+        self.state = AppState()
+        self.state.workspace_path = path
+        self.state.dirty = dirty
+        self.session = session or _FakeSession()
+        self.save_action = _FakeAction()
+        self.save_as_action = _FakeAction()
+        self.title = ""
+        self.status = ""
+        self.asked = []
+        self.written = []
+
+    # -- the bits of MainWindow the methods call ------------------------
+    def setWindowTitle(self, text):
+        self.title = text
+
+    @property
+    def status_label(self):
+        holder = self
+
+        class _Label:
+            def setText(self, text):
+                holder.status = text
+        return _Label()
+
+    # -- the methods under test, bound to this stub ---------------------
+    def call(self, name, *args):
+        return getattr(self, name)(*args)
+
+
+# Borrow the real implementations. Copying them onto the stub rather than
+# calling them unbound means one method may call another, which several of them
+# do -- _update_window_title() asks _workspace_label(), and both Save paths go
+# through _write_workspace().
+for _name in ("_workspace_label", "_update_window_title",
+              "_update_workspace_actions", "_ask_workspace_path",
+              "_collect_definitions", "_write_workspace",
+              "save_workspace", "save_workspace_as"):
+    setattr(_WindowStub, _name, getattr(main_window.MainWindow, _name))
+
+
+class TestSaveAsAndTheCurrentFile(unittest.TestCase):
+    """Save, Save As, and making it obvious which file is being written."""
+
+    def test_the_title_names_the_workspace(self):
+        window = _WindowStub(path=os.path.join("study", "sweep.aoews"))
+        window.call("_update_window_title")
+        self.assertIn("sweep.aoews", window.title)
+        self.assertIn("aoeViewer", window.title)
+        self.assertFalse(window.title.startswith("*"))
+
+    def test_an_unsaved_session_says_untitled(self):
+        window = _WindowStub(path=None)
+        window.call("_update_window_title")
+        self.assertIn("Untitled workspace", window.title)
+
+    def test_unsaved_changes_are_marked_in_the_title(self):
+        window = _WindowStub(path="a.aoews", dirty=True)
+        window.call("_update_window_title")
+        self.assertTrue(window.title.startswith("*"))
+
+    def test_the_save_tooltip_names_the_file_it_would_overwrite(self):
+        path = os.path.join("study", "sweep.aoews")
+        window = _WindowStub(path=path)
+        window.call("_update_workspace_actions")
+        self.assertIn(path, window.save_action.tip)
+        self.assertIn("Overwrite", window.save_action.tip)
+
+    def test_the_save_tooltip_says_when_there_is_no_file_yet(self):
+        window = _WindowStub(path=None)
+        window.call("_update_workspace_actions")
+        self.assertIn("ask where to save", window.save_action.tip)
+
+    def test_the_save_as_tooltip_says_it_continues_in_the_new_file(self):
+        window = _WindowStub(path="old.aoews")
+        window.call("_update_workspace_actions")
+        self.assertIn("old.aoews", window.save_as_action.tip)
+        self.assertIn("new workspace file", window.save_as_action.tip)
+
+    def test_updating_the_actions_before_they_exist_is_harmless(self):
+        """_build_toolbar calls it while the bar is half-built."""
+        window = _WindowStub()
+        del window.save_action
+        window.call("_update_workspace_actions")   # must not raise
+
+    def test_collect_definitions_separates_formulas_from_aliases(self):
+        session = _FakeSession(
+            computed={"CLIMB": "deriv(ALTITUDE, TIME)"},
+            aliases={"Angle of attack": "ALPHA"},
+            plain=["ALPHA", "ALTITUDE", "TIME"],
+        )
+        window = _WindowStub(session=session)
+        computed, aliases = window.call("_collect_definitions")
+        self.assertEqual(computed, {"CLIMB": "deriv(ALTITUDE, TIME)"})
+        self.assertEqual(aliases, {"Angle of attack": "ALPHA"})
+
+    def test_a_computed_channel_is_never_reported_as_an_alias(self):
+        """resolve() on a computed name must not put it in both maps."""
+        session = _FakeSession(computed={"CLIMB": "deriv(ALTITUDE, TIME)"},
+                               aliases={"CLIMB": "SOMETHING_ELSE"},
+                               plain=["ALTITUDE", "TIME"])
+        window = _WindowStub(session=session)
+        computed, aliases = window.call("_collect_definitions")
+        self.assertIn("CLIMB", computed)
+        self.assertNotIn("CLIMB", aliases)
+
+    def test_save_uses_the_current_path_without_asking(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "w.aoews")
+            window = _WindowStub(path=path)
+            original = main_window.QFileDialog
+            main_window.QFileDialog = _RefusingDialog()
+            try:
+                window.call("save_workspace")
+            finally:
+                main_window.QFileDialog = original
+            self.assertTrue(os.path.exists(path))
+            self.assertIn(path, window.status)
+            self.assertFalse(window.state.dirty)
+
+    def test_save_as_always_asks_and_adopts_the_new_path(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            first = os.path.join(folder, "first.aoews")
+            second = os.path.join(folder, "second.aoews")
+            window = _WindowStub(path=first)
+            original = main_window.QFileDialog
+            main_window.QFileDialog = _AnsweringDialog(second)
+            try:
+                window.call("save_workspace_as")
+            finally:
+                main_window.QFileDialog = original
+            self.assertTrue(os.path.exists(second))
+            self.assertFalse(os.path.exists(first))   # left alone
+            self.assertEqual(window.state.workspace_path, second)
+            self.assertIn("second.aoews", window.title)
+
+    def test_save_as_appends_the_extension(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            window = _WindowStub()
+            original = main_window.QFileDialog
+            main_window.QFileDialog = _AnsweringDialog(
+                os.path.join(folder, "no-suffix"))
+            try:
+                window.call("save_workspace_as")
+            finally:
+                main_window.QFileDialog = original
+            self.assertTrue(window.state.workspace_path.endswith(".aoews"))
+
+    def test_cancelling_save_as_changes_nothing(self):
+        window = _WindowStub(path="kept.aoews")
+        original = main_window.QFileDialog
+        main_window.QFileDialog = _AnsweringDialog("")
+        try:
+            window.call("save_workspace_as")
+        finally:
+            main_window.QFileDialog = original
+        self.assertEqual(window.state.workspace_path, "kept.aoews")
+
+    def test_the_saved_file_carries_the_definitions_and_the_filters(self):
+        import tempfile
+        session = _FakeSession(
+            computed={"CLIMB": "deriv(ALTITUDE, TIME)"},
+            aliases={"Angle of attack": "ALPHA"},
+            plain=["ALPHA", "ALTITUDE", "TIME"],
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "w.aoews")
+            window = _WindowStub(session=session, path=path)
+            iso = window.state.iso_state("MASS")
+            iso.active = True
+            iso.value_enabled = {50000.0: True}
+            window.call("save_workspace")
+            data = model.load_workspace(path)
+        self.assertEqual(data["computed"], {"CLIMB": "deriv(ALTITUDE, TIME)"})
+        self.assertEqual(data["aliases"], {"Angle of attack": "ALPHA"})
+        self.assertEqual(len(data["iso_states"]), 1)
+        # The status line tells the user what went with it.
+        self.assertIn("1 formula(s)", window.status)
+        self.assertIn("1 alias(es)", window.status)
+        self.assertIn("1 ISO filter(s)", window.status)
+
+
+class _AnsweringDialog:
+    """A QFileDialog stand-in that returns a fixed path."""
+
+    def __init__(self, path):
+        self._path = path
+
+    def getSaveFileName(self, *_args, **_kwargs):
+        return (self._path, "")
+
+
+class _RefusingDialog:
+    """A QFileDialog stand-in that fails the test if it is consulted."""
+
+    def getSaveFileName(self, *_args, **_kwargs):
+        raise AssertionError("Save must not ask when a path is already known")
+
+
+class TestFormulaHelpLogarithms(unittest.TestCase):
+    """log is natural, ln is the same function, log10 is base ten.
+
+    Which logarithm a name gives is the easiest thing in the language to assume
+    wrongly -- a pocket calculator's log is base ten and this one is not -- and
+    the dialog listed neither ln nor the distinction.
+    """
+
+    def setUp(self):
+        self.help = panels.FORMULA_HELP
+
+    def test_all_three_names_are_listed(self):
+        for name in ("log(x)", "ln(x)", "log10(x)"):
+            self.assertIn(name, self.help, name)
+
+    def test_ln_is_offered_in_the_function_list(self):
+        self.assertIn("exp log ln log10", self.help)
+
+    def test_it_says_log_is_natural_and_not_base_ten(self):
+        self.assertIn("Natural</b> logarithm", self.help)
+        self.assertIn("not</i> base 10", self.help)
+
+    def test_it_says_ln_and_log_are_the_same_function(self):
+        self.assertIn("identical results", self.help)
+
+    def test_it_says_log10_is_base_ten(self):
+        self.assertIn("Base-10 logarithm", self.help)
+
+    def test_it_states_the_domain_and_the_nan_rule(self):
+        self.assertIn("zero or negative", self.help)
+        self.assertIn("infinity would destroy", self.help)
+
+    def test_it_names_the_inverses(self):
+        self.assertIn("exp(x)", self.help)
+        self.assertIn("pow(10, x)", self.help)
+
+    def test_it_distinguishes_the_log_y_checkbox(self):
+        """Taking a logarithm is not the same as drawing on a log axis."""
+        self.assertIn("Log Y", self.help)
+        self.assertIn("leaves the data alone", self.help)
+
+    def test_it_gives_worked_examples(self):
+        self.assertIn("20 * log10(", self.help)
+
+
+class TestSaveAsIcon(unittest.TestCase):
+    def test_the_painter_is_registered(self):
+        from aoeviewer.ui import icons
+        self.assertIn("save-as", icons._PAINTERS)
+
+    def test_it_is_distinct_from_save(self):
+        from aoeviewer.ui import icons
+        self.assertIsNot(icons._PAINTERS["save-as"], icons._PAINTERS["save"])
+
+
+class TestConflictingVariableLimits(unittest.TestCase):
+    """Two constrained y parameters on one y axis.
+
+    Three tiles: the first draws P1, the second draws P1 and P2, the third draws
+    P2. Constrain P1 from the first and P2 from the third, and the second tile
+    is asked for two different windows on one axis.
+
+    This used to be resolved by taking the union, which honours neither and,
+    when the magnitudes differ, destroys the smaller channel: ALTITUDE at
+    [0, 13000] unioned with MACH at [0, 1] leaves Mach on 0.008% of the axis --
+    a flat line on the bottom edge, with nothing on screen to say why.
+    """
+
+    def setUp(self):
+        self.state = AppState()
+        page = self.state.page
+        page.rows, page.cols = 1, 3
+        self.t1, self.t2, self.t3 = page.tiles[0], page.tiles[1], page.tiles[2]
+        for tile in (self.t1, self.t2, self.t3):
+            tile.x_param = "TIME"
+        self.t1.y_params = ["ALTITUDE"]
+        self.t2.y_params = ["ALTITUDE", "MACH"]
+        self.t3.y_params = ["MACH"]
+
+    def _constrain_both(self):
+        self.state.set_global_y_limit("ALTITUDE", 0.0, 13000.0)
+        self.state.set_global_y_limit("MACH", 0.0, 1.0)
+        self.state.apply_global_limits_everywhere()
+
+    def test_the_unambiguous_tiles_are_constrained(self):
+        self._constrain_both()
+        self.assertTrue(self.t1.lock_y)
+        self.assertEqual((self.t1.y_min, self.t1.y_max), (0.0, 13000.0))
+        self.assertTrue(self.t3.lock_y)
+        self.assertEqual((self.t3.y_min, self.t3.y_max), (0.0, 1.0))
+
+    def test_the_conflicted_tile_is_left_free(self):
+        self._constrain_both()
+        self.assertFalse(self.t2.lock_y)
+
+    def test_the_conflict_is_reported_with_both_ranges(self):
+        self._constrain_both()
+        self.assertEqual(self.state.y_limit_conflict(self.t2),
+                         [("ALTITUDE", 0.0, 13000.0), ("MACH", 0.0, 1.0)])
+
+    def test_the_unambiguous_tiles_report_no_conflict(self):
+        self._constrain_both()
+        self.assertEqual(self.state.y_limit_conflict(self.t1), [])
+        self.assertEqual(self.state.y_limit_conflict(self.t3), [])
+
+    def test_the_union_is_no_longer_imposed(self):
+        """The specific regression: Mach must not be squashed to nothing."""
+        self._constrain_both()
+        span = self.t2.y_max - self.t2.y_min
+        self.assertNotEqual((self.t2.y_min, self.t2.y_max), (0.0, 13000.0))
+        self.assertLess(span, 13000.0)
+
+    def test_agreeing_parameters_are_still_applied(self):
+        """Only disagreement is a conflict; two equal windows are one window."""
+        self.state.set_global_y_limit("ALTITUDE", -5.0, 5.0)
+        self.state.set_global_y_limit("MACH", -5.0, 5.0)
+        self.state.apply_global_limits_everywhere()
+        self.assertEqual(self.state.y_limit_conflict(self.t2), [])
+        self.assertTrue(self.t2.lock_y)
+        self.assertEqual((self.t2.y_min, self.t2.y_max), (-5.0, 5.0))
+
+    def test_one_constrained_parameter_is_never_a_conflict(self):
+        self.state.set_global_y_limit("ALTITUDE", 0.0, 13000.0)
+        self.state.apply_global_limits_everywhere()
+        self.assertEqual(self.state.y_limit_conflict(self.t2), [])
+        self.assertTrue(self.t2.lock_y)
+        self.assertEqual((self.t2.y_min, self.t2.y_max), (0.0, 13000.0))
+
+    def test_removing_one_constraint_resolves_the_conflict(self):
+        self._constrain_both()
+        self.state.clear_global_limit("MACH")
+        self.state.apply_global_limits_everywhere()
+        self.assertEqual(self.state.y_limit_conflict(self.t2), [])
+        self.assertTrue(self.t2.lock_y)
+        self.assertEqual((self.t2.y_min, self.t2.y_max), (0.0, 13000.0))
+
+    def test_a_hand_locked_tile_keeps_its_own_range(self):
+        """A conflict must not silently unlock what the user locked."""
+        self.t2.lock_y = True
+        self.t2.y_min, self.t2.y_max = -1.0, 2.0
+        self._constrain_both()
+        self.assertTrue(self.t2.lock_y)
+        self.assertEqual((self.t2.y_min, self.t2.y_max), (-1.0, 2.0))
+
+    def test_three_way_disagreement_reports_all_three(self):
+        self.t2.y_params = ["ALTITUDE", "MACH", "NZ"]
+        self.state.set_global_y_limit("ALTITUDE", 0.0, 13000.0)
+        self.state.set_global_y_limit("MACH", 0.0, 1.0)
+        self.state.set_global_y_limit("NZ", -1.0, 4.0)
+        self.state.apply_global_limits_everywhere()
+        self.assertEqual([p for p, _l, _h in self.state.y_limit_conflict(self.t2)],
+                         ["ALTITUDE", "MACH", "NZ"])
+
+    def test_x_cannot_conflict_because_a_tile_has_one_x(self):
+        """The same failure is structurally impossible on the x axis."""
+        self.state.set_global_x_limit("TIME", 0.0, 60.0)
+        self.state.set_global_x_limit("ALTITUDE", 0.0, 13000.0)
+        self.state.apply_global_limits_everywhere()
+        for tile in (self.t1, self.t2, self.t3):
+            self.assertTrue(tile.lock_x)
+            self.assertEqual((tile.x_min, tile.x_max), (0.0, 60.0))
+
+    def test_the_same_channel_carries_one_window_per_axis(self):
+        """ALTITUDE as an x axis and as a y axis are separate constraints."""
+        self.t2.x_param = "ALTITUDE"
+        self.t2.y_params = ["MACH"]
+        self.state.set_global_x_limit("ALTITUDE", 0.0, 13000.0)
+        self.state.set_global_y_limit("ALTITUDE", 0.0, 9000.0)
+        self.state.set_global_y_limit("MACH", 0.0, 1.0)
+        self.state.apply_global_limits_everywhere()
+        self.assertEqual((self.t2.x_min, self.t2.x_max), (0.0, 13000.0))
+        self.assertEqual((self.t1.y_min, self.t1.y_max), (0.0, 9000.0))
+
+    def test_a_3d_tile_is_left_alone(self):
+        """Its frame is the 3D view; the data ranges mean nothing to it."""
+        self.t2.plot3d = True
+        self.t2.y_params = ["ALTITUDE"]
+        self.t2.z_param = "MACH"
+        self.state.set_global_y_limit("ALTITUDE", 0.0, 13000.0)
+        self.state.set_global_x_limit("TIME", 0.0, 60.0)
+        self.assertFalse(self.state.apply_global_limits(self.t2))
+        self.assertFalse(self.t2.lock_y)
+        self.assertFalse(self.t2.lock_x)
+
+    def test_the_union_is_available_as_a_deliberate_choice(self):
+        """The SCALE tab offers it; taking it locks the tile, not the variables."""
+        self._constrain_both()
+        panel = panels.ScalePanel(_AnnotationSession(), self.state)
+        self.state.active_tile = 1
+        panel._resolve_conflict_with_union()
+        self.assertTrue(self.t2.lock_y)
+        self.assertEqual((self.t2.y_min, self.t2.y_max), (0.0, 13000.0))
+        # The variables keep the windows the other tiles were given.
+        self.assertEqual(self.state.global_y_limits["ALTITUDE"], (0.0, 13000.0))
+        self.assertEqual(self.state.global_y_limits["MACH"], (0.0, 1.0))
+        self.assertEqual((self.t3.y_min, self.t3.y_max), (0.0, 1.0))
+
+    def test_taking_the_union_does_not_survive_as_a_constraint(self):
+        """It is the tile's own lock, so the conflict is still reported."""
+        self._constrain_both()
+        panel = panels.ScalePanel(_AnnotationSession(), self.state)
+        self.state.active_tile = 1
+        panel._resolve_conflict_with_union()
+        self.assertTrue(self.state.y_limit_conflict(self.t2))
+        # And a later redraw must not wipe the lock the user just chose.
+        self.state.apply_global_limits_everywhere()
+        self.assertTrue(self.t2.lock_y)
+        self.assertEqual((self.t2.y_min, self.t2.y_max), (0.0, 13000.0))

@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import os
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence
@@ -96,12 +96,12 @@ class MainWindow(QMainWindow):
         # cost of being wrong here is time, never correctness.
         self.memory_limit_bytes = 2 * 1024 * 1024 * 1024
 
-        self.setWindowTitle("aoeViewer {0}".format(__version__))
         self.resize(1500, 920)
 
         self._build_toolbar()
         self._build_central()
         self._build_status_bar()
+        self._update_window_title()
         self.apply_theme()
 
         # Poll for files changing on disk. Cheap (a stat per file) and it means
@@ -163,8 +163,14 @@ class MainWindow(QMainWindow):
         # already cover it, and a third door onto the same thing is clutter.
         add("Load workspace", self.load_workspace_dialog, "open", "Ctrl+L",
             "Open a saved workspace, replacing what is loaded now")
-        add("Save workspace", self.save_workspace, "save", "Ctrl+S",
-            "Save the current files, pages, tiles and styles")
+        # Save and Save As are two buttons rather than one with a modifier,
+        # because which file is being written is the thing people get wrong.
+        # Both tooltips name the target explicitly, and they are refreshed
+        # whenever the current workspace changes.
+        self.save_action = add("Save workspace", self.save_workspace, "save", "Ctrl+S")
+        self.save_as_action = add("Save workspace as...", self.save_workspace_as,
+                                  "save-as", "Ctrl+Shift+S")
+        self._update_workspace_actions()
 
         self.toolbar.addSeparator()
 
@@ -870,6 +876,9 @@ class MainWindow(QMainWindow):
                 self.session.file_count, runs, len(self.session.parameters),
             )
         )
+        # The title carries the workspace name and the unsaved marker, and this
+        # is the one place called after everything that can change either.
+        self._update_window_title()
 
     # -------------------------------------------------------- mouse modes
 
@@ -1093,37 +1102,135 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------- workspace
 
-    def save_workspace(self) -> None:
+    def _workspace_label(self) -> str:
+        """The current workspace as a short name, or an explicit 'unsaved'."""
         path = self.state.workspace_path
         if not path:
-            path, _ = QFileDialog.getSaveFileName(
-                self, "Save workspace", "", "aoeViewer workspace (*.aoews);;All files (*)"
-            )
-            if not path:
-                return
-            if not path.lower().endswith(".aoews"):
-                path += ".aoews"
+            return ""
+        return os.path.basename(path)
 
-        computed = {
-            name: self.session.computed_source(name)
-            for name in self.session.parameters
-            if self.session.is_computed(name)
-        }
+    def _update_window_title(self) -> None:
+        """Name the workspace in the title bar.
+
+        The title is the one place a user can always look to answer "which file
+        am I working in", and Save As only makes sense if that question has a
+        visible answer. An asterisk marks unsaved changes, by the usual
+        convention.
+        """
+        name = self._workspace_label()
+        marker = "*" if self.state.dirty else ""
+        if name:
+            self.setWindowTitle("{0}{1} — aoeViewer {2}".format(
+                marker, name, __version__))
+        else:
+            self.setWindowTitle("{0}Untitled workspace — aoeViewer {1}".format(
+                marker, __version__))
+
+    def _update_workspace_actions(self) -> None:
+        """Keep both Save tooltips naming the file they would write."""
+        save = getattr(self, "save_action", None)
+        save_as = getattr(self, "save_as_action", None)
+        if save is None or save_as is None:
+            return
+        path = self.state.workspace_path
+        if path:
+            save.setText("Save workspace")
+            save.setToolTip(
+                "Overwrite {0}\nwith the current files, pages, tiles, styles, "
+                "formulas, aliases and ISO filters  (Ctrl+S)".format(path))
+        else:
+            save.setText("Save workspace")
+            save.setToolTip(
+                "No workspace file yet — this will ask where to save  (Ctrl+S)")
+        save_as.setToolTip(
+            "Save to a new workspace file and continue in that one, leaving "
+            "{0} as it is  (Ctrl+Shift+S)".format(path or "the current session"))
+
+    def _ask_workspace_path(self, title: str) -> str:
+        """Ask for a path to write, defaulting to the current workspace.
+
+        Offering the current path as the starting point matters for Save As:
+        the common use is "keep this one and start a variant", and typing the
+        whole directory again to do that is busywork.
+        """
+        suggestion = self.state.workspace_path or ""
+        path, _ = QFileDialog.getSaveFileName(
+            self, title, suggestion,
+            "aoeViewer workspace (*.aoews);;All files (*)"
+        )
+        if not path:
+            return ""
+        if not path.lower().endswith(".aoews"):
+            path += ".aoews"
+        return path
+
+    def _collect_definitions(self) -> Tuple[Dict[str, str], Dict[str, str]]:
+        """The computed parameters and the aliases, ready to be written.
+
+        Both are asked of the core rather than tracked alongside it, so what is
+        saved is what is actually defined. A name resolving to something other
+        than itself is an alias; a name the core calls computed is a formula.
+        The two are disjoint, and a computed channel is never reported as an
+        alias of itself.
+        """
+        computed: Dict[str, str] = {}
+        aliases: Dict[str, str] = {}
+        for name in self.session.parameters:
+            if self.session.is_computed(name):
+                computed[name] = self.session.computed_source(name)
+                continue
+            target = self.session.resolve(name)
+            if target and target != name:
+                aliases[name] = target
+        return computed, aliases
+
+    def _write_workspace(self, path: str) -> bool:
+        computed, aliases = self._collect_definitions()
         try:
             save_workspace(
                 path,
                 self.state,
                 [f.path for f in self.session.files],
                 computed,
-                {},
+                aliases,
             )
         except OSError as exc:
             QMessageBox.warning(self, "Could not save", str(exc))
-            return
+            return False
 
         self.state.workspace_path = path
         self.state.dirty = False
-        self.status_label.setText("Workspace saved to {0}".format(path))
+        self._update_window_title()
+        self._update_workspace_actions()
+        counts = []
+        if computed:
+            counts.append("{0} formula(s)".format(len(computed)))
+        if aliases:
+            counts.append("{0} alias(es)".format(len(aliases)))
+        if self.state.iso_states:
+            counts.append("{0} ISO filter(s)".format(len(self.state.iso_states)))
+        detail = " (including {0})".format(", ".join(counts)) if counts else ""
+        self.status_label.setText(
+            "Workspace saved to {0}{1}".format(path, detail))
+        return True
+
+    def save_workspace(self) -> None:
+        """Save to the current workspace file, asking for one if there is none."""
+        path = self.state.workspace_path or self._ask_workspace_path("Save workspace")
+        if not path:
+            return
+        self._write_workspace(path)
+
+    def save_workspace_as(self) -> None:
+        """Always ask for a path, and adopt it as the current workspace.
+
+        This is how a variant is made: the file that was open is left as it was
+        on disk, and everything from here on saves to the new one.
+        """
+        path = self._ask_workspace_path("Save workspace as")
+        if not path:
+            return
+        self._write_workspace(path)
 
     def load_workspace_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -1154,16 +1261,60 @@ class MainWindow(QMainWindow):
                     continue
                 self._build_cache_for(file_path, handle.index)
 
-            for name, expression in data.get("computed", {}).items():
-                try:
-                    self.session.set_computed(name, expression)
-                except CoreError:
-                    pass
-            for alias, target in data.get("aliases", {}).items():
-                self.session.set_alias(alias, target)
-            return missing
+            # Aliases first: a formula may be written in terms of one.
+            unresolved_aliases = []
+            aliases = data.get("aliases", {})
+            if isinstance(aliases, dict):
+                known = set(self.session.parameters)
+                for alias, target in aliases.items():
+                    if not isinstance(alias, str) or not isinstance(target, str):
+                        continue
+                    if not alias.strip() or not target.strip() or alias == target:
+                        continue
+                    self.session.set_alias(alias, target)
+                    if target not in known:
+                        # Kept rather than dropped: the file it belongs to may
+                        # be opened next, and an alias costs nothing until it
+                        # resolves. Reported so an axis that plots nothing has
+                        # an explanation.
+                        unresolved_aliases.append("{0} -> {1}".format(alias, target))
 
-        def done(missing):
+            # Formulas, in as many passes as it takes. A workspace is a JSON
+            # object and object order is not dependency order, so a single pass
+            # drops any formula defined in terms of one that has not been
+            # installed yet -- silently, since the core rightly refuses an
+            # unknown name. Repeating until a pass installs nothing new settles
+            # any acyclic chain, and what is left over genuinely cannot be
+            # defined against this data.
+            failed_formulas = []
+            pending = {
+                name: expression
+                for name, expression in (data.get("computed", {}) or {}).items()
+                if isinstance(name, str) and isinstance(expression, str)
+            }
+            while pending:
+                installed = []
+                errors = {}
+                for name, expression in pending.items():
+                    try:
+                        self.session.set_computed(name, expression)
+                        installed.append(name)
+                    except CoreError as exc:
+                        errors[name] = str(exc)
+                if not installed:
+                    failed_formulas = [
+                        "{0} = {1}   ({2})".format(name, pending[name],
+                                                   errors.get(name, "refused"))
+                        for name in sorted(pending)
+                    ]
+                    break
+                for name in installed:
+                    pending.pop(name, None)
+
+            return missing, failed_formulas, unresolved_aliases
+
+        def done(report):
+            missing, failed_formulas, unresolved_aliases = report
             # Replacing the state is a GUI-side operation and belongs here, not
             # in the worker: the panels and tiles must be rebound to the new one
             # in the same turn of the event loop that starts using it.
@@ -1173,13 +1324,42 @@ class MainWindow(QMainWindow):
 
             self._rebind_state()
             self.refresh_all()
+            self._update_window_title()
+            self._update_workspace_actions()
 
+            # One dialog for everything the workspace asked for and this data
+            # cannot give, rather than three in a row. Nothing here stops the
+            # workspace loading: the layout, the styles and whatever else does
+            # resolve are all in place by the time this appears.
+            notes = []
             if missing:
+                notes.append("Files that could not be opened:\n  "
+                             + "\n  ".join(missing[:10]))
+            if failed_formulas:
+                notes.append("Computed parameters that could not be defined "
+                             "against this data:\n  "
+                             + "\n  ".join(failed_formulas[:10]))
+            if unresolved_aliases:
+                notes.append("Aliases whose channel is not in the open files "
+                             "(kept, in case it returns):\n  "
+                             + "\n  ".join(unresolved_aliases[:10]))
+
+            inapplicable = sorted(self.state.iso_inapplicable_params())
+            if inapplicable:
+                notes.append("ISO filters on parameters none of these files "
+                             "carry (kept, and filtering nothing):\n  "
+                             + "\n  ".join(inapplicable[:10]))
+            empty = sorted(self.state.iso_empty_params())
+            if empty:
+                notes.append("ISO filters that no run satisfies, so nothing "
+                             "passes them:\n  " + "\n  ".join(empty[:10]))
+
+            if notes:
                 QMessageBox.information(
                     self,
-                    "Some files are missing",
-                    "These files from the workspace could not be opened:\n\n"
-                    + "\n".join(missing[:10]),
+                    "Workspace loaded with differences",
+                    "The workspace loaded, but this data does not match it "
+                    "everywhere.\n\n" + "\n\n".join(notes),
                 )
 
         self.tasks.submit("Loading workspace...", work, done)

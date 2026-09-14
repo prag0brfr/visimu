@@ -74,11 +74,18 @@ GRID_3D_Z = -20     # the back walls of a 3D box, behind everything
 MAX_LEGEND_ROWS = 60
 
 # The dot marking the sample the Inspect panel is reporting. Above the curves
-# and the markers, because its whole job is to be findable; red because nothing
-# in the palette is, so it never reads as one more curve.
+# and the markers, because its whole job is to be findable.
+#
+# It used to be red, on the grounds that nothing in the palette was. The
+# palette now begins with red, so a red dot would read as one more curve --
+# exactly the confusion the colour was chosen to avoid. It is drawn instead as
+# a white-cored dot with a black rim, which no curve can be because the palette
+# holds no achromatic entry, and which stays findable on either theme: the rim
+# carries it on the light ground and the core on the dark one.
 INSPECT_DOT_Z = 40
 INSPECT_DOT_SIZE = 9.0
-INSPECT_DOT_COLOUR = "#ff2d2d"
+INSPECT_DOT_COLOUR = "#ffffff"
+INSPECT_DOT_EDGE = "#101215"
 
 # The legend, above all of it. It is a key rather than a reading of the data,
 # and now that it is painted on an opaque card the card must not be underneath
@@ -808,7 +815,7 @@ class PlotTile(pg.PlotWidget):
         self._inspect_dot = pg.ScatterPlotItem(
             size=INSPECT_DOT_SIZE, symbol="o",
             brush=pg.mkBrush(INSPECT_DOT_COLOUR),
-            pen=pg.mkPen(INSPECT_DOT_COLOUR, width=1.0),
+            pen=pg.mkPen(INSPECT_DOT_EDGE, width=1.4),
         )
         self._inspect_dot.setZValue(INSPECT_DOT_Z)
         self._inspect_dot.setVisible(False)

@@ -10,6 +10,7 @@ own, which puts the parts most worth testing out of reach of every test.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Dict, List, Optional, Sequence, Set, Tuple
@@ -76,12 +77,31 @@ MOUSE_MODE_HINTS = {
 
 
 # A qualitative palette that stays distinguishable on both dark and light
-# backgrounds. Ordered so the first few are maximally separated, since most
-# plots use only three or four curves.
+# backgrounds.
+#
+# The first three entries are fixed by convention rather than chosen for
+# separation: red, blue and dark green, in that order, whatever the colouring
+# mode. Most plots carry three or four curves, and a report that pairs the
+# same three colours with the same three meanings every time is easier to read
+# across a set of figures than one whose first colour depends on how many
+# curves happened to be on the tile. Dark green rather than the mid green that
+# used to sit third, and no cyan anywhere near the front, because cyan and the
+# lighter green read as the same colour once a line is one pixel wide.
+#
+# Everything after the third entry is ordered for separation as before.
 PALETTE: Tuple[str, ...] = (
-    "#3fa9f5", "#ff5252", "#3ddc84", "#ffb300",
-    "#e040fb", "#00e5d0", "#ff8a3d", "#8c6cff",
-    "#9ccc65", "#ff80ab", "#5aa9e6", "#c6ff4d",
+    "#e8232a",  # red
+    "#1f6fe0",  # blue
+    "#1a7a3c",  # dark green
+    "#ffb300",  # amber
+    "#e040fb",  # magenta
+    "#8c6cff",  # violet
+    "#ff8a3d",  # orange
+    "#5aa9e6",  # light blue
+    "#9ccc65",  # light green
+    "#ff80ab",  # pink
+    "#00a39a",  # teal
+    "#a1631a",  # brown
 )
 
 DASH_STYLES: Tuple[str, ...] = ("solid", "dash", "dot", "dashdot")
@@ -482,6 +502,100 @@ class IsoState:
         return [v for v, on in self.value_enabled.items() if on]
 
 
+def iso_state_to_dict(state: IsoState) -> dict:
+    """One ISO filter, as JSON.
+
+    ``value_enabled`` is keyed by float, and JSON object keys are strings, so
+    it is written as a list of pairs instead of an object: round-tripping
+    ``{0.75: False}`` through an object would hand back the string ``"0.75"``
+    and silently stop matching the value it was about. Non-finite keys are
+    dropped, because a NaN value is never admitted by any filter anyway and
+    ``NaN`` is not portable JSON.
+    """
+    values = [
+        [float(value), bool(shown)]
+        for value, shown in state.value_enabled.items()
+        if math.isfinite(value)
+    ]
+    return {
+        "param": state.param,
+        "active": bool(state.active),
+        "grouped": bool(state.grouped),
+        "group_count": int(state.group_count),
+        "value_enabled": values,
+        "groups": [
+            [str(name), float(low), float(high), bool(active)]
+            for name, low, high, active in state.groups
+        ],
+    }
+
+
+def iso_state_from_dict(data: object) -> Optional[IsoState]:
+    """Rebuild one ISO filter, or return None if the entry is unusable.
+
+    Everything here is defensive on purpose. A workspace is a file a user can
+    edit, keep for a year, or write with an older version, and an ISO filter
+    that cannot be read is not worth failing a load over -- the rest of the
+    layout is still wanted. A filter naming a parameter that no longer exists
+    is *kept*: it costs nothing, it shows in the ISO tab as "not in the loaded
+    files", and it starts working again the moment that file is reopened.
+    """
+    if not isinstance(data, dict):
+        return None
+    param = data.get("param")
+    if not isinstance(param, str) or not param.strip():
+        return None
+
+    state = IsoState(param=param.strip())
+    state.active = bool(data.get("active", False))
+    state.grouped = bool(data.get("grouped", False))
+    try:
+        state.group_count = max(1, int(data.get("group_count", 3)))
+    except (TypeError, ValueError):
+        state.group_count = 3
+
+    # Accept the list-of-pairs form, and also an object keyed by a numeric
+    # string, so a hand-edited workspace does the obvious thing.
+    raw_values = data.get("value_enabled", [])
+    pairs: List[Tuple[object, object]] = []
+    if isinstance(raw_values, dict):
+        pairs = list(raw_values.items())
+    elif isinstance(raw_values, (list, tuple)):
+        pairs = [tuple(p) for p in raw_values if isinstance(p, (list, tuple)) and len(p) == 2]
+    for value, shown in pairs:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number):
+            state.value_enabled[number] = bool(shown)
+
+    raw_groups = data.get("groups", [])
+    if isinstance(raw_groups, (list, tuple)):
+        for entry in raw_groups:
+            if not isinstance(entry, (list, tuple)) or len(entry) < 3:
+                continue
+            try:
+                low = float(entry[1])
+                high = float(entry[2])
+            except (TypeError, ValueError):
+                continue
+            if not (math.isfinite(low) and math.isfinite(high)):
+                continue
+            if high < low:
+                low, high = high, low
+            name = entry[0] if isinstance(entry[0], str) else ""
+            active = bool(entry[3]) if len(entry) > 3 else True
+            state.groups.append((name or "{0:g} - {1:g}".format(low, high),
+                                 low, high, active))
+
+    # A grouped filter whose intervals did not survive is demoted rather than
+    # left in a state the ISO tab would have to invent intervals for.
+    if state.grouped and not state.groups:
+        state.grouped = False
+    return state
+
+
 class StyleRegistry:
     """Colour, dash style, marker and width per styling key.
 
@@ -595,6 +709,11 @@ class AppState:
         # filters are, and resolve_iso_filters() rebuilds this from them
         # whenever the loaded files change.
         self._iso_admitted: Optional[Set[Tuple[int, int]]] = None
+        # Diagnostics from the last resolve: filters that cannot apply because
+        # no open file carries the parameter, and filters that apply but admit
+        # nothing. Both exist so the interface can explain an empty plot.
+        self._iso_inapplicable: Set[str] = set()
+        self._iso_empty: Set[str] = set()
         self._plotted: Optional[Tuple[Tuple[int, int], ...]] = None
         self._plotted_from: int = -1
         self.styles = StyleRegistry()
@@ -674,25 +793,74 @@ class AppState:
             # nothing to represent and nothing to keep up to date when a file
             # arrives, which is the common case by a wide margin.
             self._iso_admitted = None
+            self._iso_inapplicable = set()
+            self._iso_empty = set()
             return
 
         admitted: Set[Tuple[int, int]] = set()
+        self._iso_inapplicable = set()
+        self._iso_empty = set()
+        matched = {iso.param: 0 for iso in filters}
+
         for file_index, count in files:
-            columns = [(iso, values_for(file_index, iso.param))
-                       for iso in filters]
+            columns = []
+            for iso in filters:
+                column = values_for(file_index, iso.param)
+                if len(column) == 0:
+                    # This file does not carry the parameter at all. A filter
+                    # cannot speak about a channel that is not there, so it
+                    # does not constrain this file's runs.
+                    #
+                    # The previous code broke out of the loop here, which
+                    # skipped the for/else and therefore excluded the run. That
+                    # is defensible in isolation and wrong in practice: it made
+                    # a filter on a parameter only *some* files carry hide every
+                    # run of the others, and -- now that filters are restored
+                    # from a workspace -- it made a workspace whose ISO
+                    # parameter has since disappeared open to an empty plot with
+                    # no explanation. A filter with nothing to say says nothing.
+                    self._iso_inapplicable.add(iso.param)
+                    continue
+                columns.append((iso, column))
+
             for sim_index in range(count):
                 for iso, column in columns:
                     if sim_index >= len(column):
-                        break
+                        # Short column: no value for this run, same reasoning.
+                        continue
                     if not self.iso_admits(iso, float(column[sim_index])):
                         break
                 else:
                     admitted.add((file_index, sim_index))
+                    for iso, column in columns:
+                        if sim_index < len(column):
+                            matched[iso.param] += 1
+
+        # A filter that is applicable but admits nothing is a different case
+        # again, and a legitimate one -- you asked for a mass band no run is in.
+        # It is recorded so the interface can say so rather than leaving an
+        # empty plot to be puzzled over.
+        self._iso_empty = {
+            param for param, hits in matched.items()
+            if hits == 0 and param not in self._iso_inapplicable
+        }
         self._iso_admitted = admitted
 
     def iso_filters_resolved(self) -> bool:
         """True when an ISO filter is narrowing the selection."""
         return self._iso_admitted is not None
+
+    def iso_inapplicable_params(self) -> Set[str]:
+        """Active filters naming a parameter none of the open files carries.
+
+        These constrain nothing. Reported so the ISO tab can label them and a
+        workspace restored against different data can explain itself.
+        """
+        return set(getattr(self, "_iso_inapplicable", set()))
+
+    def iso_empty_params(self) -> Set[str]:
+        """Active, applicable filters that admit no run at all."""
+        return set(getattr(self, "_iso_empty", set()))
 
     def iso_admitted(self, file_index: int, sim_index: int) -> bool:
         """Do the ISO filters admit this run, ignoring the DATA tab?
@@ -721,15 +889,41 @@ class AppState:
         self.global_y_limits.pop(param, None)
         self.dirty = True
 
+    def y_limit_conflict(self, tile: "TileState") -> List[Tuple[str, float, float]]:
+        """The tile's y parameters whose declared limits disagree.
+
+        Empty when the tile has fewer than two constrained y parameters, or when
+        every one of them asks for the same window. Otherwise every constrained
+        parameter and its range, in name order, so the interface can name them.
+
+        A tile has one y axis and cannot satisfy two different demands on it.
+        See apply_global_limits() for what is done about that and why.
+        """
+        bounds = {p: self.global_y_limits[p] for p in tile.y_params
+                  if p in self.global_y_limits}
+        if len(set(bounds.values())) < 2:
+            return []
+        return sorted((p, low, high) for p, (low, high) in bounds.items())
+
     def apply_global_limits(self, tile: "TileState") -> bool:
         """Impose any declared variable limits on one tile. True if it changed.
 
         Called whenever a tile's parameters change, which is what makes the
         constraint apply to tiles filled in after it was declared rather than
         only to the ones that happened to exist at the time.
+
+        A 3D tile is left alone: its frame is view3d_cx/cy/half, and x_min..y_max
+        describe data ranges that mean nothing to a projection. Locking them did
+        no visible harm but it marked the workspace dirty and left the tile
+        mysteriously locked if it was ever switched back to two dimensions.
         """
+        if tile.plot3d:
+            return False
+
         changed = False
 
+        # x cannot conflict: a tile has exactly one x parameter, so this lookup
+        # returns at most one range however many constraints are declared.
         limit = self.global_x_limits.get(tile.x_param)
         if limit is not None:
             if not tile.lock_x or (tile.x_min, tile.x_max) != limit:
@@ -737,18 +931,33 @@ class AppState:
                 tile.x_min, tile.x_max = limit
                 changed = True
 
-        # Several y parameters can each carry a limit; the tile has one y axis,
-        # so take the union -- narrowing to just one of them would hide data the
-        # user asked to see.
-        bounds = [self.global_y_limits[p] for p in tile.y_params
-                  if p in self.global_y_limits]
-        if bounds:
-            low = min(b[0] for b in bounds)
-            high = max(b[1] for b in bounds)
-            if not tile.lock_y or (tile.y_min, tile.y_max) != (low, high):
-                tile.lock_y = True
-                tile.y_min, tile.y_max = low, high
-                changed = True
+        # y can conflict, because a tile may draw several parameters on its one
+        # y axis and each of them may carry its own declared window.
+        #
+        # This used to impose the union of them. The union is a superset of both
+        # and therefore honours neither, which quietly defeats the whole purpose
+        # of the constraint -- the point is that two tiles showing the same
+        # parameter can be compared directly, and under a union they cannot.
+        # Worse, when the ranges differ in magnitude the union annihilates the
+        # smaller channel: ALTITUDE at [0, 13000] unioned with MACH at [0, 1]
+        # leaves Mach occupying 0.008% of the axis, a flat line on the bottom
+        # edge, with nothing on screen to say why.
+        #
+        # There is no arithmetic that satisfies both demands, so none is
+        # invented. Parameters that agree are applied; parameters that disagree
+        # leave the tile exactly as the user had it -- free, and therefore
+        # auto-fitting to show all of its data -- and the conflict is reported
+        # through y_limit_conflict() so the SCALE tab can name it and offer the
+        # union as a deliberate choice.
+        if not self.y_limit_conflict(tile):
+            bounds = [self.global_y_limits[p] for p in tile.y_params
+                      if p in self.global_y_limits]
+            if bounds:
+                low, high = bounds[0]
+                if not tile.lock_y or (tile.y_min, tile.y_max) != (low, high):
+                    tile.lock_y = True
+                    tile.y_min, tile.y_max = low, high
+                    changed = True
 
         if changed:
             self.dirty = True
@@ -1136,6 +1345,7 @@ class AppState:
             ],
             "global_x_limits": {k: list(v) for k, v in self.global_x_limits.items()},
             "global_y_limits": {k: list(v) for k, v in self.global_y_limits.items()},
+            "iso_states": [iso_state_to_dict(s) for s in self.iso_states.values()],
         }
 
     def load_dict(self, data: dict) -> None:
@@ -1143,9 +1353,16 @@ class AppState:
         self.pages = pages or [PageState()]
         self.active_page = int(data.get("active_page", 0))
         self.selected_sims = {tuple(pair) for pair in data.get("selected_sims", [])}
-        # The ISO answer is derived, never saved. Whatever it was, it described
-        # the files the last workspace had open; MainWindow.refresh_all()
-        # rebuilds it once the new ones are known.
+        # The filter *definitions* are saved -- which parameters are filtered
+        # on, their intervals and which values are ticked. What is not saved is
+        # the *answer*: which runs those filters admit describes the files the
+        # last workspace had open, and MainWindow.refresh_all() rebuilds it
+        # once the new ones are known.
+        self.iso_states = {}
+        for entry in data.get("iso_states", []):
+            state = iso_state_from_dict(entry)
+            if state is not None:
+                self.iso_states[state.param] = state
         self._iso_admitted = None
         self._plotted = None
         self.styles.load_dict(data.get("styles", {}))

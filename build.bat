@@ -105,5 +105,11 @@ echo.
 echo Next:
 echo   python -m aoeviewer            run from source ^(set PYTHONPATH=python^)
 echo   build.bat test                 run the self-tests
-echo   python packaging\build_exe.py  build the standalone executable
+echo   python packaging\build_exe.py  build the standalone executable ^(one folder^)
+echo.
+echo   Add --onefile for a single .exe instead of a folder:
+echo     python packaging\build_exe.py --onefile
+echo   It is one file to copy, but every launch unpacks ~60 MB to a temp
+echo   directory first, so it starts in seconds rather than instantly.
+echo   Unless you specifically need one file, take the folder.
 exit /b 0
