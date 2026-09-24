@@ -2,6 +2,13 @@
 
 A fast viewer for AOE simulation result files.
 
+**Version 2.1.0** adds independent *Colour by* and *Style by* encodings, scrollable
+Colour/Line tables, two-line plot titles that keep every selected parameter
+name, unlabelled plot axes (the title already carries the names), and PARAMS
+lists that put the active tile's selected channels first without breaking the
+filter. Workspaces stay JSON schema version 3 and record `app_version`; files
+written by 2.0.0 open unchanged (`Style by` defaults to None).
+
 The heavy work — parsing, computed parameters, plot decimation — happens in a
 C++17 core. The user interface is Python with Qt (PySide6). The two meet at a
 plain C ABI, so the core is one shared library that any CPython 3.8+ can load
@@ -426,11 +433,17 @@ first file loaded is selected automatically so something is on screen straight
 away.
 
 **PARAMS** — pick the x parameter and tick y parameters for the *active* tile
-(click a tile to make it active). The filter box accepts wildcards: `AL*`
-matches `ALPHA` and `ALT`. **Right-click a parameter** to create an alias for
-it, to make it the x axis, or to copy its name — creating an alias where you
-found the parameter beats being sent to another tab to find it again. How the
-tile *looks* — legend, grid, log-y, markers — is all in STYLE.
+(click a tile to make it active). Channels already selected on that tile are
+listed first, in the order they were ticked; the rest keep the file order. The
+filter box accepts wildcards: `AL*` matches `ALPHA` and `ALT`. Filtering only
+hides rows — a selected name that does not match stays selected and stays at
+the top, and reappears as soon as the filter lets it through. **Right-click a
+parameter** to create an alias for it, to make it the x axis, or to copy its
+name — creating an alias where you found the parameter beats being sent to
+another tab to find it again. How the tile *looks* — legend, grid, log-y,
+markers — is all in STYLE. Plot titles name every selected Y; when the list is
+long they wrap onto two lines. The axes themselves are left unlabelled — the
+title already says what is plotted.
 
 **COMPUTE** — define derived channels. See below.
 
@@ -517,14 +530,22 @@ aiming at. The dot comes off when you leave Inspect or make another tile active.
 - *Tile display* — legend, grid, log Y and point markers. These used to be at
   the bottom of PARAMS, which split "what is plotted" and "how it looks" across
   two tabs with no principle behind the split.
-- *Colour by* — simulation, parameter, or ISO value. The active mode is shown
-  both by the radio indicator and by a bold label, so it stays legible whatever
-  the platform style does with check indicators. Styles are keyed by name,
-  not by list position, so loading another file never recolours what is already
-  on screen.
-- A row per curve with its colour, dash pattern and marker. In ISO mode the rows
-  are the ISO values, so you set the colour for "MACH = 0.75" once and every run
-  at that Mach uses it.
+- *Colour by* — simulation, parameter, or ISO value. This sets the colour only.
+  The active mode is shown both by the radio indicator and by a bold label, so
+  it stays legible whatever the platform style does with check indicators.
+  Styles are keyed by name, not by list position, so loading another file never
+  recolours what is already on screen.
+- *Style by* — None, File, Simulation, or ISO. This sets the dash pattern and
+  marker independently of colour. *None* keeps the previous behaviour (dash
+  follows the colour key). *File* is the usual partner for *Colour by
+  Parameter*: one colour per quantity, one dash per result file. *Apply
+  encoding to all tiles* copies both choices, including the ISO parameter each
+  mode is using.
+- Two tables, *Colour* and *Line*, each with its own scrollbar when the list
+  is long. Colour rows are the identities of *Colour by*; Line rows are the
+  identities of *Style by*. In ISO mode the rows are the ISO values (or
+  groups), so you set the colour for "MACH = 0.75" once and every run at that
+  Mach uses it.
 - Global line width and marker size, plus *Re-assign palette* to start over.
 - *Legend* — which corner it sits in, and which parts each entry is built from
   (parameter, ISO value, file, run). **Turning File and Run off merges identical
@@ -741,8 +762,10 @@ manipulates:
 - **Tile** — arrow buttons swap the active tile with its neighbour (disabled at
   the edges), and Copy/Cut/Paste/Clear move a tile's whole configuration.
 
-Each tile is titled with what it is plotting, as `ALPHA, NZ = f(TIME)`, and that
-updates as you add and remove parameters.
+Each tile is titled with what it is plotting, as `ALPHA, NZ = f(TIME)`. Every
+selected Y is named; a long list wraps onto a second line instead of being
+cut. The x and y axis captions are left blank — the title already carries
+those names.
 
 Moving the mouse over a plot shows the value of every curve at that x in the
 status bar.
@@ -758,7 +781,9 @@ wash marking a phase of the run, and the point of it is to see which part of the
 trace it covers.
 
 Workspaces (`Ctrl+S` / `Ctrl+L`) save file paths, pages and their names, tiles,
-selections, computed parameters and every colour and line style as JSON.
+selections, computed parameters, *Colour by* / *Style by* and every colour and
+line style as JSON (schema version 3, plus `app_version`). A 2.0.0 workspace
+loads in 2.1.0 with *Style by* set to None.
 
 Files are watched for changes every few seconds, so you can leave the viewer
 open on a running solver's output and reload when it asks.

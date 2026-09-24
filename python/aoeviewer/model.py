@@ -45,6 +45,28 @@ class ColorMode(IntEnum):
     ISO = 2
 
 
+class StyleMode(IntEnum):
+    """What decides a curve's dash pattern and marker.
+
+    Independent of Colour by. Colour names one identity (usually the
+    quantity); style names another (usually the file or the ISO value).
+    NONE keeps the previous behaviour: dash and marker follow the colour key.
+    """
+
+    NONE = 0
+    FILE = 1
+    SIMULATION = 2
+    ISO = 3
+
+
+STYLE_MODE_LABELS = {
+    StyleMode.NONE: "None",
+    StyleMode.FILE: "File",
+    StyleMode.SIMULATION: "Simulation",
+    StyleMode.ISO: "ISO",
+}
+
+
 class MouseMode(IntEnum):
     """What the mouse does over a plot.
 
@@ -294,6 +316,8 @@ class TileState:
 
     color_mode: ColorMode = ColorMode.SIMULATION
     color_iso_param: str = ""
+    style_mode: StyleMode = StyleMode.NONE
+    style_iso_param: str = ""
 
     # --- 3D -------------------------------------------------------------
     # A 3D tile plots z against x and y as a projected wireframe path. It is a
@@ -365,6 +389,8 @@ class TileState:
             "show_points": self.show_points,
             "color_mode": int(self.color_mode),
             "color_iso_param": self.color_iso_param,
+            "style_mode": int(self.style_mode),
+            "style_iso_param": self.style_iso_param,
             "plot3d": self.plot3d,
             "z_param": self.z_param,
             "azimuth": self.azimuth,
@@ -390,6 +416,11 @@ class TileState:
                 continue
             if key == "color_mode":
                 tile.color_mode = ColorMode(int(value))
+            elif key == "style_mode":
+                try:
+                    tile.style_mode = StyleMode(int(value))
+                except (TypeError, ValueError):
+                    tile.style_mode = StyleMode.NONE
             elif key == "y_params":
                 tile.y_params = list(value)
             elif key == "texts":
@@ -399,12 +430,13 @@ class TileState:
         return tile
 
 
-def tile_title(tile: "TileState", max_names: int = 4) -> str:
+def tile_title(tile: "TileState", max_names: int = 4, wrap: int = 36) -> str:
     """What a tile is plotting, as "ALPHA, NZ = f(TIME)".
 
-    Lives here rather than in the widget so it can be tested without Qt, and so
-    the same wording can be reused by an exporter later.
+    Every selected Y is named. Long lists wrap onto two lines instead of
+    being truncated: axis labels no longer carry those names.
     """
+    del max_names
     if tile.plot3d:
         if not (tile.x_param and tile.y_params and tile.z_param):
             return "3D tile — choose X, Y and Z"
@@ -416,14 +448,61 @@ def tile_title(tile: "TileState", max_names: int = 4) -> str:
     if not tile.y_params:
         return "no parameter selected  (x: {0})".format(tile.x_param)
     if not tile.x_param:
-        return "{0}  (no x axis selected)".format(", ".join(tile.y_params))
+        return _wrap_names(tile.y_params, suffix="  (no x axis selected)", wrap=wrap)
 
-    names = tile.y_params
-    if len(names) > max_names:
-        shown = ", ".join(names[:max_names]) + " +{0} more".format(len(names) - max_names)
-    else:
-        shown = ", ".join(names)
-    return "{0} = f({1})".format(shown, tile.x_param)
+    suffix = " = f({0})".format(tile.x_param)
+    return _wrap_names(tile.y_params, suffix=suffix, wrap=wrap)
+
+
+def _wrap_names(names, suffix: str, wrap: int) -> str:
+    shown = ", ".join(names)
+    single = shown + suffix
+    if len(names) < 2:
+        return single
+    if len(single) <= wrap and len(names) < 5:
+        return single
+    mid = (len(names) + 1) // 2
+    return "{0},\n{1}{2}".format(
+        ", ".join(names[:mid]),
+        ", ".join(names[mid:]),
+        suffix,
+    )
+
+
+def order_parameters(names, selected):
+    """Selected parameters first (in selection order), then the rest as given."""
+    seen = set()
+    out = []
+    pool = set(names)
+    for name in selected:
+        if name in pool and name not in seen:
+            out.append(name)
+            seen.add(name)
+    for name in names:
+        if name not in seen:
+            out.append(name)
+    return out
+
+
+def curve_color_key(tile: "TileState", param: str, sim_key: str,
+                    iso_label: str) -> str:
+    if tile.color_mode == ColorMode.PARAMETER:
+        return "param::" + param
+    if tile.color_mode == ColorMode.ISO and tile.color_iso_param and iso_label:
+        return "iso::{0}::{1}".format(tile.color_iso_param, iso_label)
+    return "sim::" + sim_key
+
+
+def curve_line_key(tile: "TileState", param: str, sim_key: str,
+                   file_id: str, color_iso_label: str,
+                   style_iso_label: str) -> str:
+    if tile.style_mode == StyleMode.FILE:
+        return "file::" + (file_id or sim_key)
+    if tile.style_mode == StyleMode.SIMULATION:
+        return "sim::" + sim_key
+    if tile.style_mode == StyleMode.ISO and tile.style_iso_param and style_iso_label:
+        return "iso::{0}::{1}".format(tile.style_iso_param, style_iso_label)
+    return curve_color_key(tile, param, sim_key, color_iso_label)
 
 
 def y_axis_label(tile: "TileState", max_names: int = 3) -> str:
@@ -641,6 +720,17 @@ class StyleRegistry:
 
     def dash_for(self, key: str) -> str:
         return self._dashes.get(key, "solid")
+
+    def has_dash(self, key: str) -> bool:
+        return key in self._dashes
+
+    def assign_line_style(self, key: str, index: int) -> None:
+        if key not in self._dashes:
+            self._dashes[key] = DASH_STYLES[index % len(DASH_STYLES)]
+        if index >= len(DASH_STYLES) and key not in self._symbols:
+            extras = [code for code in SYMBOLS if code]
+            if extras:
+                self._symbols[key] = extras[(index - len(DASH_STYLES)) % len(extras)]
 
     def set_dash(self, key: str, style: str) -> None:
         if style in DASH_STYLES:
@@ -1079,6 +1169,12 @@ class AppState:
                         tile.color_iso_param = chosen
                         changed = True
 
+                if tile.style_mode == StyleMode.ISO and not tile.style_iso_param:
+                    chosen = tile.color_iso_param or self.default_iso_param(available)
+                    if chosen:
+                        tile.style_iso_param = chosen
+                        changed = True
+
         if changed:
             self.dirty = True
         return changed
@@ -1324,7 +1420,8 @@ class AppState:
 
     def to_dict(self) -> dict:
         return {
-            "version": 2,
+            "version": 3,
+            "app_version": "2.1.0",
             "pages": [p.to_dict() for p in self.pages],
             "active_page": self.active_page,
             "selected_sims": sorted(list(self.selected_sims)),

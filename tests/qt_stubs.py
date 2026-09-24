@@ -564,6 +564,8 @@ class QListWidget:
     def __init__(self, *args, **kwargs):
         self._items = []
         self._current = -1
+        self._signals_blocked = 0
+        self.updates_enabled = True
         self.itemChanged = _BoundSignal()
         self.currentRowChanged = _BoundSignal()
 
@@ -573,6 +575,23 @@ class QListWidget:
         item.list = self
         self._items.append(item)
         return item
+
+    def takeItem(self, row):
+        if 0 <= row < len(self._items):
+            item = self._items.pop(row)
+            item.list = None
+            return item
+        return None
+
+    def blockSignals(self, blocked):
+        previous = self._signals_blocked > 0
+        self._signals_blocked += 1 if blocked else -1
+        if self._signals_blocked < 0:
+            self._signals_blocked = 0
+        return previous
+
+    def setUpdatesEnabled(self, enabled):
+        self.updates_enabled = bool(enabled)
 
     def clear(self):
         for item in self._items:

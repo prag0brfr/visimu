@@ -62,7 +62,9 @@ from ..model import (
     ColorMode,
     IsoState,
     Marker,
+    StyleMode,
     TextNote,
+    order_parameters,
     tile_title,
 )
 from ..session import CoreError, Session
@@ -609,6 +611,8 @@ class ParameterPanel(QWidget):
         layout.addWidget(self.y_list, 1)
 
         hint = QLabel(
+            "Selected parameters are listed first. The filter hides names "
+            "that do not match but does not change that order. "
             "Right-click a parameter to rename it or give it an alias. "
             "Legend, grid, log scale and markers are in the STYLE tab."
         )
@@ -661,6 +665,7 @@ class ParameterPanel(QWidget):
             # The filter is not touched: it depends only on the text in the
             # box, which a refresh cannot have changed.
             self._sync_selection()
+            self._reorder_y_list()
             return
         self._list_state = signature
 
@@ -702,7 +707,7 @@ class ParameterPanel(QWidget):
             blocked = self.y_list.blockSignals(True)
             try:
                 self.y_list.clear()
-                for name in params:
+                for name in order_parameters(params, tile.y_params):
                     item = QListWidgetItem(self._session.label(name))
                     item.setData(Qt.ItemDataRole.UserRole, name)
                     item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
@@ -717,6 +722,40 @@ class ParameterPanel(QWidget):
 
         finally:
             self._updating = False
+        self._apply_filter(self.filter_edit.text())
+
+    def _reorder_y_list(self) -> None:
+        """Put the active tile's selected Y parameters at the top.
+
+        Items are moved, not rebuilt, so the filter's hidden flags and the
+        widget identities survive. Hidden (filtered-out) selected names still
+        travel to the top; they stay hidden until the filter lets them through.
+        """
+        count = self.y_list.count()
+        if count == 0:
+            return
+        names = []
+        for row in range(count):
+            item = self.y_list.item(row)
+            names.append(item.data(Qt.ItemDataRole.UserRole) or item.text())
+        wanted = order_parameters(names, self._state.tile.y_params)
+        if wanted == names:
+            return
+        blocked = self.y_list.blockSignals(True)
+        self.y_list.setUpdatesEnabled(False)
+        try:
+            taken = [self.y_list.takeItem(0) for _ in range(count)]
+            by_name = {}
+            for item in taken:
+                name = item.data(Qt.ItemDataRole.UserRole) or item.text()
+                by_name[name] = item
+            for name in wanted:
+                item = by_name.get(name)
+                if item is not None:
+                    self.y_list.addItem(item)
+        finally:
+            self.y_list.setUpdatesEnabled(True)
+            self.y_list.blockSignals(blocked)
         self._apply_filter(self.filter_edit.text())
 
     # ------------------------------------------------------- context menu
@@ -803,6 +842,7 @@ class ParameterPanel(QWidget):
             if item.checkState() == Qt.CheckState.Checked:
                 chosen.append(item.data(Qt.ItemDataRole.UserRole) or item.text())
         tile.y_params = chosen
+        self._reorder_y_list()
         self._state.dirty = True
         self.tile_changed.emit()
 
@@ -2154,7 +2194,35 @@ class StylePanel(QWidget):
         iso_layout.addWidget(self.iso_combo, 1)
         layout.addWidget(self.iso_row)
 
-        apply_all = QPushButton("Apply colour mode to all tiles")
+        layout.addWidget(_title("Style by"))
+        style_row = QHBoxLayout()
+        self.style_group = QButtonGroup(self)
+        self.style_buttons = []
+        for index, label in enumerate(("None", "File", "Simulation", "ISO")):
+            radio = QRadioButton(label)
+            self.style_group.addButton(radio, index)
+            self.style_buttons.append(radio)
+            style_row.addWidget(radio)
+        self.style_group.idClicked.connect(self._on_style_mode_changed)
+        layout.addLayout(style_row)
+        style_hint = QLabel(
+            "Colour names one identity; dash and marker name another. "
+            "None keeps dash on the colour key."
+        )
+        style_hint.setObjectName("Hint")
+        style_hint.setWordWrap(True)
+        layout.addWidget(style_hint)
+
+        self.style_iso_combo = QComboBox()
+        self.style_iso_combo.currentTextChanged.connect(self._on_style_iso_changed)
+        self.style_iso_row = QWidget()
+        style_iso_layout = QHBoxLayout(self.style_iso_row)
+        style_iso_layout.setContentsMargins(0, 0, 0, 0)
+        style_iso_layout.addWidget(QLabel("Style ISO"))
+        style_iso_layout.addWidget(self.style_iso_combo, 1)
+        layout.addWidget(self.style_iso_row)
+
+        apply_all = QPushButton("Apply encoding to all tiles")
         apply_all.clicked.connect(self._apply_mode_to_all)
         layout.addWidget(apply_all)
 
@@ -2179,17 +2247,23 @@ class StylePanel(QWidget):
         layout.addWidget(globals_box)
 
         # --- per-curve table ------------------------------------------------
-        layout.addWidget(_title("Curves"))
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["", "Colour", "Line", "Marker"])
-        self.table.verticalHeader().setVisible(False)
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for column in (1, 2, 3):
-            header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
-        layout.addWidget(self.table, 1)
+        layout.addWidget(_title("Colour"))
+        self.color_table = QTableWidget(0, 2)
+        self.color_table.setHorizontalHeaderLabels(["", "Colour"])
+        self._configure_style_table(self.color_table, 2)
+        layout.addWidget(self.color_table, 1)
+
+        layout.addWidget(_title("Line"))
+        self.line_table = QTableWidget(0, 3)
+        self.line_table.setHorizontalHeaderLabels(["", "Line", "Marker"])
+        self._configure_style_table(self.line_table, 3)
+        layout.addWidget(self.line_table, 1)
+
+        self.table = self.color_table
+        self._color_row_keys = []
+        self._line_row_keys = []
+        self._color_signature = None
+        self._line_signature = None
 
         buttons = QHBoxLayout()
         recolor = QPushButton("Re-assign palette")
@@ -2266,6 +2340,22 @@ class StylePanel(QWidget):
 
         layout.addWidget(legend_box)
 
+    def _configure_style_table(self, table, columns):
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        table.setMaximumHeight(200)
+        table.setMinimumHeight(80)
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        table.setWordWrap(False)
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for column in range(1, columns):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        table.setSortingEnabled(False)
+
     # ------------------------------------------------------------- refresh
 
     def refresh(self) -> None:
@@ -2291,6 +2381,15 @@ class StylePanel(QWidget):
                 radio.setFont(font)
             self.iso_row.setVisible(tile.color_mode == ColorMode.ISO)
 
+            style_button = self.style_group.button(int(tile.style_mode))
+            if style_button is not None:
+                style_button.setChecked(True)
+            for index, radio in enumerate(self.style_buttons):
+                font = radio.font()
+                font.setBold(index == int(tile.style_mode))
+                radio.setFont(font)
+            self.style_iso_row.setVisible(tile.style_mode == StyleMode.ISO)
+
             params = self._session.parameters
             self.iso_combo.clear()
             self.iso_combo.addItems(params)
@@ -2302,6 +2401,15 @@ class StylePanel(QWidget):
                 # one parameter while the tile goes on to adopt another.
                 self.iso_combo.setCurrentText(
                     self._state.default_iso_param(params))
+
+            self.style_iso_combo.clear()
+            self.style_iso_combo.addItems(params)
+            if tile.style_iso_param in params:
+                self.style_iso_combo.setCurrentText(tile.style_iso_param)
+            elif params:
+                self.style_iso_combo.setCurrentText(
+                    tile.color_iso_param if tile.color_iso_param in params
+                    else self._state.default_iso_param(params))
 
             self.width_spin.setValue(styles.line_width)
             self.symbol_spin.setValue(styles.symbol_size)
@@ -2316,141 +2424,193 @@ class StylePanel(QWidget):
         finally:
             self._updating = False
 
-    def _style_entries(self):
-        """(display label, style key) for everything styleable in this mode."""
-        tile = self._state.tile
+    def _iso_entries_for(self, iso_param: str):
+        """(label, key) rows for one ISO parameter's visible values or groups."""
         entries = []
-
-        if tile.color_mode == ColorMode.PARAMETER:
-            for param in tile.y_params:
-                entries.append((param, "param::" + param))
-
-        elif tile.color_mode == ColorMode.ISO and tile.color_iso_param:
-            iso = self._state.iso_states.get(tile.color_iso_param)
-            if iso is not None and iso.grouped and iso.groups:
-                for name, _low, _high, active in iso.groups:
-                    if active:
-                        entries.append((name, "iso::{0}::{1}".format(tile.color_iso_param, name)))
-            else:
-                for value in self._session.iso_distinct(tile.color_iso_param):
-                    label = self._session.format_value(float(value))
-                    if iso is not None and not iso.value_enabled.get(float(value), True):
-                        continue
-                    entries.append((label, "iso::{0}::{1}".format(tile.color_iso_param, label)))
-
-        else:  # simulation
-            for file_index, sim_index in self._state.plotted_sims():
-                handle = self._session.file(file_index)
-                if handle is None or sim_index >= handle.simulation_count:
-                    continue
-                sim = handle.simulations[sim_index]
-                entries.append(("{0} · {1}".format(sim.sim_id, handle.name), "sim::" + sim.key))
-
+        if not iso_param:
+            return entries
+        iso = self._state.iso_states.get(iso_param)
+        if iso is not None and iso.grouped and iso.groups:
+            for name, _low, _high, active in iso.groups:
+                if active:
+                    entries.append((name, "iso::{0}::{1}".format(iso_param, name)))
+            return entries
+        for value in self._session.iso_distinct(iso_param):
+            label = self._session.format_value(float(value))
+            if iso is not None and not iso.value_enabled.get(float(value), True):
+                continue
+            entries.append((label, "iso::{0}::{1}".format(iso_param, label)))
         return entries
 
+    def _sim_entries(self):
+        entries = []
+        for file_index, sim_index in self._state.plotted_sims():
+            handle = self._session.file(file_index)
+            if handle is None or sim_index >= handle.simulation_count:
+                continue
+            sim = handle.simulations[sim_index]
+            entries.append(("{0} · {1}".format(sim.sim_id, handle.name),
+                            "sim::" + sim.key))
+        return entries
+
+    def _style_entries(self):
+        """(display label, colour key) for Colour-by on the active tile."""
+        return self._color_entries()
+
+    def _color_entries(self):
+        tile = self._state.tile
+        if tile.color_mode == ColorMode.PARAMETER:
+            return [(param, "param::" + param) for param in tile.y_params]
+        if tile.color_mode == ColorMode.ISO:
+            return self._iso_entries_for(tile.color_iso_param)
+        return self._sim_entries()
+
+    def _line_entries(self):
+        """(display label, line-style key) for Style-by on the active tile."""
+        tile = self._state.tile
+        if tile.style_mode == StyleMode.NONE:
+            return []
+        if tile.style_mode == StyleMode.FILE:
+            seen = set()
+            entries = []
+            for file_index, sim_index in self._state.plotted_sims():
+                handle = self._session.file(file_index)
+                if handle is None:
+                    continue
+                file_id = handle.path or handle.name
+                if file_id in seen:
+                    continue
+                seen.add(file_id)
+                entries.append((handle.name, "file::" + file_id))
+            return entries
+        if tile.style_mode == StyleMode.ISO:
+            return self._iso_entries_for(tile.style_iso_param)
+        return self._sim_entries()
+
     def _rebuild_table(self) -> None:
-        """Fill the per-curve table, reusing the rows already in it.
-
-        This runs on every refresh, and a refresh happens on every click that
-        changes the active tile. Rebuilt from scratch it costs four widgets per
-        curve -- a colour button and two populated combo boxes -- created and
-        the previous four destroyed. In simulation mode there is one row per
-        selected run, so a study of a few hundred runs meant creating and
-        destroying a four-figure number of widgets to answer a click that, most
-        of the time, changed nothing in this table at all.
-
-        Two things fix that. The signature check returns immediately when the
-        rows would come out identical, which is the common case; and when they
-        would not, the existing widgets are refilled in place instead of being
-        replaced. Binding the signals to the row rather than to the key is what
-        makes reuse possible -- the widget outlives the key it was made for, so
-        the key has to be looked up when the signal fires, from _row_keys.
-        """
-        entries = self._style_entries()
-        styles = self._state.styles
-
-        signature = tuple(
-            (label, key, styles.color_for(key), styles.dash_for(key),
-             styles.symbol_for(key))
-            for label, key in entries
+        """Fill the Colour and Line tables, reusing rows already in them."""
+        self._rebuild_one_table(
+            self.color_table if getattr(self, "color_table", None) is not None
+            else self.table,
+            self._color_entries(),
+            "color",
+            empty_hint="Nothing plotted yet",
         )
-        if signature == self._table_signature:
-            return
-        self._table_signature = signature
-        self._row_keys = [key for _label, key in entries]
+        line_table = getattr(self, "line_table", None)
+        if line_table is not None:
+            hint = ("Style by is None — dash follows colour"
+                    if self._state.tile.style_mode == StyleMode.NONE
+                    else "Nothing plotted yet")
+            self._rebuild_one_table(
+                line_table, self._line_entries(), "line", empty_hint=hint)
+        self.table = getattr(self, "color_table", self.table)
+        self._table_signature = getattr(self, "_color_signature", None)
+        self._row_keys = list(getattr(self, "_color_row_keys", []))
 
-        # Without this Qt relayouts and repaints the table on every single cell.
-        self.table.setUpdatesEnabled(False)
+    def _rebuild_one_table(self, table, entries, kind: str,
+                           empty_hint: str) -> None:
+        styles = self._state.styles
+        if kind == "color":
+            signature = tuple(
+                (label, key, styles.color_for(key)) for label, key in entries)
+            attr = "_color_signature"
+            keys_attr = "_color_row_keys"
+        else:
+            signature = tuple(
+                (label, key, styles.dash_for(key), styles.symbol_for(key))
+                for label, key in entries)
+            attr = "_line_signature"
+            keys_attr = "_line_row_keys"
+
+        if signature == getattr(self, attr, None):
+            return
+        setattr(self, attr, signature)
+        setattr(self, keys_attr, [key for _label, key in entries])
+
+        table.setUpdatesEnabled(False)
         try:
             if not entries:
-                # Drop to zero first: that destroys the cell widgets of any rows
-                # still there, which setRowCount(1) alone would leave behind
-                # under the hint.
-                self.table.setRowCount(0)
-                self.table.setRowCount(1)
-                hint = QTableWidgetItem("Nothing plotted yet")
+                table.setRowCount(0)
+                table.setRowCount(1)
+                hint = QTableWidgetItem(empty_hint)
                 hint.setFlags(Qt.ItemFlag.NoItemFlags)
-                self.table.setItem(0, 0, hint)
+                table.setItem(0, 0, hint)
+                if table.cellWidget(0, 1) is not None:
+                    # Shrinking already dropped extra rows; make sure the hint
+                    # row itself is not carrying a leftover editor.
+                    table.setRowCount(0)
+                    table.setRowCount(1)
+                    table.setItem(0, 0, hint)
                 return
 
-            self.table.setRowCount(len(entries))
+            table.setRowCount(len(entries))
             for row, (label, key) in enumerate(entries):
-                self._fill_row(row, label, key, styles)
+                if kind == "color":
+                    self._fill_color_row(table, row, label, key, styles)
+                else:
+                    self._fill_line_row(table, row, label, key, styles)
         finally:
-            self.table.setUpdatesEnabled(True)
+            table.setUpdatesEnabled(True)
 
-    def _fill_row(self, row: int, label: str, key: str, styles) -> None:
-        """Put one curve's styling into a table row, making widgets only if the
-        row does not have them yet."""
-        item = self.table.item(row, 0)
+    def _fill_color_row(self, table, row: int, label: str, key: str, styles) -> None:
+        item = table.item(row, 0)
         if item is None:
             item = QTableWidgetItem()
-            self.table.setItem(row, 0, item)
-        # A row left over from the "Nothing plotted yet" hint is unselectable
-        # until its flags are put back.
+            table.setItem(row, 0, item)
         item.setFlags(Qt.ItemFlag.ItemIsEnabled)
         item.setText(label)
         item.setToolTip(label)
 
-        swatch = self.table.cellWidget(row, 1)
+        swatch = table.cellWidget(row, 1)
         if swatch is None:
             swatch = ColorSwatch(styles.color_for(key))
             swatch.color_picked.connect(
-                lambda color, r=row: self._set_color(self._key_for_row(r), color)
+                lambda color, r=row: self._set_color(self._color_key_for_row(r), color)
             )
-            self.table.setCellWidget(row, 1, swatch)
+            table.setCellWidget(row, 1, swatch)
         else:
             swatch.set_color(styles.color_for(key))
 
-        dash = self.table.cellWidget(row, 2)
+    def _fill_line_row(self, table, row: int, label: str, key: str, styles) -> None:
+        item = table.item(row, 0)
+        if item is None:
+            item = QTableWidgetItem()
+            table.setItem(row, 0, item)
+        item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        item.setText(label)
+        item.setToolTip(label)
+
+        dash = table.cellWidget(row, 1)
         if dash is None:
             dash = QComboBox()
             dash.addItems(list(DASH_STYLES))
             dash.currentTextChanged.connect(
-                lambda value, r=row: self._set_dash(self._key_for_row(r), value)
+                lambda value, r=row: self._set_dash(self._line_key_for_row(r), value)
             )
-            self.table.setCellWidget(row, 2, dash)
-        # _updating is already set by refresh(); setting it here as well keeps
-        # this correct if the table is ever refilled from anywhere else, since
-        # setCurrentText fires currentTextChanged like a user edit would.
+            table.setCellWidget(row, 1, dash)
+        symbol = table.cellWidget(row, 2)
+        if symbol is None:
+            symbol = QComboBox()
+            for code in SYMBOLS:
+                symbol.addItem(SYMBOL_LABELS.get(code, code), code)
+            symbol.currentIndexChanged.connect(
+                lambda _i, r=row, combo=symbol:
+                self._set_symbol(self._line_key_for_row(r), combo.currentData())
+            )
+            table.setCellWidget(row, 2, symbol)
+
         was_updating = self._updating
         self._updating = True
         try:
             dash.setCurrentText(styles.dash_for(key))
-
-            symbol = self.table.cellWidget(row, 3)
-            if symbol is None:
-                symbol = QComboBox()
-                for code in SYMBOLS:
-                    symbol.addItem(SYMBOL_LABELS.get(code, code), code)
-                symbol.currentIndexChanged.connect(
-                    lambda _i, r=row, combo=symbol:
-                    self._set_symbol(self._key_for_row(r), combo.currentData())
-                )
-                self.table.setCellWidget(row, 3, symbol)
             symbol.setCurrentIndex(max(0, symbol.findData(styles.symbol_for(key))))
         finally:
             self._updating = was_updating
+
+    def _fill_row(self, row: int, label: str, key: str, styles) -> None:
+        """Back-compat wrapper used by older tests that talk to ``self.table``."""
+        table = self.color_table if getattr(self, "color_table", None) is not None else self.table
+        self._fill_color_row(table, row, label, key, styles)
 
     # ------------------------------------------------------------- actions
 
@@ -2466,15 +2626,19 @@ class StylePanel(QWidget):
         self.style_changed.emit()
 
     def _key_for_row(self, row: int) -> str:
-        """The styling key a table row currently edits.
+        """Colour-table key. Kept so older tests and bindings still resolve."""
+        return self._color_key_for_row(row)
 
-        Rows are reused across refreshes, so the widget in a row outlives the
-        key it was first built for and the key has to be looked up when the
-        signal fires. Out of range means the row has been dropped since; the
-        setters below treat the empty string as "nothing to do".
-        """
-        if 0 <= row < len(self._row_keys):
-            return self._row_keys[row]
+    def _color_key_for_row(self, row: int) -> str:
+        keys = getattr(self, "_color_row_keys", None) or self._row_keys
+        if 0 <= row < len(keys):
+            return keys[row]
+        return ""
+
+    def _line_key_for_row(self, row: int) -> str:
+        keys = getattr(self, "_line_row_keys", [])
+        if 0 <= row < len(keys):
+            return keys[row]
         return ""
 
     def _set_color(self, key: str, color: str) -> None:
@@ -2528,12 +2692,31 @@ class StylePanel(QWidget):
         self._rebuild_table()
         self.style_changed.emit()
 
+    def _on_style_mode_changed(self, index: int) -> None:
+        if self._updating:
+            return
+        self._state.tile.style_mode = StyleMode(index)
+        self._state.apply_parameter_defaults(self._session.parameters)
+        self._state.dirty = True
+        self.refresh()
+        self.style_changed.emit()
+
+    def _on_style_iso_changed(self, name: str) -> None:
+        if self._updating:
+            return
+        self._state.tile.style_iso_param = name
+        self._state.dirty = True
+        self._rebuild_table()
+        self.style_changed.emit()
+
     def _apply_mode_to_all(self) -> None:
         tile = self._state.tile
         for page in self._state.pages:
             for other in page.tiles:
                 other.color_mode = tile.color_mode
                 other.color_iso_param = tile.color_iso_param
+                other.style_mode = tile.style_mode
+                other.style_iso_param = tile.style_iso_param
         self._state.dirty = True
         self.style_changed.emit()
 

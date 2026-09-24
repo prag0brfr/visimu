@@ -33,8 +33,11 @@ from ..model import (
     AppState,
     ColorMode,
     MouseMode,
+    StyleMode,
     TileState,
     clamp_3d_half,
+    curve_color_key,
+    curve_line_key,
     tile_title,
 )
 from .. import projection, scales
@@ -1124,13 +1127,9 @@ class PlotTile(pg.PlotWidget):
         return labels, ranks
 
     def _style_key(self, tile: TileState, param: str, sim_key: str,
-                   iso_label: str) -> str:
-        """The styling key for a curve, matching what the Style panel edits."""
-        if tile.color_mode == ColorMode.PARAMETER:
-            return "param::" + param
-        if tile.color_mode == ColorMode.ISO and tile.color_iso_param and iso_label:
-            return "iso::{0}::{1}".format(tile.color_iso_param, iso_label)
-        return "sim::" + sim_key
+                   iso_label: str, file_id: str = "",
+                   style_iso_label: str = "") -> str:
+        return curve_color_key(tile, param, sim_key, iso_label)
 
     def _legend_label(self, tile: TileState, param: str, file_name: str,
                       sim_id: str, iso_label: str, dash: str, symbol: str) -> str:
@@ -1142,8 +1141,10 @@ class PlotTile(pg.PlotWidget):
         if tile.legend_show_param:
             parts.append(param)
 
-        if tile.color_mode == ColorMode.ISO and tile.legend_show_iso and iso_label:
-            parts.append("{0} = {1}".format(tile.color_iso_param, iso_label))
+        if tile.legend_show_iso and iso_label:
+            iso_name = tile.color_iso_param or tile.style_iso_param
+            if iso_name:
+                parts.append("{0} = {1}".format(iso_name, iso_label))
 
         if tile.legend_show_file:
             parts.append(file_name)
@@ -1279,13 +1280,10 @@ class PlotTile(pg.PlotWidget):
             # Axis labels carry the unit the file declared, which is the one
             # place it genuinely belongs: "TIME" tells you nothing about
             # whether the axis is seconds or minutes.
-            plot.setLabel("bottom", self._axis_label(tile.x_param),
-                          **_AXIS_LABEL_STYLE)
-            plot.setLabel("left", self._y_axis_label(tile),
-                          **_AXIS_LABEL_STYLE)
-        # Rebuilt every time, so the title tracks parameters being added and
-        # removed rather than going stale.
-        plot.setTitle(tile_title(tile), color=self._theme.plot_foreground,
+            plot.setLabel("bottom", "", **_AXIS_LABEL_STYLE)
+            plot.setLabel("left", "", **_AXIS_LABEL_STYLE)
+        title = tile_title(tile).replace("\n", "<br>")
+        plot.setTitle(title, color=self._theme.plot_foreground,
                       size="{0}pt".format(PLOT_TITLE_PT))
 
         if tile.plot3d:
@@ -1332,6 +1330,11 @@ class PlotTile(pg.PlotWidget):
             if tile.color_mode == ColorMode.ISO
             else ({}, {})
         )
+        style_iso_labels = (
+            self._iso_labels(tile.style_iso_param)[0]
+            if tile.style_mode == StyleMode.ISO
+            else {}
+        )
 
         styles = self._state.styles
         # Identical legend entries are merged when neither file nor simulation
@@ -1356,6 +1359,7 @@ class PlotTile(pg.PlotWidget):
         # curves those are is not known until the walk below has finished.
         ranks: Dict[tuple, tuple] = {}
         param_rank = {name: index for index, name in enumerate(tile.y_params)}
+        line_order = {}
 
         for file_index, sims in sorted(by_file.items()):
             handle = self._session.file(file_index)
@@ -1379,11 +1383,20 @@ class PlotTile(pg.PlotWidget):
                     if y.size == 0:
                         continue
 
-                    style_key = self._style_key(tile, param, sim.key, iso_label)
-                    color = styles.color_for(style_key)
-                    dash = styles.dash_for(style_key)
-                    symbol = styles.symbol_for(style_key)
-                    width = styles.width_for(style_key)
+                    style_iso_label = style_iso_labels.get((file_index, sim_index), "")
+                    file_id = handle.path or file_name
+                    color_key = curve_color_key(tile, param, sim.key, iso_label)
+                    line_key = curve_line_key(
+                        tile, param, sim.key, file_id, iso_label, style_iso_label)
+                    if tile.style_mode != StyleMode.NONE:
+                        if line_key not in line_order:
+                            line_order[line_key] = len(line_order)
+                        styles.assign_line_style(line_key, line_order[line_key])
+                    color = styles.color_for(color_key)
+                    dash = styles.dash_for(line_key)
+                    symbol = styles.symbol_for(line_key)
+                    width = styles.width_for(color_key)
+                    style_key = color_key
 
                     label = self._legend_label(
                         tile, param, file_name, sim.sim_id, iso_label, dash, symbol
@@ -1655,6 +1668,11 @@ class PlotTile(pg.PlotWidget):
             if tile.color_mode == ColorMode.ISO
             else ({}, {})
         )
+        style_iso_labels = (
+            self._iso_labels(tile.style_iso_param)[0]
+            if tile.style_mode == StyleMode.ISO
+            else {}
+        )
 
         # Grouped by pen exactly as the 2D path is, and for the same reason: a
         # thousand trajectories is a thousand items otherwise. A 3D tile is
@@ -1663,13 +1681,23 @@ class PlotTile(pg.PlotWidget):
         groups: Dict[tuple, List[np.ndarray]] = {}
         pens: Dict[tuple, QPen] = {}
         gap = np.array([np.nan], dtype=np.float32)
+        line_order = {}
 
         for file_index, sim_index, file_name, sim, x, y, z in series:
             iso_label = iso_labels.get((file_index, sim_index), "")
-            style_key = self._style_key(tile, tile.z_param, sim.key, iso_label)
-            color = styles.color_for(style_key)
-            dash = styles.dash_for(style_key)
-            width = styles.width_for(style_key)
+            style_iso_label = style_iso_labels.get((file_index, sim_index), "")
+            file_id = file_name
+            color_key = curve_color_key(tile, tile.z_param, sim.key, iso_label)
+            line_key = curve_line_key(
+                tile, tile.z_param, sim.key, file_id, iso_label, style_iso_label)
+            if tile.style_mode != StyleMode.NONE:
+                if line_key not in line_order:
+                    line_order[line_key] = len(line_order)
+                styles.assign_line_style(line_key, line_order[line_key])
+            color = styles.color_for(color_key)
+            dash = styles.dash_for(line_key)
+            width = styles.width_for(color_key)
+            style_key = color_key
 
             key = "{0}|{1}|{2}".format(file_index, sim_index, tile.z_param)
             member = _ProjectedCurve(

@@ -377,11 +377,14 @@ class TestTileTitle(unittest.TestCase):
             tile_title(self._tile("TIME", ["ALPHA", "NZ"])), "ALPHA, NZ = f(TIME)"
         )
 
-    def test_long_lists_are_truncated(self):
+    def test_long_lists_wrap_instead_of_truncating(self):
         from aoeviewer.model import tile_title
         title = tile_title(self._tile("TIME", ["A", "B", "C", "D", "E", "F"]))
-        self.assertIn("+2 more", title)
+        self.assertIn("\n", title)
+        self.assertIn("A", title)
+        self.assertIn("F", title)
         self.assertIn("f(TIME)", title)
+        self.assertNotIn("more", title)
 
     def test_nothing_plotted_reads_sensibly(self):
         from aoeviewer.model import tile_title

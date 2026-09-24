@@ -499,15 +499,23 @@ class TestStyleTable(unittest.TestCase):
         self.panel._updating = False
         self.panel._table_signature = None
         self.panel._row_keys = []
-        self.panel.table = qt_stubs.QTableWidget(0, 4)
+        self.panel._color_signature = None
+        self.panel._line_signature = None
+        self.panel._color_row_keys = []
+        self.panel._line_row_keys = []
+        self.panel.color_table = qt_stubs.QTableWidget(0, 2)
+        self.panel.line_table = qt_stubs.QTableWidget(0, 3)
+        self.panel.table = self.panel.color_table
         self.panel.style_changed  # instantiate the stub signal
         self.entries = [("ALT", "param::ALT"), ("MACH", "param::MACH")]
         self.panel._style_entries = lambda: list(self.entries)
+        self.panel._color_entries = lambda: list(self.entries)
+        self.panel._line_entries = lambda: []
 
     def test_the_first_fill_creates_the_widgets(self):
         self.panel._rebuild_table()
         self.assertEqual(self.panel.table.rowCount(), 2)
-        self.assertEqual(self.panel.table.created, 6)   # three per row
+        self.assertEqual(self.panel.table.created, 2)   # one swatch per colour row
 
     def test_an_unchanged_refresh_touches_nothing(self):
         self.panel._rebuild_table()
@@ -537,7 +545,7 @@ class TestStyleTable(unittest.TestCase):
         self.panel._rebuild_table()
 
         self.assertEqual(self.panel.table.rowCount(), 3)
-        self.assertEqual(self.panel.table.created, created + 3)
+        self.assertEqual(self.panel.table.created, created + 1)
         self.assertIs(self.panel.table.cellWidget(0, 1), first_row_swatch)
 
     def test_shrinking_the_table_drops_the_extra_rows(self):
@@ -580,6 +588,7 @@ class TestStyleTable(unittest.TestCase):
         # setCurrentText fires currentTextChanged exactly as a user edit does.
         # Without the guard, refreshing the panel would restyle the curve and
         # ask for a redraw of the whole grid.
+        self.panel._line_entries = lambda: list(self.entries)
         self.panel._rebuild_table()
         self.panel._state.styles.set_dash("param::ALT", "dash")
         self.panel._rebuild_table()
@@ -629,7 +638,13 @@ class TestApplyLegendToAll(unittest.TestCase):
         self.panel._updating = False
         self.panel._table_signature = None
         self.panel._row_keys = []
-        self.panel.table = qt_stubs.QTableWidget(0, 4)
+        self.panel._color_signature = None
+        self.panel._line_signature = None
+        self.panel._color_row_keys = []
+        self.panel._line_row_keys = []
+        self.panel.color_table = qt_stubs.QTableWidget(0, 2)
+        self.panel.line_table = qt_stubs.QTableWidget(0, 3)
+        self.panel.table = self.panel.color_table
         self.order = []
         self.panel.style_changed.connect(lambda: self.order.append("redraw"))
         self.panel.legend_applied.connect(lambda n: self.order.append(n))
@@ -2148,9 +2163,28 @@ class TestListsDoNotBlink(unittest.TestCase):
         panel._state.tile.y_params = ["ALT"]
         panel.refresh()
 
+        after = [panel.y_list.item(i) for i in range(panel.y_list.count())]
+        self.assertEqual({id(item) for item in after}, {id(item) for item in before})
+        self.assertEqual(after[0].data(Qt.ItemDataRole.UserRole), "ALT")
+
+    def test_selected_parameters_are_listed_first_and_filter_still_hides(self):
+        panel = make_param_panel()
+        panel._state.tile.y_params = ["MACH"]
+        panel.refresh()
+        names = [panel.y_list.item(i).data(Qt.ItemDataRole.UserRole)
+                 for i in range(panel.y_list.count())]
+        self.assertEqual(names[0], "MACH")
+        self.assertEqual(set(names), {"TIME", "ALT", "MACH"})
+
+        panel._apply_filter("AL")
+        hidden = {panel.y_list.item(i).data(Qt.ItemDataRole.UserRole):
+                  panel.y_list.item(i).isHidden()
+                  for i in range(panel.y_list.count())}
+        self.assertTrue(hidden["MACH"])
+        self.assertTrue(hidden["TIME"])
+        self.assertFalse(hidden["ALT"])
         self.assertEqual(
-            [id(panel.y_list.item(i)) for i in range(panel.y_list.count())],
-            [id(item) for item in before])
+            panel.y_list.item(0).data(Qt.ItemDataRole.UserRole), "MACH")
 
     def test_the_parameter_tick_still_arrives(self):
         panel = make_param_panel()
@@ -2218,7 +2252,13 @@ class TestFirstSwitchToIsoColouring(unittest.TestCase):
         self.panel._updating = False
         self.panel._table_signature = None
         self.panel._row_keys = []
-        self.panel.table = qt_stubs.QTableWidget(0, 4)
+        self.panel._color_signature = None
+        self.panel._line_signature = None
+        self.panel._color_row_keys = []
+        self.panel._line_row_keys = []
+        self.panel.color_table = qt_stubs.QTableWidget(0, 2)
+        self.panel.line_table = qt_stubs.QTableWidget(0, 3)
+        self.panel.table = self.panel.color_table
         self.panel.refresh = lambda: None      # only the commit is under test
         self.panel.style_changed
 
