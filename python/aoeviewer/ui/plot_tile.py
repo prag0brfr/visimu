@@ -128,8 +128,16 @@ LEGEND_GROUND_ALPHA = 0.94
 
 # Room between the legend's frame and its rows. pyqtgraph's legend has none,
 # which was invisible while there was no ground behind it and looks cramped the
-# moment there is -- the text would sit flush against the border.
-LEGEND_PAD = 5
+# moment there is -- the text would sit flush against the border. Enough to
+# read as a card, and no more: this is four edges of every tile's corner.
+LEGEND_PAD = 3
+
+# Between a row's swatch and its text, and between one row and the next.
+# pyqtgraph defaults to 25 px horizontally, which on a short label is wider
+# than the label; and its rows, at the sizes used here, sit further apart than
+# they need to for the block to read as a list.
+LEGEND_H_SPACING = 8
+LEGEND_V_SPACING = 0
 
 
 def legend_ground(theme) -> dict:
@@ -231,7 +239,13 @@ class DraggableLegend(pg.LegendItem):
         try:
             self.layout.setContentsMargins(LEGEND_PAD, LEGEND_PAD,
                                            LEGEND_PAD, LEGEND_PAD)
+            self.layout.setHorizontalSpacing(LEGEND_H_SPACING)
+            self.layout.setVerticalSpacing(LEGEND_V_SPACING)
         except (AttributeError, RuntimeError, TypeError):
+            # Guarded like everything else touching pyqtgraph internals here:
+            # the layout is reachable under this name across the versions this
+            # runs against, but a legend that is merely roomier is a far better
+            # outcome than one that fails to build.
             pass
 
     def set_ground(self, brush=None, pen=None, labelTextColor=None) -> None:
@@ -750,6 +764,12 @@ class PlotTile(pg.PlotWidget):
         self._legend: Optional[pg.LegendItem] = None
         self._overlays: List[pg.GraphicsObject] = []
         self._suppress_range_event = False
+        # What was last written to the PlotItem's own settings, so a rebuild
+        # that would write the same thing writes nothing. See _apply_axes().
+        self._axes_applied: Optional[tuple] = None
+        # What the markers and bands currently on the plot were drawn from.
+        # See _draw_overlays().
+        self._overlays_drawn_for: Optional[tuple] = None
 
         # A window can never be made smaller than the sum of its parts, and a
         # 5x5 page is twenty-five plot widgets. QGraphicsView asks for a
@@ -959,6 +979,12 @@ class PlotTile(pg.PlotWidget):
             self._legend.setVisible(False)
         plot.setTitle(message, color=self._theme.text_dim,
                       size="{0}pt".format(PLOT_TITLE_PT))
+        # The title on screen is now this message, not the one _apply_axes()
+        # last wrote, so what it remembers writing no longer describes the
+        # plot. Forgetting it is what makes the next rebuild put the real
+        # title back -- without this a tile that showed a placeholder while a
+        # file loaded kept the placeholder as its heading.
+        self._axes_applied = None
 
     # -------------------------------------------------------- mouse modes
 
@@ -1064,6 +1090,50 @@ class PlotTile(pg.PlotWidget):
             "PlotTile {{ border: {0}px solid {1}; }}".format(2 if active else 1, color)
         )
 
+    def _apply_axes(self, plot, tile: TileState) -> None:
+        """The PlotItem's own settings: grid, log mode, axis captions, title.
+
+        Written only when one of them has actually changed. They used to be
+        written on every rebuild, and most rebuilds change none of them -- a
+        restyled curve, a run ticked, a marker dragged, a page returned to.
+
+        setLogMode is the one that made that expensive rather than merely
+        redundant. pyqtgraph propagates it to every data item on the plot,
+        which invalidates each curve's cached display data, and then re-enables
+        auto-range; the tile then has to undo that in _restore_view(). So a
+        rebuild the redraw cache had just arranged to cost nothing threw away
+        the transformed points of every curve on the tile and moved the frame,
+        twice, for a setting nobody had touched.
+
+        The title is in the same tuple rather than guarded separately: it is a
+        pure function of the tile's parameters, so the one comparison answers
+        for all of it, and setTitle relays the PlotItem too.
+        """
+        title = tile_title(tile).replace("\n", "<br>")
+        signature = (tile.show_grid, tile.log_y, tile.plot3d, title,
+                     self._theme.plot_foreground)
+        if signature == self._axes_applied:
+            return
+        self._axes_applied = signature
+
+        if tile.plot3d:
+            # The axes of a projection are not either data axis, so labelling
+            # them with parameter names would be a lie. The title carries the
+            # three names instead.
+            plot.showGrid(x=False, y=False)
+        else:
+            plot.showGrid(x=tile.show_grid, y=tile.show_grid, alpha=0.25)
+        plot.setLogMode(x=False, y=tile.log_y and not tile.plot3d)
+        # Left blank since 2.1.0, in both cases. The title names every
+        # parameter on the tile and the x channel -- "ALPHA, NZ = f(TIME)" --
+        # so a caption beside the axis repeated it and spent a strip of a tile
+        # that is often one ninth of a page. The unit reaches the reader
+        # through the tick values and the INSPECT tables instead.
+        plot.setLabel("bottom", "", **_AXIS_LABEL_STYLE)
+        plot.setLabel("left", "", **_AXIS_LABEL_STYLE)
+        plot.setTitle(title, color=self._theme.plot_foreground,
+                      size="{0}pt".format(PLOT_TITLE_PT))
+
     # ---------------------------------------------------------- ISO lookup
 
     def _iso_labels(self, iso_param: str):
@@ -1132,7 +1202,22 @@ class PlotTile(pg.PlotWidget):
         return curve_color_key(tile, param, sim_key, iso_label)
 
     def _legend_label(self, tile: TileState, param: str, file_name: str,
-                      sim_id: str, iso_label: str, dash: str, symbol: str) -> str:
+                      sim_id: str, iso_label: str, dash: str, symbol: str,
+                      style_iso_label: str = "") -> str:
+        """The text of one legend row.
+
+        Both ISO identities are written, not just the colour's. A curve can be
+        coloured by one ISO parameter and dashed by another -- or, the case
+        that was plainly broken, coloured by Parameter and dashed by ISO. Then
+        `iso_label` is empty, because colour is not keying on ISO and no colour
+        labels were looked up at all, and "show ISO in the legend" produced
+        nothing: every ISO value collapsed onto one row per parameter, since
+        rows with identical text are merged on purpose.
+
+        Written once when the two modes key on the same parameter, so the
+        common "colour by ISO and dash by ISO" pairing does not say
+        `MACH = 0.75 | MACH = 0.75`.
+        """
         # The dash pattern and marker are shown by the legend's own sample of
         # the curve, so they are deliberately not spelled out in the text.
         del dash, symbol
@@ -1141,10 +1226,18 @@ class PlotTile(pg.PlotWidget):
         if tile.legend_show_param:
             parts.append(param)
 
-        if tile.legend_show_iso and iso_label:
-            iso_name = tile.color_iso_param or tile.style_iso_param
-            if iso_name:
-                parts.append("{0} = {1}".format(iso_name, iso_label))
+        if tile.legend_show_iso:
+            written = set()
+            for name, value in (
+                (tile.color_iso_param if tile.color_mode == ColorMode.ISO else "",
+                 iso_label),
+                (tile.style_iso_param if tile.style_mode == StyleMode.ISO else "",
+                 style_iso_label),
+            ):
+                if not name or not value or name in written:
+                    continue
+                written.add(name)
+                parts.append("{0} = {1}".format(name, value))
 
         if tile.legend_show_file:
             parts.append(file_name)
@@ -1248,9 +1341,9 @@ class PlotTile(pg.PlotWidget):
         # a cache that outlived the thing it describes is worse than none.
         self._projection = None
 
-        for overlay in self._overlays:
-            plot.removeItem(overlay)
-        self._overlays = []
+        # Overlays are NOT dropped here. _draw_overlays() decides at the end
+        # whether what is on the plot still describes the annotations and the
+        # curves, and keeps the items when it does -- see its docstring.
 
         # pyqtgraph keeps exactly one legend per PlotItem and addLegend() hands
         # back the existing one, so recreating it per rebuild is not possible --
@@ -1267,24 +1360,7 @@ class PlotTile(pg.PlotWidget):
         # bindings are re-applied whenever the tile is rebuilt.
         self.apply_mouse_mode()
 
-        plot.showGrid(x=tile.show_grid, y=tile.show_grid, alpha=0.25)
-        plot.setLogMode(x=False, y=tile.log_y and not tile.plot3d)
-        if tile.plot3d:
-            # The axes of a projection are not either data axis, so labelling
-            # them with parameter names would be a lie. The title carries the
-            # three names instead.
-            plot.setLabel("bottom", "", **_AXIS_LABEL_STYLE)
-            plot.setLabel("left", "", **_AXIS_LABEL_STYLE)
-            plot.showGrid(x=False, y=False)
-        else:
-            # Axis labels carry the unit the file declared, which is the one
-            # place it genuinely belongs: "TIME" tells you nothing about
-            # whether the axis is seconds or minutes.
-            plot.setLabel("bottom", "", **_AXIS_LABEL_STYLE)
-            plot.setLabel("left", "", **_AXIS_LABEL_STYLE)
-        title = tile_title(tile).replace("\n", "<br>")
-        plot.setTitle(title, color=self._theme.plot_foreground,
-                      size="{0}pt".format(PLOT_TITLE_PT))
+        self._apply_axes(plot, tile)
 
         if tile.plot3d:
             # A projection stores screen coordinates, not samples, so nothing
@@ -1330,10 +1406,10 @@ class PlotTile(pg.PlotWidget):
             if tile.color_mode == ColorMode.ISO
             else ({}, {})
         )
-        style_iso_labels = (
-            self._iso_labels(tile.style_iso_param)[0]
+        style_iso_labels, style_iso_ranks = (
+            self._iso_labels(tile.style_iso_param)
             if tile.style_mode == StyleMode.ISO
-            else {}
+            else ({}, {})
         )
 
         styles = self._state.styles
@@ -1399,7 +1475,8 @@ class PlotTile(pg.PlotWidget):
                     style_key = color_key
 
                     label = self._legend_label(
-                        tile, param, file_name, sim.sim_id, iso_label, dash, symbol
+                        tile, param, file_name, sim.sim_id, iso_label, dash,
+                        symbol, style_iso_label
                     )
 
                     show_in_legend = tile.show_legend
@@ -1438,15 +1515,23 @@ class PlotTile(pg.PlotWidget):
                     # Rank by what the curve *is*, never by when it turned up.
                     # Whichever field the colour mode is keying on leads, since
                     # that is what the legend rows are distinguishing.
+                    #
+                    # Style-by-ISO ranks second wherever colour is not already
+                    # keying on ISO. Without it a tile coloured by parameter
+                    # and dashed by ISO emitted its rows in the order the runs
+                    # happened to be walked, which is the same reshuffling
+                    # _iso_labels() went to the trouble of ranking away.
+                    style_rank = style_iso_ranks.get(style_iso_label,
+                                                     float("inf"))
                     if tile.color_mode == ColorMode.ISO:
                         rank = (iso_ranks.get(iso_label, float("inf")),
                                 param_rank.get(param, 0),
                                 file_index, sim_index)
                     elif tile.color_mode == ColorMode.PARAMETER:
-                        rank = (param_rank.get(param, 0),
+                        rank = (param_rank.get(param, 0), style_rank,
                                 file_index, sim_index)
                     else:
-                        rank = (file_index, sim_index,
+                        rank = (file_index, sim_index, style_rank,
                                 param_rank.get(param, 0))
                     seen_rank = ranks.get(group_key)
                     if seen_rank is None or rank < seen_rank:
@@ -1468,9 +1553,14 @@ class PlotTile(pg.PlotWidget):
                            [plans[k] for k in order])
 
         if hidden_rows and self._legend is not None:
-            # Say what was left out rather than silently truncating.
-            spacer = pg.PlotDataItem(pen=None, name="... and {0} more".format(
-                hidden_rows))
+            # Say what was left out, and say that it is a cap rather than
+            # missing data: the curves those rows would have named are all
+            # drawn, and turning File or Simulation off in STYLE merges the
+            # identical rows and usually brings the count under the cap.
+            spacer = pg.PlotDataItem(
+                pen=None,
+                name="... and {0} more (legend caps at {1} rows)".format(
+                    hidden_rows, MAX_LEGEND_ROWS))
             plot.addItem(spacer)
             self._groups.append(DrawGroup(spacer))
 
@@ -1611,6 +1701,17 @@ class PlotTile(pg.PlotWidget):
         """Draw the tile as a rotatable 3D projection."""
         if self._legend is not None:
             self._legend.setVisible(False)
+
+        # The overlay list is shared with the 3D box and its tick values, and
+        # this is the one place that clears it on the way into 3D -- markers
+        # and bands left by a two-dimensional pass have no meaning in a
+        # projection and must not survive the switch. Claiming the bookkeeping
+        # here is what stops _draw_overlays(), which runs after this, from
+        # taking the box away again.
+        for overlay in self._overlays:
+            plot.removeItem(overlay)
+        self._overlays = []
+        self._overlays_drawn_for = ("3d",)
 
         if tile.is_empty() or not self._state.plotted_sims():
             self._gizmo.setVisible(False)
@@ -2276,6 +2377,30 @@ class PlotTile(pg.PlotWidget):
         self._texts.set_notes(self.tile_state.texts,
                               self.getPlotItem().getViewBox().boundingRect())
 
+    def _overlay_signature(self, tile: TileState) -> tuple:
+        """Everything the drawn markers and bands are a function of.
+
+        The annotations themselves, the x channel that decides which of the
+        two renderings each one gets, whether they can be dragged, and the
+        curves -- because the dot form finds its sample *in* a curve, and the
+        band form redraws a stretch of one. The curve buffers are compared by
+        address for the same reason and with the same soundness argument as
+        _reuse_signature(): the entries are alive and holding them while this
+        runs.
+        """
+        return (
+            tile.x_param,
+            self._annotations_movable(),
+            tuple((m.x_param, m.position, m.visible, m.color, m.dot_size)
+                  for m in self._state.markers),
+            tuple((a.x_param, a.x_min, a.x_max, a.visible, a.color, a.alpha)
+                  for a in self._state.areas),
+            tuple(sorted(
+                (key, entry.x.ctypes.data, entry.x.size,
+                 entry.y.ctypes.data, entry.y.size)
+                for key, entry in self._curves.items())),
+        )
+
     def _draw_overlays(self) -> None:
         """Markers and shaded bands.
 
@@ -2283,6 +2408,14 @@ class PlotTile(pg.PlotWidget):
         same parameter it is a vertical line. On any other tile it is drawn as a
         dot on each curve, at the sample where the condition holds -- so a
         marker at TIME = 5 shows you where five seconds falls on ALPHA = f(NZ).
+
+        The dot form is what makes this worth guarding. Finding the sample
+        where the condition holds is a search per curve, and the band form
+        redraws a stretch of every curve it crosses, so a thousand-run tile
+        paid both on every rebuild -- including the rebuilds the redraw cache
+        exists to make free, where not one curve and not one annotation had
+        changed. The items are left where they are when nothing they depend on
+        has moved.
         """
         plot = self.getPlotItem()
         tile = self.tile_state
@@ -2291,7 +2424,20 @@ class PlotTile(pg.PlotWidget):
             # Neither form makes sense in a projection: a vertical line is not
             # a plane, and the dot indices refer to the thinned projected
             # arrays rather than to samples. The 3D box carries the scale.
+            #
+            # Returning before the clear below, not after: _rebuild_3d() has
+            # already put the data box and its tick values in _overlays, and
+            # it runs first.
             return
+
+        signature = self._overlay_signature(tile)
+        if signature == self._overlays_drawn_for:
+            return
+        self._overlays_drawn_for = signature
+
+        for overlay in self._overlays:
+            plot.removeItem(overlay)
+        self._overlays = []
 
         for marker in self._state.markers:
             if not marker.visible or not marker.x_param:

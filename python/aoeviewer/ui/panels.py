@@ -101,6 +101,20 @@ ISO_OVERVIEW_MAX_VALUES = 8
 # -- the ticks live in the state, not in the tree -- and the node says so.
 ISO_TREE_MAX_CHILDREN = 400
 
+# How many runs a file may have and still be opened automatically in the DATA
+# tree. Expanding a node is what makes Qt lay out and create view items for
+# every child, so a study of twelve hundred runs opened on load paid for all
+# twelve hundred before anyone had looked at them -- and nobody scrolls
+# through twelve hundred rows to find one. Below this the list is short enough
+# to read, so it opens; above it the file opens on a click, like any other
+# tree, and whichever way the user leaves it is remembered.
+DATA_AUTO_EXPAND_MAX_RUNS = 200
+
+# How long the PARAMS filter box waits for the typing to stop before it
+# refilters. Matches the TEXT panel's commit delay: both exist because the
+# work is per keystroke and the intermediate answers are not read.
+FILTER_IDLE_MS = 400
+
 # Private item roles on the DATA tree's run rows. Both hold the last answer the
 # panel wrote, so a refresh that changes nothing writes nothing -- reading a
 # colour or a tooltip back off a widget to compare against is both awkward and
@@ -151,6 +165,8 @@ class DataPanel(QWidget):
     selection_changed = Signal()
     files_changed = Signal()
     add_files_requested = Signal()
+    # The file indices to re-read, or an empty list meaning every open file.
+    reload_requested = Signal(list)
 
     def __init__(self, session: Session, state: AppState, parent=None):
         super().__init__(parent)
@@ -160,6 +176,10 @@ class DataPanel(QWidget):
         # What the tree was last built from, so a refresh that changes nothing
         # structural can leave the widget items alone. See _tree_signature.
         self._tree_state = None
+        # Which files the user has opened or closed, by path so that it
+        # survives a reload and a rename. A path absent from this has never
+        # been touched, and the run count decides.
+        self._expansion: Dict[str, bool] = {}
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -181,15 +201,27 @@ class DataPanel(QWidget):
         self.tree.setHeaderLabels(["File / run"])
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree.itemChanged.connect(self._on_item_changed)
+        self.tree.itemExpanded.connect(self._on_expanded)
+        self.tree.itemCollapsed.connect(self._on_collapsed)
         self.tree.itemDoubleClicked.connect(lambda *_: self._rename_selected())
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._show_menu)
         layout.addWidget(self.tree, 1)
 
+        file_actions = QHBoxLayout()
         rename = QPushButton("Rename")
         rename.setToolTip("Rename the selected file or run (or double-click it)")
         rename.clicked.connect(self._rename_selected)
-        layout.addWidget(rename)
+        file_actions.addWidget(rename)
+        reload_button = QPushButton("Reload")
+        reload_button.setToolTip(
+            "Re-read the selected file(s) from disk, or every open file when "
+            "nothing is selected.\nUse it after the solver has rewritten its "
+            "output."
+        )
+        reload_button.clicked.connect(self._reload_selected)
+        file_actions.addWidget(reload_button)
+        layout.addLayout(file_actions)
 
         selection = QHBoxLayout()
         # These two are every loaded file at once, which is why the file rows
@@ -355,7 +387,7 @@ class DataPanel(QWidget):
                 # One box per file answers it where the file is.
                 parent.setFlags(parent.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 parent.setCheckState(0, self._file_check_state(file_handle))
-                parent.setExpanded(True)
+                parent.setExpanded(self._should_expand(file_handle))
 
                 for sim in file_handle.simulations:
                     child = QTreeWidgetItem(parent, [sim.name])
@@ -379,6 +411,30 @@ class DataPanel(QWidget):
             self.tree.blockSignals(blocked)
             self.tree.setUpdatesEnabled(True)
             self._updating = False
+
+    def _should_expand(self, file_handle) -> bool:
+        """Whether this file's runs are shown without being asked for."""
+        remembered = self._expansion.get(file_handle.path)
+        if remembered is not None:
+            return remembered
+        return file_handle.simulation_count <= DATA_AUTO_EXPAND_MAX_RUNS
+
+    def _record_expansion(self, item: QTreeWidgetItem, expanded: bool) -> None:
+        if self._updating:
+            # The build sets every node's state itself; only a click counts.
+            return
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if not data or data[0] != "file":
+            return
+        handle = self._session.file(data[1])
+        if handle is not None and handle.path:
+            self._expansion[handle.path] = expanded
+
+    def _on_expanded(self, item: QTreeWidgetItem) -> None:
+        self._record_expansion(item, True)
+
+    def _on_collapsed(self, item: QTreeWidgetItem) -> None:
+        self._record_expansion(item, False)
 
     def _on_item_changed(self, item: QTreeWidgetItem, _column: int) -> None:
         if self._updating:
@@ -514,10 +570,40 @@ class DataPanel(QWidget):
                     "Plot no runs in {0}".format(handle.name),
                     lambda: self._set_file(file_index, False))
 
-        if data and data[0] == "file":
+        if data and data[0] in ("file", "sim"):
             menu.addSeparator()
+            handle = self._session.file(data[1])
+            if handle is not None:
+                menu.addAction(
+                    "Reload {0} from disk".format(handle.name),
+                    lambda: self.reload_requested.emit([data[1]]))
+
+        if data and data[0] == "file":
             menu.addAction("Copy full path", lambda: self._copy_path(data[1]))
         menu.exec(self.tree.viewport().mapToGlobal(position))
+
+    def _reload_selected(self) -> None:
+        """Ask for the selected files to be re-read from disk.
+
+        Selecting a run means the file it belongs to: there is no such thing
+        as reloading one run, and the alternative -- refusing, because a run
+        row is not a file row -- would be pedantry about a gesture whose
+        meaning is not in doubt. Selecting nothing means every open file,
+        which is what "the solver has just finished" usually calls for.
+
+        The panel does not reload anything itself. Re-reading a 578 MB file is
+        a full parse, and every call into the core belongs on the worker
+        thread the window owns; this only says which files.
+        """
+        targets = sorted({
+            payload[1]
+            for payload in (
+                item.data(0, Qt.ItemDataRole.UserRole)
+                for item in self.tree.selectedItems()
+            )
+            if payload and payload[0] in ("file", "sim")
+        })
+        self.reload_requested.emit(targets)
 
     def _copy_path(self, file_index: int) -> None:
         handle = self._session.file(file_index)
@@ -601,7 +687,19 @@ class ParameterPanel(QWidget):
         layout.addWidget(_title("Y axis"))
         self.filter_edit = QLineEdit()
         self.filter_edit.setPlaceholderText("Filter (wildcards: AL* )")
-        self.filter_edit.textChanged.connect(self._apply_filter)
+        # Filtering hides and shows rows, and these files carry hundreds of
+        # channels -- 585 in one of the dialects this reads -- so a keystroke
+        # is several hundred setHidden() calls and a relayout of the list. The
+        # answer between two keystrokes of the same word is not one anybody
+        # reads, so the list is refiltered once the typing pauses instead. The
+        # interval is the one the TEXT panel already settled on for the same
+        # reason, short enough to feel immediate.
+        self._filter_timer = QTimer(self)
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.setInterval(FILTER_IDLE_MS)
+        self._filter_timer.timeout.connect(
+            lambda: self._apply_filter(self.filter_edit.text()))
+        self.filter_edit.textChanged.connect(self._on_filter_typed)
         layout.addWidget(self.filter_edit)
 
         self.y_list = QListWidget()
@@ -738,7 +836,20 @@ class ParameterPanel(QWidget):
         for row in range(count):
             item = self.y_list.item(row)
             names.append(item.data(Qt.ItemDataRole.UserRole) or item.text())
-        wanted = order_parameters(names, self._state.tile.y_params)
+
+        # Ordered against the session's own order, not against the order the
+        # list is in. Reordering the list in place against itself has no way
+        # back: a name promoted to the top while it was ticked stayed there
+        # once it was unticked, because by then "the order as given" *was* the
+        # promoted one and order_parameters had nothing else to put it back
+        # into. Starting from the canonical order every time makes the
+        # promotion a function of the current selection alone.
+        canonical = [name for name in self._session.parameters if name in set(names)]
+        # Anything the list holds that the session no longer lists keeps its
+        # relative order at the end rather than vanishing from the rebuild.
+        known = set(canonical)
+        canonical.extend(name for name in names if name not in known)
+        wanted = order_parameters(canonical, self._state.tile.y_params)
         if wanted == names:
             return
         blocked = self.y_list.blockSignals(True)
@@ -804,6 +915,12 @@ class ParameterPanel(QWidget):
             return
         self._session.set_alias(alias, target)
         self.alias_requested.emit(alias)
+
+    def _on_filter_typed(self, _text: str) -> None:
+        """Restart the idle timer. Nothing is hidden or shown until it fires."""
+        if self._updating:
+            return
+        self._filter_timer.start()
 
     def _apply_filter(self, text: str) -> None:
         pattern = text.strip().upper()
@@ -1436,6 +1553,12 @@ class IsoPanel(QWidget):
 
     filter_changed = Signal()
 
+    # A class attribute, not only an instance one. Every read of it decides
+    # whether the tree may be destroyed, and a missing attribute must answer
+    # "no rebuild is in flight" rather than raise -- or, under the test stubs,
+    # hand back a truthy placeholder and disable every rebuild in the panel.
+    _handling_item_change = False
+
     def __init__(self, session: Session, state: AppState, parent=None):
         super().__init__(parent)
         self._session = session
@@ -1456,6 +1579,13 @@ class IsoPanel(QWidget):
         self._expanded = set()
         self._tree_state = None
         self._values_cache = {}
+        # True only while Qt is dispatching itemChanged for a row of this
+        # tree. Destroying tree items in that window destroys the very item
+        # the signal is being delivered for, and Qt goes on to touch it after
+        # the slot returns -- a hard crash, not an exception. See
+        # _rebuild_tree(). The class carries the same default, so a panel
+        # built without __init__ answers it too.
+        self._handling_item_change = False
 
         layout.addWidget(_title("Filter by"))
 
@@ -1645,16 +1775,37 @@ class IsoPanel(QWidget):
         if not force and signature == previous:
             self._update_summary()
             return
-        if (not force and previous is not None
+        if (previous is not None
                 and self._tree_shape(signature) == self._tree_shape(previous)):
             # Only ticks moved. The rows are right, so write the ticks where
             # they are rather than destroying several hundred widget items and
             # building them again -- which is what made this tree blink every
             # time a value was toggled, and took the scroll position with it.
+            #
+            # Tested before `force`, not after. A forced rebuild whose rows
+            # come out identical has nothing to rebuild, and the caller that
+            # asks for one is usually the caller that must not get one: "tick
+            # every value of this parameter" runs inside itemChanged, where
+            # destroying the tree is fatal (below). Cheaper everywhere else
+            # for the same reason the unforced path is.
             self._tree_state = signature
             self._sync_tree_ticks(signature)
             self._update_summary()
             return
+
+        if self._handling_item_change:
+            # The rows really have moved, and we are inside itemChanged, so
+            # they cannot be replaced now: tree.clear() would delete the
+            # QTreeWidgetItem Qt is still dispatching for, and the crash lands
+            # in C++ after this slot returns rather than anywhere a traceback
+            # could point at. Leave the tree as it is, forget the signature so
+            # nothing trusts it, and rebuild on the next turn of the event
+            # loop, by which time the signal has been fully delivered.
+            self._tree_state = None
+            QTimer.singleShot(0, self._rebuild_tree_deferred)
+            self._update_summary()
+            return
+
         self._tree_state = signature
 
         selected = self._selected_param()
@@ -1674,6 +1825,19 @@ class IsoPanel(QWidget):
 
         self._select_param(selected)
         self._update_summary()
+
+    def _rebuild_tree_deferred(self) -> None:
+        """Rebuild once Qt has finished delivering the signal that asked for it.
+
+        Guarded against the panel having been destroyed in between, which a
+        workspace load can do: a queued call outliving its widget is a second
+        way to crash on a deleted object, and this exists to stop the first.
+        """
+        try:
+            self._rebuild_tree(force=True)
+        except RuntimeError:
+            # The C++ side of the tree is gone. Nothing left to draw into.
+            pass
 
     @staticmethod
     def _tree_shape(signature):
@@ -1708,10 +1872,9 @@ class IsoPanel(QWidget):
                 node = self.tree.topLevelItem(index)
                 if node is None:
                     break
-                name, active, grouped, value_count, outside, entries, _exp = row
+                name, _active, grouped, value_count, outside, entries, _exp = row
 
-                wanted = (Qt.CheckState.Checked if active
-                          else Qt.CheckState.Unchecked)
+                wanted = self._param_check_state(entries)
                 if node.checkState(0) != wanted:
                     node.setCheckState(0, wanted)
 
@@ -1734,6 +1897,31 @@ class IsoPanel(QWidget):
             self.tree.blockSignals(blocked)
             self._updating = False
 
+    @staticmethod
+    def _param_check_state(entries):
+        """The parameter node's box, read off the values under it.
+
+        The box used to carry the filter's own on/off flag, which put two
+        unrelated meanings on the one control the user reaches for first:
+        clicking a parameter to tick all of its values -- the obvious reading
+        of a checkbox over a list of checkboxes -- silently paused the filter
+        instead. It selects now, and the flag moved to the context menu, where
+        it is named.
+
+        Tri-state so the box can say "some": a parameter with four of twelve
+        values ticked is neither on nor off, and showing it as either would be
+        a lie the user then clicks on.
+        """
+        total = len(entries)
+        if total == 0:
+            return Qt.CheckState.Unchecked
+        on = sum(1 for _label, ticked, _key in entries if ticked)
+        if on == 0:
+            return Qt.CheckState.Unchecked
+        if on == total:
+            return Qt.CheckState.Checked
+        return Qt.CheckState.PartiallyChecked
+
     def _param_node_text(self, name, grouped, value_count, outside,
                          entries) -> str:
         """The heading of one parameter's node, badge and warnings included.
@@ -1748,6 +1936,12 @@ class IsoPanel(QWidget):
         parts = [name]
         if badge:
             parts.append(badge)
+        iso = self._state.iso_states.get(name)
+        if iso is not None and not iso.active:
+            # Said in words because the checkbox no longer says it: the values
+            # are still ticked as the user left them, and the filter is simply
+            # not being applied.
+            parts.append("paused")
         if grouped:
             parts.append("grouped")
         if value_count == 0:
@@ -1776,13 +1970,15 @@ class IsoPanel(QWidget):
             [label for label, _on, _key in entries],
             [label for label, on, _key in entries if on])
 
-    def _add_param_node(self, name, active, grouped, value_count, outside,
+    def _add_param_node(self, name, _active, grouped, value_count, outside,
                         entries, expanded) -> None:
+        # _active is still in the signature because the signature row is
+        # unpacked positionally, but the box reads the values now; the filter's
+        # own flag shows as "paused" in the heading instead.
         node = QTreeWidgetItem(self.tree, [self._param_node_text(
             name, grouped, value_count, outside, entries)])
         node.setFlags(node.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-        node.setCheckState(
-            0, Qt.CheckState.Checked if active else Qt.CheckState.Unchecked)
+        node.setCheckState(0, self._param_check_state(entries))
         node.setData(0, Qt.ItemDataRole.UserRole, ("param", name))
         node.setToolTip(0, self._param_node_tip(entries))
 
@@ -1883,6 +2079,15 @@ class IsoPanel(QWidget):
         menu.addAction("Select all", lambda: self._set_all(True, param))
         menu.addAction("Select none", lambda: self._set_all(False, param))
         menu.addSeparator()
+        # Where the parameter's on/off flag lives now that its checkbox ticks
+        # values instead. Pausing keeps the value selection exactly as it is
+        # and stops the filter narrowing anything, which is what you want to
+        # check whether a filter is the reason a curve went missing.
+        pause = menu.addAction("Use this filter")
+        pause.setCheckable(True)
+        pause.setChecked(bool(iso is not None and iso.active))
+        pause.toggled.connect(lambda on, p=param: self._set_active(p, on))
+        menu.addSeparator()
         menu.addAction("Remove filter", lambda: self._remove_filter(param))
         menu.exec(self.tree.viewport().mapToGlobal(position))
 
@@ -1910,6 +2115,20 @@ class IsoPanel(QWidget):
         self._expanded.discard(param)
         self._state.dirty = True
         self.refresh()
+        self.apply_filter()
+
+    def _set_active(self, param: str, active: bool) -> None:
+        """Apply this parameter's filter, or stop applying it.
+
+        Its value selection is untouched either way, so resuming returns to
+        exactly what was chosen rather than to everything.
+        """
+        iso = self._state.iso_states.get(param)
+        if iso is None:
+            return
+        iso.active = bool(active)
+        self._state.dirty = True
+        self._rebuild_tree(force=True)
         self.apply_filter()
 
     def _set_grouped(self, param: str, grouped: bool) -> None:
@@ -1967,8 +2186,22 @@ class IsoPanel(QWidget):
             return
         checked = item.checkState(0) == Qt.CheckState.Checked
 
+        # Everything below runs while Qt is still delivering this signal for
+        # `item`, so nothing below may destroy it. _rebuild_tree() reads this
+        # flag and defers rather than clearing the tree.
+        self._handling_item_change = True
+        try:
+            self._apply_item_change(data, checked)
+        finally:
+            self._handling_item_change = False
+
+    def _apply_item_change(self, data, checked: bool) -> None:
         if data[0] == "param":
-            self._state.iso_state(data[1]).active = checked
+            # Tick every value of this parameter, or untick every one of them.
+            # _set_all() re-syncs and re-applies on its own, so there is
+            # nothing left for the tail of this function to do.
+            self._set_all(checked, data[1])
+            return
         elif data[0] == "entry":
             _kind, param, key = data
             iso = self._state.iso_states.get(param)
@@ -2019,6 +2252,8 @@ class IsoPanel(QWidget):
                 parts = [param]
                 if badge:
                     parts.append(badge)
+                if not iso.active:
+                    parts.append("paused")
                 if iso.grouped:
                     parts.append("grouped")
                 if not self._distinct(param):
@@ -2032,8 +2267,9 @@ class IsoPanel(QWidget):
                 node.setText(0, "   ".join(parts))
                 node.setToolTip(0, iso_selection_summary(labels, selected))
                 node.setCheckState(
-                    0, Qt.CheckState.Checked if iso.active
-                    else Qt.CheckState.Unchecked)
+                    0, self._param_check_state(
+                        [(label, label in set(selected), None)
+                         for label in labels]))
         finally:
             self._updating = was_updating
         # The rows now say something the stored signature does not, so the next
@@ -2056,7 +2292,12 @@ class IsoPanel(QWidget):
             # has to turn those off too.
             for value in self._distinct(param):
                 iso.value_enabled[value] = on
-        iso.active = True
+        if on:
+            # Choosing what to show is a statement that the filter should be
+            # applied. Unticking everything is not the reverse of that: it says
+            # nothing about whether the filter is paused, so a paused one stays
+            # paused rather than being switched on to admit nothing.
+            iso.active = True
         self._state.dirty = True
         self._rebuild_tree(force=True)
         self.apply_filter()
@@ -2176,11 +2417,18 @@ class StylePanel(QWidget):
         layout.addWidget(_title("Colour by"))
         mode_row = QHBoxLayout()
         self.mode_group = QButtonGroup(self)
-        self.mode_buttons = []
-        for index, label in enumerate(("Simulation", "Parameter", "ISO")):
+        # Keyed by mode, laid out in reading order, and the two are not the
+        # same list. A button's id is its ColorMode -- which is also what a
+        # workspace stores -- so the row can be reordered without touching
+        # either. Parameter leads because it is the default and because it is
+        # the first question of a tile: which quantity is this line.
+        self.mode_buttons = {}
+        for mode, label in ((ColorMode.PARAMETER, "Parameter"),
+                            (ColorMode.SIMULATION, "Simulation"),
+                            (ColorMode.ISO, "ISO")):
             radio = QRadioButton(label)
-            self.mode_group.addButton(radio, index)
-            self.mode_buttons.append(radio)
+            self.mode_group.addButton(radio, int(mode))
+            self.mode_buttons[mode] = radio
             mode_row.addWidget(radio)
         self.mode_group.idClicked.connect(self._on_mode_changed)
         layout.addLayout(mode_row)
@@ -2310,7 +2558,9 @@ class StylePanel(QWidget):
         self.legend_checks = {}
         for field, label, tip in (
             ("legend_show_param", "Parameter", "The parameter's name"),
-            ("legend_show_iso", "ISO", "The ISO parameter and this run's value"),
+            ("legend_show_iso", "ISO",
+             "The ISO parameter and this run's value -- both of them when "
+             "Colour by and Style by key on different ones"),
             ("legend_show_file", "File", "The file the run came from"),
             ("legend_show_sim", "Simulation", "The run's own identifier"),
         ):
@@ -2375,9 +2625,9 @@ class StylePanel(QWidget):
             # A bold label as well as the indicator. Two independent signals
             # for the same fact means it survives any platform style that
             # decides to draw the indicator its own way.
-            for index, radio in enumerate(self.mode_buttons):
+            for mode, radio in self.mode_buttons.items():
                 font = radio.font()
-                font.setBold(index == int(tile.color_mode))
+                font.setBold(mode == tile.color_mode)
                 radio.setFont(font)
             self.iso_row.setVisible(tile.color_mode == ColorMode.ISO)
 
@@ -2679,7 +2929,8 @@ class StylePanel(QWidget):
         # Calling the same method rather than repeating its choice: which
         # parameter to prefer is a rule with one owner, and two copies of it
         # would eventually disagree about a tile the user never touched.
-        self._state.apply_parameter_defaults(self._session.parameters)
+        self._state.apply_parameter_defaults(
+            self._session.plottable_parameters)
         self._state.dirty = True
         self.refresh()
         self.style_changed.emit()
@@ -2696,7 +2947,8 @@ class StylePanel(QWidget):
         if self._updating:
             return
         self._state.tile.style_mode = StyleMode(index)
-        self._state.apply_parameter_defaults(self._session.parameters)
+        self._state.apply_parameter_defaults(
+            self._session.plottable_parameters)
         self._state.dirty = True
         self.refresh()
         self.style_changed.emit()

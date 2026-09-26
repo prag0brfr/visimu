@@ -21,6 +21,3 @@ __pycache__/
 *.aoec.*.tmp
 data/
 _archive_/
-
-# Scratch folders that live beside the project on a working machine.
-Claude outputs/

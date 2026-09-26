@@ -269,6 +269,28 @@ class Session:
         count = lib.aoe_param_count(self._handle)
         return [decode(lib.aoe_param(self._handle, i)) for i in range(count)]
 
+    @property
+    def plottable_parameters(self) -> List[str]:
+        """`parameters`, but empty while no file is open.
+
+        Computed channels and aliases outlive the files they were defined
+        against -- deliberately, so that closing a study and opening the next
+        one does not throw away the formulas and the readable names set up for
+        it. What they do not outlive is the ability to plot anything: a
+        formula over columns that are not loaded evaluates to nothing, and an
+        alias resolves to a channel no file carries.
+
+        So `parameters` is the right list for "what may the user name", and a
+        list of names that can carry an axis is a different question.
+        Answering both with the same call is what let a tile's x axis be
+        re-pointed at an alias while the session held no files at all: closing
+        the old study left `parameters` non-empty, so the code meant to leave
+        a closed session alone did not recognise one.
+
+        Use this wherever a channel is being *chosen* on the user's behalf.
+        """
+        return self.parameters if self.file_count else []
+
     def set_alias(self, alias: str, target: str) -> None:
         lib.aoe_set_alias(self._handle, encode(alias), encode(target))
 

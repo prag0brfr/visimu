@@ -229,7 +229,7 @@ bool Dataset::open(const std::string& path) {
             auto sim = std::unique_ptr<Simulation>(new Simulation());
             sim->id = cache_->simulation_id(s);
             sim->display_name = sim->id;
-            sim->unique_key = name_ + "::" + sim->id + "::" + std::to_string(s);
+            sim->unique_key = key_name() + "::" + sim->id + "::" + std::to_string(s);
             sim->data_begin = static_cast<std::size_t>(cache_->data_begin(s));
             sim->data_end = static_cast<std::size_t>(cache_->data_end(s));
             sims_.push_back(std::move(sim));
@@ -327,7 +327,7 @@ void Dataset::build_index(const MappedFile& file) {
                     sim->id = "SIM_" + std::to_string(sims_.size() + 1);
 
                 sim->display_name = sim->id;
-                sim->unique_key = name_ + "::" + sim->id + "::" + std::to_string(sims_.size());
+                sim->unique_key = key_name() + "::" + sim->id + "::" + std::to_string(sims_.size());
                 sim->data_begin = static_cast<std::size_t>(line.next - base);
                 sim->data_end = file.size();
 

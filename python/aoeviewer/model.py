@@ -314,7 +314,12 @@ class TileState:
     show_grid: bool = True
     show_points: bool = False
 
-    color_mode: ColorMode = ColorMode.SIMULATION
+    # Parameter, not simulation. A tile is nearly always asked "which
+    # quantity is this line", and colouring by run answers a different
+    # question -- one that a study of twenty-five runs answers with
+    # twenty-five colours that name nothing the user chose. Colour by run is
+    # one click away for the case where the runs are the subject.
+    color_mode: ColorMode = ColorMode.PARAMETER
     color_iso_param: str = ""
     style_mode: StyleMode = StyleMode.NONE
     style_iso_param: str = ""
@@ -1220,12 +1225,22 @@ class AppState:
                     notes.append("{0}: z axis {1} cleared".format(where, tile.z_param))
                     tile.z_param = ""
 
-                if tile.color_iso_param and tile.color_iso_param not in names:
+                # Both ISO encodings, not just the colour's. Style-by-ISO
+                # arrived in 2.1.0 and this repair did not follow it, so a tile
+                # dashed by a parameter the new files do not carry kept naming
+                # it: curve_line_key() then fell through to the colour key and
+                # the dashes quietly stopped distinguishing anything, with the
+                # STYLE tab still showing the old parameter as the answer.
+                for field, label in (("color_iso_param", "colour-by"),
+                                     ("style_iso_param", "style-by")):
+                    current = getattr(tile, field)
+                    if not current or current in names:
+                        continue
                     configured = [p for p in self.iso_states if p in names]
                     replacement = configured[0] if configured else ""
-                    notes.append("{0}: colour-by {1} -> {2}".format(
-                        where, tile.color_iso_param, replacement or "none"))
-                    tile.color_iso_param = replacement
+                    notes.append("{0}: {1} {2} -> {3}".format(
+                        where, label, current, replacement or "none"))
+                    setattr(tile, field, replacement)
 
         if notes:
             self.dirty = True
@@ -1421,7 +1436,7 @@ class AppState:
     def to_dict(self) -> dict:
         return {
             "version": 3,
-            "app_version": "2.1.0",
+            "app_version": "2.1.1",
             "pages": [p.to_dict() for p in self.pages],
             "active_page": self.active_page,
             "selected_sims": sorted(list(self.selected_sims)),
@@ -1485,17 +1500,46 @@ class AppState:
 
 
 def save_workspace(path: str, state: AppState, files: Sequence[str],
-                   computed: Dict[str, str], aliases: Dict[str, str]) -> None:
+                   computed: Dict[str, str], aliases: Dict[str, str],
+                   display_names: Optional[Dict[str, dict]] = None) -> None:
     """Write a workspace as JSON.
 
     JSON rather than an ad-hoc delimited text format: such a format breaks
     the moment a file path or parameter name contained the delimiter, and could
     not be extended without a version bump nobody implemented.
+
+    `display_names` carries the labels the user gave files and runs in the DATA
+    tab. It is optional and written only when it holds something, so a session
+    in which nothing was renamed writes the same keys 2.1.0 wrote, and a reader
+    that does not know these two ignores them. That is why they are extra keys
+    rather than a schema bump: nothing older needs to understand them to keep
+    working, and nothing newer is confused by their absence.
     """
     payload = state.to_dict()
     payload["files"] = list(files)
     payload["computed"] = dict(computed)
     payload["aliases"] = dict(aliases)
+    if display_names:
+        file_names = {
+            key: value
+            for key, value in (display_names.get("files") or {}).items()
+            if isinstance(key, str) and isinstance(value, str) and value
+        }
+        sim_names = {}
+        for file_key, per_sim in (display_names.get("simulations") or {}).items():
+            if not isinstance(file_key, str) or not isinstance(per_sim, dict):
+                continue
+            kept = {
+                sim_key: name
+                for sim_key, name in per_sim.items()
+                if isinstance(sim_key, str) and isinstance(name, str) and name
+            }
+            if kept:
+                sim_names[file_key] = kept
+        if file_names:
+            payload["file_names"] = file_names
+        if sim_names:
+            payload["sim_names"] = sim_names
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2)
 

@@ -270,10 +270,14 @@ class TestInspectWiring(unittest.TestCase):
 class TestDrawPathWiring(unittest.TestCase):
     """Static checks on the parts of the tile that cannot be run here."""
 
-    def _source(self, module: str, class_name: str, method_name: str) -> str:
+    def _read(self, module: str) -> str:
         path = os.path.join(_PACKAGE, *module.split("/"))
         with open(path, encoding="utf-8") as handle:
-            source = handle.read()
+            return handle.read()
+
+    def _source(self, module: str, class_name: str, method_name: str) -> str:
+        path = os.path.join(_PACKAGE, *module.split("/"))
+        source = self._read(module)
         tree = ast.parse(source, filename=path)
         for node in ast.walk(tree):
             if isinstance(node, ast.ClassDef) and node.name == class_name:
@@ -352,28 +356,85 @@ class TestDrawPathWiring(unittest.TestCase):
         self.assertIn("_loaded_signature = None", body,
                       "refresh_all() must forget the loaded set")
 
-        # The watch timer reaches it through refresh_all() on the reload path,
-        # and has nothing to forget on the other one -- see the test below.
-        watch = self._source("ui/main_window.py", "MainWindow",
-                             "_check_for_changes")
-        self.assertIn("refresh_all", watch)
+        # A reload replaces every sample buffer the plots were holding, so it
+        # reaches refresh_all() rather than repainting on its own.
+        reload_body = self._source("ui/main_window.py", "MainWindow",
+                                   "reload_files")
+        self.assertIn("refresh_all", reload_body)
 
-    def test_declining_a_reload_does_not_reload(self):
-        """"No" used to reload anyway.
+    def test_a_colour_mode_radio_is_identified_by_its_mode(self):
+        """The row may be reordered; the ids may not follow it.
 
-        The only way to stop the timer asking again was to re-read the
-        timestamps, and re-reading them *is* a reload -- so declining swapped
-        the data under the plots, which is the one thing the question is asked
-        to prevent. The refusal is remembered as a fact about the file on disk
-        instead, so the loaded data is left alone and a later change asks again.
+        A button's id is what idClicked hands to _on_mode_changed(), which
+        turns it straight into a ColorMode -- and a ColorMode is what a
+        workspace stores. Registering the buttons by position instead, which
+        is what enumerate() over the labels did, means reordering the row
+        silently re-labels every saved tile: "Colour by Simulation" reads back
+        as Parameter.
         """
-        body = self._source("ui/main_window.py", "MainWindow",
-                            "_check_for_changes")
-        _yes, _sep, no_branch = body.partition("else:")
-        self.assertTrue(_sep, "the decline branch has gone")
-        self.assertNotIn("reload()", no_branch,
-                         "declining a reload must not reload")
-        self.assertIn("_declined_reloads", no_branch)
+        body = self._source("ui/panels.py", "StylePanel", "__init__")
+        colour, _sep, _rest = body.partition('_title("Style by")')
+        self.assertTrue(_sep, "the Style by section has moved")
+        self.assertIn("self.mode_group.addButton(radio, int(mode))", colour)
+
+        order = [name for name in ("PARAMETER", "SIMULATION", "ISO")
+                 if "ColorMode." + name in colour]
+        self.assertEqual(
+            order, ["PARAMETER", "SIMULATION", "ISO"],
+            "Parameter leads the Colour by row")
+        self.assertLess(colour.index('"Parameter"'), colour.index('"Simulation"'))
+
+    def test_axes_are_chosen_from_what_can_actually_be_plotted(self):
+        """Not from `parameters`, which outlives the files.
+
+        Formulas and aliases stay defined when a study is closed, so
+        `parameters` is non-empty with nothing open -- and both of these
+        choose a channel on the user's behalf. Reading the plain list there is
+        what re-pointed every tile's x axis at an alias while the session held
+        no files at all.
+        """
+        for method in ("refresh_all", "refresh_plots"):
+            body = self._source("ui/main_window.py", "MainWindow", method)
+            for call in ("resolve_missing_parameters", "apply_parameter_defaults"):
+                if call not in body:
+                    continue
+                self.assertIn("plottable_parameters", body,
+                              "{0}() must not choose from session.parameters"
+                              .format(method))
+
+    def test_reloading_a_file_happens_on_the_worker(self):
+        """Re-reading a 578 MB file is a full parse.
+
+        It is also a call into a session that is not internally synchronised,
+        so it belongs in a submitted task like every other one -- and the
+        panel that owns the button must not make the call itself.
+        """
+        body = self._source("ui/main_window.py", "MainWindow", "reload_files")
+        self.assertIn("self.tasks.submit", body)
+        before_work, _sep, _after = body.partition("def work():")
+        self.assertTrue(_sep, "reload_files() no longer submits a worker body")
+        self.assertNotIn(".reload()", before_work,
+                         "the core must not be re-read on the GUI thread")
+
+        panel = self._source("ui/panels.py", "DataPanel", "_reload_selected")
+        self.assertIn("reload_requested.emit", panel)
+        self.assertNotIn(".reload()", panel,
+                         "the panel asks for a reload, it does not perform one")
+
+    def test_nothing_polls_the_disk(self):
+        """The 3-second watch timer is gone, and must stay gone.
+
+        It interrupted work that had nothing to do with the file it was asking
+        about, and it could not be trusted anyway: a solver halfway through
+        rewriting its output is a file that has changed and must not be read.
+        Whether the data on disk is finished is a question only the person
+        running the solver can answer, so they answer it -- with Reload.
+        """
+        source = self._read("ui/main_window.py")
+        for gone in ("_watch_timer", "_check_for_changes", "_declined_reloads",
+                     "_suppress_reload_prompt"):
+            self.assertNotIn(gone, source,
+                             "{0} belongs to the disk poller".format(gone))
 
     def test_enabling_the_ui_twice_over_does_nothing(self):
         """Disabling a widget changes how it is drawn, so every plot in the grid

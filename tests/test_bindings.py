@@ -72,6 +72,84 @@ class TestLoading(SampleFileMixin, unittest.TestCase):
         # or legends and simulation keys collide.
         self.assertNotEqual(self.file.name, second.name)
 
+    def test_formulas_and_aliases_are_not_axis_candidates_on_their_own(self):
+        """Swapping one study for another must not move an x axis.
+
+        Removing a file leaves its formulas and aliases defined -- on purpose,
+        so that closing a study and opening the next one does not throw away
+        the work set up for it. `parameters` therefore comes back non-empty
+        with nothing open at all, and the code that repairs tiles naming
+        absent channels did not recognise a closed session: it "repaired"
+        every tile by pointing its x axis at whichever alias sorted first, and
+        the study opened next found that name perfectly valid and left it
+        there. Remove sample1, add sample2, and every tile had lost TIME.
+        """
+        self.session.set_computed("CLIMB", "deriv(ALT, TIME)")
+        self.session.set_alias("Angle of attack", "ALPHA")
+        self.assertEqual(self.session.plottable_parameters,
+                         self.session.parameters)
+        self.assertIn("TIME", self.session.plottable_parameters)
+
+        self.session.remove_file(0)
+        # Still defined, and still offered wherever a name may be typed.
+        self.assertEqual(sorted(self.session.parameters),
+                         ["Angle of attack", "CLIMB"])
+        # But nothing is open, so nothing is a candidate for an axis.
+        self.assertEqual(self.session.plottable_parameters, [])
+
+        self.session.add_file(self.path)
+        self.assertIn("TIME", self.session.plottable_parameters)
+        self.assertIn("CLIMB", self.session.plottable_parameters)
+
+    def test_swapping_studies_keeps_the_x_axis(self):
+        """The reported sequence, end to end."""
+        from aoeviewer.model import AppState
+
+        self.session.set_alias("Angle of attack", "ALPHA")
+        state = AppState()
+        state.tile.x_param = "TIME"
+        state.tile.y_params = ["ALT"]
+
+        for step in ("remove", "add"):
+            if step == "remove":
+                self.session.remove_file(0)
+            else:
+                self.session.add_file(self.path)
+            available = self.session.plottable_parameters
+            state.resolve_missing_parameters(available)
+            state.apply_parameter_defaults(available)
+            self.assertEqual(state.tile.x_param, "TIME", step)
+
+    def test_reloading_keeps_the_keys_a_rename_did_not_change(self):
+        """Renaming is a label; reloading re-reads the file. Neither is an
+        identity change, so a run must come out of both with the key it went
+        in with.
+
+        A run's key is built from the file's name, and reload() re-opens the
+        dataset and rebuilds every key -- so while that name was the display
+        name, renaming a file and then reloading it renamed every run's key
+        with it, and every colour, dash and marker the user had chosen came
+        back attached to nothing. The key is built from the name the file was
+        first given instead, which renaming does not touch.
+        """
+        before = [sim.key for sim in self.file.simulations]
+
+        self.file.rename("Nominal climb")
+        self.assertEqual([sim.key for sim in self.file.simulations], before,
+                         "renaming must not move a run's identity")
+
+        self.assertTrue(self.file.reload())
+        self.assertEqual(self.file.name, "Nominal climb")
+        self.assertEqual([sim.key for sim in self.file.simulations], before,
+                         "reloading must not move a run's identity either")
+
+    def test_reloading_re_reads_the_file(self):
+        self.assertTrue(self.file.reload())
+        self.assertEqual(self.file.simulation_count, self.sims)
+        self.assertEqual(self.file.simulations[0].sim_id, "RUN_001")
+        self.assertEqual(
+            self.session.channel(0, 0, "TIME").size, self.rows)
+
     def test_channel_is_a_zero_copy_view(self):
         data = self.session.channel(0, 0, "TIME")
         self.assertEqual(data.dtype, np.float32)
@@ -1506,6 +1584,7 @@ class TestParameterResolution(unittest.TestCase):
         tile.y_params = ["ALSO_GONE"]
         tile.z_param = "MISSING_Z"
         tile.color_iso_param = "MISSING_ISO"
+        tile.style_iso_param = "MISSING_STYLE_ISO"
         return state, tile
 
     def test_a_missing_x_axis_is_re_pointed_and_reported(self):
@@ -1527,6 +1606,24 @@ class TestParameterResolution(unittest.TestCase):
         state.resolve_missing_parameters(["TIME", "ALPHA"])
         self.assertEqual(tile.z_param, "")
         self.assertEqual(tile.color_iso_param, "")
+
+    def test_a_missing_style_iso_parameter_is_cleared_too(self):
+        # Style-by-ISO arrived in 2.1.0 and this repair did not follow it. A
+        # tile left naming a parameter the new files lack falls through to the
+        # colour key, so its dashes stop distinguishing anything while the
+        # STYLE tab still shows the old parameter as the answer.
+        state, tile = self._state()
+        notes = state.resolve_missing_parameters(["TIME", "ALPHA"])
+        self.assertEqual(tile.style_iso_param, "")
+        self.assertTrue(any("style-by" in n for n in notes))
+
+    def test_both_iso_encodings_move_to_a_parameter_that_is_there(self):
+        state, tile = self._state()
+        iso = state.iso_state("MACH")
+        iso.active = True
+        state.resolve_missing_parameters(["TIME", "ALPHA", "MACH"])
+        self.assertEqual(tile.color_iso_param, "MACH")
+        self.assertEqual(tile.style_iso_param, "MACH")
 
     def test_nothing_happens_with_no_files_open(self):
         state, tile = self._state()

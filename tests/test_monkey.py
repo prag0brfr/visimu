@@ -872,6 +872,10 @@ class TestLegendEverywhere(unittest.TestCase):
         other = state.page.tiles[1]
         other.x_param, other.y_params = "MACH", ["AOA", "BETA"]
         other.log_y = False
+        # Set explicitly, and to the mode the source does *not* have: left at
+        # the default this assertion says nothing, because the default is what
+        # the source carries too.
+        other.color_mode = ColorMode.SIMULATION
         other.lock_y, other.y_min, other.y_max = True, -3.0, 7.0
 
         state.apply_legend_everywhere(source)

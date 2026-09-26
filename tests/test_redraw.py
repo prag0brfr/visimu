@@ -72,6 +72,8 @@ def make_tile(index: int = 0) -> pt.PlotTile:
     tile._overlays = []
     tile._legend = None
     tile._border_active = None
+    tile._axes_applied = None
+    tile._overlays_drawn_for = None
     return tile
 
 
@@ -471,6 +473,11 @@ class _FakeSession:
 
     def __init__(self):
         self.parameters = ["TIME", "ALT", "MACH"]
+        self.file_count = 1
+
+    @property
+    def plottable_parameters(self):
+        return list(self.parameters) if self.file_count else []
 
     def file(self, index):
         return None
@@ -824,12 +831,31 @@ class TestIsoTree(unittest.TestCase):
             self.assertEqual(node.child(index).checkState(0),
                              Qt.CheckState.Checked)
 
-    def test_the_parameter_checkbox_is_the_filter_switch(self):
+    def test_the_parameter_checkbox_reads_its_values(self):
+        # It is a select-all, not the filter switch: full when every value is
+        # ticked, empty when none is, and partial in between. The filter's own
+        # flag is in the context menu and says so in the row's text.
         iso = self.panel._state.iso_state("MACH")
-        iso.active = False
         self.panel._rebuild_tree()
         self.assertEqual(node_named(self.panel, "MACH").checkState(0),
+                         Qt.CheckState.Checked)
+
+        iso.value_enabled[self.panel._distinct("MACH")[1]] = False
+        self.panel._rebuild_tree(force=True)
+        self.assertEqual(node_named(self.panel, "MACH").checkState(0),
+                         Qt.CheckState.PartiallyChecked)
+
+        for value in self.panel._distinct("MACH"):
+            iso.value_enabled[value] = False
+        self.panel._rebuild_tree(force=True)
+        self.assertEqual(node_named(self.panel, "MACH").checkState(0),
                          Qt.CheckState.Unchecked)
+
+    def test_a_paused_filter_says_so_in_the_row(self):
+        iso = self.panel._state.iso_state("MACH")
+        iso.active = False
+        self.panel._rebuild_tree(force=True)
+        self.assertIn("paused", node_named(self.panel, "MACH").text(0))
 
     def test_a_row_carries_the_value_it_stands_for(self):
         # Not its label. Two decimals can render distinct values identically --
@@ -887,12 +913,97 @@ class TestIsoTree(unittest.TestCase):
             0, Qt.CheckState.Unchecked)
         self.assertTrue(iso.active)
 
-    def test_the_parameter_checkbox_toggles_the_filter(self):
+    def test_the_tree_is_never_destroyed_while_a_tick_is_being_delivered(self):
+        """The 2.1.1 crash, in the one form a stub can catch.
+
+        Clicking a parameter's checkbox ticks every value under it, and the
+        first version of that went through a full rebuild -- tree.clear() --
+        while Qt was still delivering itemChanged for the row that was
+        clicked. That deletes the QTreeWidgetItem the signal belongs to, and
+        Qt reads it again once the slot returns: the process dies in C++, with
+        no Python traceback anywhere near the cause.
+
+        Here the tree is a stub and nothing dies, so the test asserts the
+        condition that killed it rather than the death: that no row is
+        destroyed between the click going in and the handler coming back. The
+        flag the fix reads is deliberately not what is checked -- that would
+        pass against code that has no flag at all.
+        """
+        self.panel._state.iso_state("MACH")
+        self.panel._rebuild_tree(force=True)
+
+        dispatching = []
+        cleared_mid_dispatch = []
+        original = self.panel.tree.clear
+
+        def watched():
+            cleared_mid_dispatch.append(bool(dispatching))
+            return original()
+
+        self.panel.tree.clear = watched
+        node = node_named(self.panel, "MACH")
+        try:
+            for state in (Qt.CheckState.Unchecked, Qt.CheckState.Checked):
+                dispatching.append(state)
+                try:
+                    node.setCheckState(0, state)
+                finally:
+                    dispatching.pop()
+            dispatching.append("child")
+            try:
+                node.child(0).setCheckState(0, Qt.CheckState.Unchecked)
+            finally:
+                dispatching.pop()
+        finally:
+            self.panel.tree.clear = original
+
+        self.assertNotIn(True, cleared_mid_dispatch)
+        # And the row that was clicked is still the same object, which is the
+        # same statement seen from the other side.
+        self.assertIs(node_named(self.panel, "MACH"), node)
+
+    def test_a_tick_still_lands_when_the_tree_has_to_be_rebuilt(self):
+        # The deferred half: with no stored signature there is nothing to
+        # write ticks against, so the rebuild is queued rather than skipped.
+        # The state change must still be there, and so must the rows.
+        self.panel._state.iso_state("MACH")
+        self.panel._rebuild_tree(force=True)
+        self.panel._tree_state = None
+        node_named(self.panel, "MACH").setCheckState(0, Qt.CheckState.Unchecked)
+
+        iso = self.panel._state.iso_states["MACH"]
+        values = self.panel._distinct("MACH")
+        self.assertEqual([iso.value_enabled.get(v, True) for v in values],
+                         [False] * len(values))
+        self.assertEqual(node_named(self.panel, "MACH").checkState(0),
+                         Qt.CheckState.Unchecked)
+
+    def test_the_parameter_checkbox_unticks_every_value(self):
         iso = self.panel._state.iso_state("MACH")
         iso.active = True
         self.panel._rebuild_tree()
         node_named(self.panel, "MACH").setCheckState(0, Qt.CheckState.Unchecked)
-        self.assertFalse(iso.active)
+        values = self.panel._distinct("MACH")
+        self.assertEqual([iso.value_enabled.get(v, True) for v in values],
+                         [False] * len(values))
+
+    def test_the_parameter_checkbox_ticks_every_value(self):
+        iso = self.panel._state.iso_state("MACH")
+        for value in self.panel._distinct("MACH"):
+            iso.value_enabled[value] = False
+        self.panel._rebuild_tree(force=True)
+        node_named(self.panel, "MACH").setCheckState(0, Qt.CheckState.Checked)
+        values = self.panel._distinct("MACH")
+        self.assertEqual([iso.value_enabled.get(v, True) for v in values],
+                         [True] * len(values))
+
+    def test_the_parameter_checkbox_ticks_every_interval(self):
+        iso = self.panel._state.iso_state("MACH")
+        iso.grouped = True
+        iso.groups = [("low", 0.6, 0.75, False), ("high", 0.75, 0.9, False)]
+        self.panel._rebuild_tree(force=True)
+        node_named(self.panel, "MACH").setCheckState(0, Qt.CheckState.Checked)
+        self.assertEqual([g[3] for g in iso.groups], [True, True])
 
     def test_grouped_parameters_list_their_intervals(self):
         iso = self.panel._state.iso_state("MACH")
@@ -1820,6 +1931,16 @@ class _ListSession:
         self.parameters = list(params)
         self.files = [_FileHandle(0, "flight_a.aoe", sims)]
 
+    @property
+    def file_count(self):
+        return len(self.files)
+
+    @property
+    def plottable_parameters(self):
+        # The real one: names are only candidates for an axis while something
+        # is open to plot them from.
+        return list(self.parameters) if self.files else []
+
     def file(self, index):
         return self.files[index] if 0 <= index < len(self.files) else None
 
@@ -1839,9 +1960,12 @@ def make_data_panel(session=None):
     panel._state = AppState()
     panel._updating = False
     panel._tree_state = None
+    panel._expansion = {}
     panel.tree = qt_stubs.QTreeWidget()
     panel.tree.itemChanged.connect(
         lambda item, col=0: panel._on_item_changed(item, col))
+    panel.tree.itemExpanded.connect(panel._on_expanded)
+    panel.tree.itemCollapsed.connect(panel._on_collapsed)
     return panel
 
 
@@ -1854,6 +1978,12 @@ def make_param_panel(session=None):
     panel.x_combo = qt_stubs.QComboBox()
     panel.y_list = qt_stubs.QListWidget()
     panel.filter_edit = qt_stubs.QLineEdit()
+    from PySide6.QtCore import QTimer as _StubTimer
+    panel._filter_timer = _StubTimer()
+    panel._filter_timer.setSingleShot(True)
+    panel._filter_timer.timeout.connect(
+        lambda: panel._apply_filter(panel.filter_edit.text()))
+    panel.filter_edit.textChanged.connect(panel._on_filter_typed)
     panel.y_list.itemChanged.connect(panel._on_y_changed)
     panel.x_combo.currentTextChanged.connect(panel._on_x_changed)
     return panel
@@ -1883,6 +2013,14 @@ class _DrawSession:
         self._iso = list(iso_values)
         names = runs or ["R{0}".format(i) for i in range(len(self._iso))]
         self.files = [_FileHandle(0, "flight_a.aoe", names)]
+        # The real session hands back a zero-copy *view* of core memory, so
+        # asking twice for the same channel gives the same buffer at the same
+        # address. Two caches in the tile are built on exactly that -- the
+        # group-reuse signature and the overlay signature both compare buffer
+        # addresses to decide whether anything has actually moved -- so a stub
+        # that returned a fresh array each call would model the one property
+        # they depend on backwards, and would report every rebuild as a change.
+        self._channels = {}
 
     def file(self, index):
         return self.files[0] if index == 0 else None
@@ -1893,8 +2031,11 @@ class _DrawSession:
     def unit(self, _name):
         return ""
 
-    def channel(self, _file, _sim, _name):
-        return np.arange(10, dtype=np.float32)
+    def channel(self, file_index, sim_index, name):
+        key = (file_index, sim_index, name)
+        if key not in self._channels:
+            self._channels[key] = np.arange(10, dtype=np.float32)
+        return self._channels[key]
 
     def iso_values(self, _file, _name):
         return np.array(self._iso, dtype=np.float32)
@@ -2083,6 +2224,79 @@ class TestListsDoNotBlink(unittest.TestCase):
     the second can change on a selection, and the second is writable in place.
     """
 
+    def test_a_small_file_opens_and_a_huge_one_does_not(self):
+        """Expanding a node is what makes Qt build view items for its children.
+
+        A study of twelve hundred runs opened on load paid for all twelve
+        hundred rows before anyone had looked at them, and nobody scrolls
+        through twelve hundred to find one. Small files still open, because
+        the list is short enough to read and closing it would cost a click for
+        nothing.
+        """
+        small = make_data_panel(_ListSession(sims=["R1", "R2", "R3"]))
+        small.refresh()
+        self.assertTrue(small.tree.topLevelItem(0).isExpanded())
+
+        many = ["R{0}".format(i) for i in range(panels.DATA_AUTO_EXPAND_MAX_RUNS + 1)]
+        huge = make_data_panel(_ListSession(sims=many))
+        huge.refresh()
+        self.assertFalse(huge.tree.topLevelItem(0).isExpanded())
+        # Still there to be opened, and still all of them.
+        self.assertEqual(huge.tree.topLevelItem(0).childCount(), len(many))
+
+    def test_the_user_s_choice_outlives_a_rebuild(self):
+        many = ["R{0}".format(i) for i in range(panels.DATA_AUTO_EXPAND_MAX_RUNS + 1)]
+        panel = make_data_panel(_ListSession(sims=many))
+        panel.refresh()
+
+        panel.tree.topLevelItem(0).setExpanded(True)
+        panel._tree_state = None            # force a genuine rebuild
+        panel.refresh()
+        self.assertTrue(panel.tree.topLevelItem(0).isExpanded())
+
+        panel.tree.topLevelItem(0).setExpanded(False)
+        panel._tree_state = None
+        panel.refresh()
+        self.assertFalse(panel.tree.topLevelItem(0).isExpanded())
+
+    def test_every_run_is_still_reachable_and_tickable(self):
+        # The whole point of this tab: the rows exist whether or not the node
+        # is open, and ticking one still reaches the state.
+        many = ["R{0}".format(i) for i in range(panels.DATA_AUTO_EXPAND_MAX_RUNS + 1)]
+        panel = make_data_panel(_ListSession(sims=many))
+        panel.refresh()
+        rows = sim_rows(panel)
+        self.assertEqual(len(rows), len(many))
+
+        click_box(rows[7], Qt.CheckState.Checked)
+        self.assertTrue(panel._state.is_selected(0, 7))
+
+    def test_reload_asks_for_the_files_the_selection_names(self):
+        """Selecting a run means the file it belongs to.
+
+        There is no such thing as reloading one run, and refusing because a
+        run row is not a file row would be pedantry about a gesture whose
+        meaning is not in doubt. Nothing selected means every open file, which
+        is what "the solver has just finished" usually calls for.
+        """
+        panel = make_data_panel()
+        panel.refresh()
+        asked = []
+        panel.reload_requested.connect(asked.append)
+
+        panel.tree.selectedItems = lambda: []
+        panel._reload_selected()
+        self.assertEqual(asked[-1], [], "nothing selected means every file")
+
+        panel.tree.selectedItems = lambda: [sim_rows(panel)[1]]
+        panel._reload_selected()
+        self.assertEqual(asked[-1], [0], "a run names its file")
+
+        panel.tree.selectedItems = lambda: [
+            panel.tree.topLevelItem(0), sim_rows(panel)[0]]
+        panel._reload_selected()
+        self.assertEqual(asked[-1], [0], "a file and its run are one file")
+
     def test_ticking_a_run_keeps_the_same_tree_items(self):
         panel = make_data_panel()
         panel.refresh()
@@ -2186,6 +2400,72 @@ class TestListsDoNotBlink(unittest.TestCase):
         self.assertEqual(
             panel.y_list.item(0).data(Qt.ItemDataRole.UserRole), "MACH")
 
+    def test_unticking_a_parameter_sends_it_back_down_the_list(self):
+        # It was promoted to the top while it was selected; unticking it has to
+        # undo that. The reorder used to run against the list's own order, in
+        # which the promoted name simply *was* first, so there was nothing left
+        # to put it back into.
+        panel = make_param_panel()
+        panel.refresh()
+        order = [panel.y_list.item(i).data(Qt.ItemDataRole.UserRole)
+                 for i in range(panel.y_list.count())]
+
+        panel._state.tile.y_params = ["MACH"]
+        panel.refresh()
+        self.assertEqual(
+            panel.y_list.item(0).data(Qt.ItemDataRole.UserRole), "MACH")
+
+        panel._state.tile.y_params = []
+        panel.refresh()
+        self.assertEqual(
+            [panel.y_list.item(i).data(Qt.ItemDataRole.UserRole)
+             for i in range(panel.y_list.count())],
+            order)
+
+    def test_typing_in_the_filter_does_not_refilter_per_keystroke(self):
+        """These files carry hundreds of channels.
+
+        A keystroke is several hundred setHidden() calls and a relayout of the
+        list, and the answer between two letters of the same word is not one
+        anybody reads. The list is refiltered once the typing pauses instead --
+        the same thing the TEXT panel does with a caption, for the same reason.
+        """
+        panel = make_param_panel()
+        panel.refresh()
+        hidden = lambda: [panel.y_list.item(i).isHidden()
+                          for i in range(panel.y_list.count())]
+        before = hidden()
+
+        panel.filter_edit.setText("AL")
+        self.assertTrue(panel._filter_timer.pending,
+                        "typing must arm the timer")
+        self.assertEqual(hidden(), before,
+                         "nothing may be hidden until the typing stops")
+
+        panel._filter_timer.fire()
+        self.assertNotEqual(hidden(), before)
+        states = {panel.y_list.item(i).data(Qt.ItemDataRole.UserRole):
+                  panel.y_list.item(i).isHidden()
+                  for i in range(panel.y_list.count())}
+        self.assertFalse(states["ALT"])
+        self.assertTrue(states["TIME"])
+        self.assertTrue(states["MACH"])
+
+    def test_the_filter_is_still_applied_without_waiting_on_a_refresh(self):
+        # A refresh rebuilds the rows, so the filter has to be re-applied then
+        # and there -- the box has not been typed in and no timer is running.
+        panel = make_param_panel()
+        panel.filter_edit.setText("AL")
+        panel._filter_timer.fire()
+        panel._list_state = None          # force a genuine rebuild
+        panel.refresh()
+
+        states = {panel.y_list.item(i).data(Qt.ItemDataRole.UserRole):
+                  panel.y_list.item(i).isHidden()
+                  for i in range(panel.y_list.count())}
+        self.assertFalse(states["ALT"])
+        self.assertTrue(states["TIME"])
+
     def test_the_parameter_tick_still_arrives(self):
         panel = make_param_panel()
         panel.refresh()
@@ -2231,6 +2511,190 @@ class TestListsDoNotBlink(unittest.TestCase):
         session.label = lambda name: "renamed " + name
         panel.refresh()
         self.assertTrue(panel.y_list.item(0).text().startswith("renamed"))
+
+
+class TestTheCappedLegendSaysSo(unittest.TestCase):
+    """Sixty rows, then a row that explains itself.
+
+    The truncation was already stated rather than silent, but only as a
+    count -- which reads as "some curves are missing" when what it means is
+    "the legend stopped listing them". The curves are all drawn.
+    """
+
+    def test_the_row_names_the_cap(self):
+        from aoeviewer.model import ColorMode
+
+        session = _DrawSession(
+            iso_values=tuple(float(i) for i in range(pt.MAX_LEGEND_ROWS + 5)))
+        tile = make_drawable_tile(session)
+        state = tile._state
+        for sim in range(pt.MAX_LEGEND_ROWS + 5):
+            state.set_selected(0, sim, True)
+        state.tile.x_param, state.tile.y_params = "TIME", ["ALT"]
+        state.tile.color_mode = ColorMode.ISO
+        state.tile.color_iso_param = "MACH"
+        state.tile.show_legend = True
+        state.tile.legend_show_iso = True
+        tile.rebuild()
+
+        rows = legend_names(tile)
+        self.assertEqual(len(rows), pt.MAX_LEGEND_ROWS + 1)
+        last = rows[-1]
+        self.assertIn("and 5 more", last)
+        self.assertIn(str(pt.MAX_LEGEND_ROWS), last)
+
+
+class TestTheAxesAreWrittenOnlyWhenTheyChange(unittest.TestCase):
+    """The PlotItem's own settings: grid, log mode, axis captions, title.
+
+    Most rebuilds change none of them -- a restyled curve, a run ticked, a
+    marker dragged, a page returned to -- and they used to be written on every
+    one. setLogMode is why that mattered rather than being merely redundant:
+    pyqtgraph propagates it to every data item, invalidating each curve's
+    cached display data, and then re-enables auto-range, which the tile has to
+    undo in _restore_view(). A rebuild the redraw cache had just arranged to
+    cost nothing threw away the transformed points of every curve and moved
+    the frame twice, for a setting nobody had touched.
+
+    What must NOT change is the outcome: every one of them still has to be
+    written whenever it genuinely differs, which is what these check.
+    """
+
+    def setUp(self):
+        self.session = _DrawSession()
+        self.tile = make_drawable_tile(self.session)
+        state = self.tile._state
+        state.selected_sims.update({(0, 0), (0, 1)})
+        tile = state.tile
+        tile.x_param, tile.y_params = "TIME", ["ALT"]
+        self.plot = self.tile.getPlotItem()
+
+    def writes(self):
+        return self.plot.axis_writes
+
+    def test_the_first_rebuild_writes_them(self):
+        self.tile.rebuild()
+        self.assertTrue(self.plot.titles)
+        self.assertTrue(self.plot.grid_calls)
+        self.assertTrue(self.plot.log_calls)
+        self.assertEqual(len(self.plot.label_calls), 2)   # bottom and left
+
+    def test_a_rebuild_that_changes_nothing_writes_nothing(self):
+        self.tile.rebuild()
+        before = self.writes()
+        for _ in range(5):
+            self.tile.rebuild()
+        self.assertEqual(self.writes(), before)
+
+    def test_the_grid_still_reaches_the_plot(self):
+        self.tile.rebuild()
+        before = len(self.plot.grid_calls)
+        self.tile._state.tile.show_grid = False
+        self.tile.rebuild()
+        self.assertGreater(len(self.plot.grid_calls), before)
+        self.assertFalse(self.plot.grid_calls[-1]["x"])
+
+    def test_the_log_mode_still_reaches_the_plot(self):
+        self.tile.rebuild()
+        before = len(self.plot.log_calls)
+        self.tile._state.tile.log_y = True
+        self.tile.rebuild()
+        self.assertGreater(len(self.plot.log_calls), before)
+        self.assertTrue(self.plot.log_calls[-1]["y"])
+
+    def test_the_title_still_follows_the_parameters(self):
+        self.tile.rebuild()
+        self.tile._state.tile.y_params = ["ALT", "MACH"]
+        self.tile.rebuild()
+        self.assertIn("MACH", self.plot.titles[-1])
+        self.assertIn("TIME", self.plot.titles[-1])
+
+    def test_the_title_comes_back_after_a_placeholder(self):
+        # show_placeholder() writes its message over the title, so what the
+        # guard remembers writing no longer describes the plot. Without
+        # forgetting it, a tile that showed a placeholder while a file loaded
+        # kept the placeholder as its heading.
+        self.tile.rebuild()
+        real_title = self.plot.titles[-1]
+        self.tile.show_placeholder("loading...")
+        self.assertEqual(self.plot.titles[-1], "loading...")
+
+        self.tile.rebuild()
+        self.assertEqual(self.plot.titles[-1], real_title)
+
+    def test_a_theme_change_rewrites_the_title(self):
+        # The title carries an explicit colour, so it is part of the theme.
+        self.tile.rebuild()
+        before = len(self.plot.titles)
+        self.tile._theme = _Theme()
+        self.tile._theme.plot_foreground = "#123456"
+        self.tile.rebuild()
+        self.assertGreater(len(self.plot.titles), before)
+
+
+class TestOverlaysAreRedrawnOnlyWhenTheyChange(unittest.TestCase):
+    """Markers and bands, and the curves they are drawn against.
+
+    The dot form searches each curve for the sample where the condition holds
+    and the band form redraws a stretch of every curve it crosses, so a
+    thousand-run tile paid both on every rebuild -- including the rebuilds the
+    redraw cache exists to make free. What must not change is that every edit
+    to an annotation still reaches the plot.
+    """
+
+    def setUp(self):
+        from aoeviewer.model import AreaBand, Marker
+
+        self.session = _DrawSession()
+        self.tile = make_drawable_tile(self.session)
+        state = self.tile._state
+        state.selected_sims.update({(0, 0), (0, 1)})
+        tile = state.tile
+        tile.x_param, tile.y_params = "TIME", ["ALT"]
+        state.markers.append(Marker(x_param="TIME", position=1.0))
+        state.areas.append(AreaBand(x_param="TIME", x_min=1.0, x_max=2.0))
+        self.tile.rebuild()
+
+    def test_the_annotations_are_drawn(self):
+        self.assertTrue(self.tile._overlays)
+
+    def test_a_rebuild_that_changes_nothing_keeps_the_same_items(self):
+        before = list(self.tile._overlays)
+        for _ in range(5):
+            self.tile.rebuild()
+        self.assertEqual([id(item) for item in self.tile._overlays],
+                         [id(item) for item in before])
+
+    def test_moving_a_marker_redraws(self):
+        before = list(self.tile._overlays)
+        self.tile._state.markers[0].position = 7.5
+        self.tile.rebuild()
+        self.assertNotEqual([id(item) for item in self.tile._overlays],
+                            [id(item) for item in before])
+
+    def test_hiding_a_band_redraws(self):
+        before = len(self.tile._overlays)
+        self.tile._state.areas[0].visible = False
+        self.tile.rebuild()
+        self.assertLess(len(self.tile._overlays), before)
+
+    def test_changing_the_curves_redraws(self):
+        # The dot sits on a curve and the band is a stretch of one, so a
+        # different set of curves is a different set of annotations to draw.
+        before = list(self.tile._overlays)
+        self.tile._state.selected_sims.discard((0, 1))
+        self.tile.rebuild()
+        self.assertNotEqual([id(item) for item in self.tile._overlays],
+                            [id(item) for item in before])
+
+    def test_an_added_marker_reaches_the_plot(self):
+        from aoeviewer.model import Marker
+
+        before = len(self.tile._overlays)
+        self.tile._state.markers.append(
+            Marker(x_param="TIME", position=3.0))
+        self.tile.rebuild()
+        self.assertGreater(len(self.tile._overlays), before)
 
 
 class TestFirstSwitchToIsoColouring(unittest.TestCase):
@@ -2554,6 +3018,36 @@ class TestLegendOrderIsIntrinsic(unittest.TestCase):
         tile.y_params = ["ALT", "MACH"]
         self.tile.rebuild()
         self.assertEqual(legend_names(self.tile), ["ALT", "MACH"])
+
+    def test_style_by_iso_reaches_the_legend_while_colour_does_not(self):
+        # Colour by parameter, dash by ISO: the rows differ by dash and must
+        # differ by text too, or they merge into one and the key stops being
+        # a key. Before this, "show ISO" wrote nothing at all here, because
+        # only the colour mode's ISO label was ever consulted.
+        from aoeviewer.model import ColorMode, StyleMode
+
+        tile = self.tile._state.tile
+        tile.color_mode = ColorMode.PARAMETER
+        tile.style_mode = StyleMode.ISO
+        tile.style_iso_param = "MACH"
+        tile.legend_show_iso = True
+        self.tile.rebuild()
+        self.assertEqual(
+            legend_names(self.tile),
+            ["ALT | MACH = 5", "ALT | MACH = 12", "ALT | MACH = 18"])
+
+    def test_the_same_iso_parameter_is_not_written_twice(self):
+        # Colour by ISO and dash by ISO on one parameter is an ordinary
+        # pairing; "MACH = 5 | MACH = 5" is not.
+        from aoeviewer.model import StyleMode
+
+        tile = self.tile._state.tile
+        tile.style_mode = StyleMode.ISO
+        tile.style_iso_param = "MACH"
+        self.tile.rebuild()
+        self.assertEqual(
+            legend_names(self.tile),
+            ["ALT | MACH = 5", "ALT | MACH = 12", "ALT | MACH = 18"])
 
     def test_simulation_mode_follows_file_then_run(self):
         from aoeviewer.model import ColorMode
@@ -3348,10 +3842,11 @@ class _FakeAction:
 class _FakeSession:
     """Just enough of a session to answer what the definitions are."""
 
-    def __init__(self, computed=None, aliases=None, plain=()):
+    def __init__(self, computed=None, aliases=None, plain=(), files=()):
         self._computed = dict(computed or {})
         self._aliases = dict(aliases or {})
         self._plain = list(plain)
+        self._files = list(files)
 
     @property
     def parameters(self):
@@ -3368,7 +3863,31 @@ class _FakeSession:
 
     @property
     def files(self):
-        return []
+        return list(self._files)
+
+
+class _NamedSim:
+    """A run as _collect_display_names() and _apply_display_names() see it."""
+
+    def __init__(self, key, sim_id, name=None):
+        self.key = key
+        self.sim_id = sim_id
+        self.name = name if name is not None else sim_id
+
+    def rename(self, name):
+        self.name = name
+
+
+class _NamedFile:
+    """A file the same two methods can read and rename."""
+
+    def __init__(self, path, name, simulations=()):
+        self.path = path
+        self.name = name
+        self.simulations = list(simulations)
+
+    def rename(self, name):
+        self.name = name
 
 
 class _WindowStub:
@@ -3415,7 +3934,8 @@ class _WindowStub:
 # through _write_workspace().
 for _name in ("_workspace_label", "_update_window_title",
               "_update_workspace_actions", "_ask_workspace_path",
-              "_collect_definitions", "_write_workspace",
+              "_collect_definitions", "_collect_display_names",
+              "_apply_display_names", "_write_workspace",
               "save_workspace", "save_workspace_as"):
     setattr(_WindowStub, _name, getattr(main_window.MainWindow, _name))
 
@@ -3484,6 +4004,72 @@ class TestSaveAsAndTheCurrentFile(unittest.TestCase):
         computed, aliases = window.call("_collect_definitions")
         self.assertIn("CLIMB", computed)
         self.assertNotIn("CLIMB", aliases)
+
+    def test_renamed_files_and_runs_survive_a_workspace(self):
+        import tempfile
+        from aoeviewer.model import load_workspace
+
+        session = _FakeSession(files=[
+            _NamedFile("/data/flight.aoe", "Nominal climb", [
+                _NamedSim("flight.aoe::R0::0", "R0", "Cold day"),
+                _NamedSim("flight.aoe::R1::1", "R1"),   # never renamed
+            ]),
+        ])
+        window = _WindowStub(session=session)
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "w.aoews")
+            main_window.QFileDialog = _AnsweringDialog(path)
+            try:
+                window.call("save_workspace_as")
+            finally:
+                main_window.QFileDialog = _RefusingDialog()
+            data = load_workspace(path)
+
+        self.assertEqual(data["file_names"],
+                         {"/data/flight.aoe": "Nominal climb"})
+        # Only the run that was actually renamed: a thousand-run study must not
+        # write a thousand entries saying nothing.
+        self.assertEqual(data["sim_names"],
+                         {"/data/flight.aoe": {"flight.aoe::R0::0": "Cold day"}})
+
+        # And back onto files that arrive with the names the file itself gives.
+        fresh = _FakeSession(files=[
+            _NamedFile("/data/flight.aoe", "flight.aoe", [
+                _NamedSim("flight.aoe::R0::0", "R0"),
+                _NamedSim("flight.aoe::R1::1", "R1"),
+            ]),
+        ])
+        reader = _WindowStub(session=fresh)
+        reader.call("_apply_display_names", data)
+        restored = fresh.files[0]
+        self.assertEqual(restored.name, "Nominal climb")
+        self.assertEqual([sim.name for sim in restored.simulations],
+                         ["Cold day", "R1"])
+
+    def test_a_workspace_without_the_names_still_loads(self):
+        # 2.1.0 and older wrote neither key. Nothing may be renamed, and
+        # nothing may raise.
+        session = _FakeSession(files=[
+            _NamedFile("/data/flight.aoe", "flight.aoe",
+                       [_NamedSim("flight.aoe::R0::0", "R0")]),
+        ])
+        window = _WindowStub(session=session)
+        window.call("_apply_display_names", {"files": ["/data/flight.aoe"]})
+        self.assertEqual(session.files[0].name, "flight.aoe")
+        self.assertEqual(session.files[0].simulations[0].name, "R0")
+
+    def test_a_name_for_a_run_that_is_gone_is_skipped(self):
+        session = _FakeSession(files=[
+            _NamedFile("/data/flight.aoe", "flight.aoe",
+                       [_NamedSim("flight.aoe::R0::0", "R0")]),
+        ])
+        window = _WindowStub(session=session)
+        window.call("_apply_display_names", {
+            "file_names": {"/data/other.aoe": "Elsewhere"},
+            "sim_names": {"/data/flight.aoe": {"flight.aoe::R9::9": "Ghost"}},
+        })
+        self.assertEqual(session.files[0].name, "flight.aoe")
+        self.assertEqual(session.files[0].simulations[0].name, "R0")
 
     def test_save_uses_the_current_path_without_asking(self):
         import tempfile

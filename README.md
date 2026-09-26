@@ -2,7 +2,17 @@
 
 A fast viewer for AOE simulation result files.
 
-**Version 2.1.0** adds independent *Colour by* and *Style by* encodings, scrollable
+**Version 2.1.1** fixes what 2.1.0 got wrong and tightens the legend: names
+given to files and runs are saved in the workspace, `Style by ISO` reaches the
+legend, the checkbox beside an ISO parameter ticks all of its values, an
+unticked parameter leaves the top of the PARAMS list, and legend rows are set
+smaller and tighter, files are reloaded on request instead of on a timer, and
+`Colour by Parameter` is the default. The full manual is
+`doc/aoeViewer-2.1.1-User-and-Reference-Guide.pdf`, built from the LaTeX source
+beside it; it replaces both the 2.0.0 guide and the 2.1.1 addendum, and
+Chapter 1 lists everything that changed.
+
+**Version 2.1.0** added independent *Colour by* and *Style by* encodings, scrollable
 Colour/Line tables, two-line plot titles that keep every selected parameter
 name, unlabelled plot axes (the title already carries the names), and PARAMS
 lists that put the active tile's selected channels first without breaking the
@@ -430,11 +440,16 @@ cost almost no width. The rest of the window is a grid of plots.
 
 **DATA** — add and remove files, and tick which runs to plot. Every run of the
 first file loaded is selected automatically so something is on screen straight
-away.
+away. **Reload** re-reads the selected file(s) from disk, or every open file
+when nothing is selected; it is also on the right-click menu, by name.
 
 **PARAMS** — pick the x parameter and tick y parameters for the *active* tile
 (click a tile to make it active). Channels already selected on that tile are
-listed first, in the order they were ticked; the rest keep the file order. The
+listed first, in the order they were ticked; the rest keep the file order, and
+unticking one puts it straight back among them. (The promotion is recomputed
+from the file order on every tick. Applying it to the list's own order instead,
+as 2.1.0 did, has no way back: once a name has been moved to the top, "the
+order as given" *is* the promoted one, and unticking it left it there.) The
 filter box accepts wildcards: `AL*` matches `ALPHA` and `ALT`. Filtering only
 hides rows — a selected name that does not match stays selected and stays at
 the top, and reappears as soon as the filter lets it through. **Right-click a
@@ -495,12 +510,21 @@ see what was selected without clicking through them and remembering.
  > WEIGHT    all 5   grouped
 ```
 
-A parameter's checkbox is the filter's on/off switch — off keeps the values you
-ticked, which is what makes "with and without this" a two-click comparison. Its
-row carries a count (`3/12`, `all 5`, `none of 8`) and hovering names the
-selected values. Nodes stay open across refreshes, and one that no longer
-appears in any loaded file says so rather than showing an empty node that looks
-broken.
+A parameter's checkbox is a **select-all for the values under it**: it ticks
+every value (or every interval, when the parameter is grouped), unticks them
+all, and shows a partial tick when some but not all are on — the same thing the
+*All* and *None* buttons do to the selected parameter, on the row itself. Up to
+2.1.0 it carried the filter's own on/off flag instead, so the obvious reading of
+a checkbox over a list of checkboxes did something else entirely.
+
+That flag is on the **right-click menu** now, as *Use this filter*, where it is
+named rather than guessed at. Switching it off keeps the values you ticked,
+which is what makes "with and without this" a two-click comparison, and the row
+says `paused` so the tree still accounts for a filter that is not narrowing
+anything. Its row also carries a count (`3/12`, `all 5`, `none of 8`) and
+hovering names the selected values. Nodes stay open across refreshes, and one
+that no longer appears in any loaded file says so rather than showing an empty
+node that looks broken.
 
 **Group…** opens the interval editor for the selected parameter (also on the
 right-click menu, along with select-all/none and remove). Choose the number of
@@ -530,11 +554,18 @@ aiming at. The dot comes off when you leave Inspect or make another tile active.
 - *Tile display* — legend, grid, log Y and point markers. These used to be at
   the bottom of PARAMS, which split "what is plotted" and "how it looks" across
   two tabs with no principle behind the split.
-- *Colour by* — simulation, parameter, or ISO value. This sets the colour only.
+- *Colour by* — parameter, simulation, or ISO value. This sets the colour only.
+  **Parameter is the default**, and leads the row: a tile is nearly always asked
+  which quantity a line is, and colouring by run answers a different question —
+  one that a twenty-five-run study answers with twenty-five colours that name
+  nothing the user chose. Colour by run is one click away for the case where
+  the runs are the subject.
   The active mode is shown both by the radio indicator and by a bold label, so
   it stays legible whatever the platform style does with check indicators.
   Styles are keyed by name, not by list position, so loading another file never
-  recolours what is already on screen.
+  recolours what is already on screen. The radios are identified by their mode
+  rather than by their position in the row, so reordering the row cannot
+  re-label a saved tile.
 - *Style by* — None, File, Simulation, or ISO. This sets the dash pattern and
   marker independently of colour. *None* keeps the previous behaviour (dash
   follows the colour key). *File* is the usual partner for *Colour by
@@ -550,9 +581,13 @@ aiming at. The dot comes off when you leave Inspect or make another tile active.
 - *Legend* — which corner it sits in, and which parts each entry is built from
   (parameter, ISO value, file, run). **Turning File and Run off merges identical
   entries**, which is what turns a fifty-run ISO plot into one legend row per ISO
-  value instead of fifty rows saying the same thing. The dash pattern and marker
-  are not spelled out in the text: the legend already draws a sample of the
-  actual curve, so the swatch carries both at once.
+  value instead of fifty rows saying the same thing. *ISO* writes every ISO
+  identity a curve carries — the colour's and the dash's, once each if both key
+  on the same parameter — so a tile coloured by parameter and dashed by ISO
+  still gets one row per value, and the rows are ordered by value or by
+  interval rather than by which run happened to be walked first. The dash
+  pattern and marker are not spelled out in the text: the legend already draws a
+  sample of the actual curve, so the swatch carries both at once.
   **Apply legend to all tiles** copies the whole lot — shown or not, corner or
   dragged position, and the four parts — onto every tile on every page, and says
   how many it changed. Comparing tiles is the reason to have several, and a
@@ -562,7 +597,9 @@ Files and runs can be **renamed** from the DATA tab — double-click, or use the
 right-click menu. Only the label changes: the identity keys that colours and
 saved workspaces are built on are untouched, so a renamed run keeps its style.
 Hovering shows the full path, and a renamed run also shows the name the file
-itself gives it.
+itself gives it. **The names are saved with the workspace** and put back when it
+is loaded; see *Workspaces* above for how they are keyed and what an older
+workspace does.
 
 **ALIAS** — give a channel a readable display name without touching the file, so
 the application shows "Load factor" while still reading `NZ`.
@@ -776,17 +813,82 @@ form produced fifty rows that differed only in a run id, filling the plot it was
 meant to explain — and the run is already identifiable by its colour. The legend
 and any text captions can be dragged wherever you want them.
 
+Ticking **ISO** writes every ISO identity the curve carries, so *Colour by
+Parameter* + *Style by ISO* reads `ALT | MACH = 0.75` — one row per value,
+ordered by value or by interval. A parameter that both modes key on is named
+once. Rows with identical text are still merged, which is what turns a fifty-run
+sweep into one row per ISO value rather than fifty saying the same thing; it is
+also why the ISO value has to be *in* the text for the rows to survive.
+
 Shaded areas and markers are drawn **over** the curves. A band is a translucent
 wash marking a phase of the run, and the point of it is to see which part of the
 trace it covers.
 
 Workspaces (`Ctrl+S` / `Ctrl+L`) save file paths, pages and their names, tiles,
-selections, computed parameters, *Colour by* / *Style by* and every colour and
-line style as JSON (schema version 3, plus `app_version`). A 2.0.0 workspace
-loads in 2.1.0 with *Style by* set to None.
+selections, computed parameters, *Colour by* / *Style by*, the names you gave
+files and runs, and every colour and line style as JSON (schema version 3, plus
+`app_version`). A 2.0.0 workspace loads with *Style by* set to None, and one
+from 2.1.0 or earlier — which saved no display names — loads with each file and
+run under the name its own contents give it.
 
-Files are watched for changes every few seconds, so you can leave the viewer
-open on a running solver's output and reload when it asks.
+Display names ride in two optional keys, `file_names` and `sim_names`. Both are
+keyed by identity rather than by position — a file by its path, a run by the
+core's `<file>::<id>::<ordinal>` key — because a workspace is routinely opened
+against files that have since gained a run or lost one, and a name pinned to
+"the seventh run" would then land on whichever run happens to sit there. A name
+whose file or run is not in the data is dropped without comment; there is
+nothing for it to label. Neither key is written when nothing was renamed, so a
+session in which nobody renamed anything still writes what 2.1.0 wrote.
+
+**What a rebuild costs.** A rebuild that changes nothing draws nothing: the
+curve groups are adopted and their points reused, the plot's own settings (grid,
+log mode, axis captions, title) are written only when one of them differs, and
+the markers and bands keep their items unless the annotations, the x channel,
+the drag mode or the curves have moved. `setLogMode` is the reason the second of
+those is worth guarding rather than merely tidy — pyqtgraph propagates it to
+every curve on the tile, invalidating each one's cached transformed points, and
+re-enables auto-range on the way.
+
+**Lists are built for the size these files actually come in.** The PARAMS filter
+refilters 400 ms after the last keystroke rather than on every one, because a
+585-channel file is several hundred rows hidden or shown per letter. The ISO
+tree shows at most 400 values per parameter and still filters on the rest. A file
+of more than 200 runs opens *closed* in DATA — expanding a node is what makes Qt
+build view items for its children — and whichever way you leave it is remembered
+by path, so it survives a reload and a rename.
+
+**Reusing a workspace against another study** — remove the old file, add the new
+one — keeps every tile's axes. Closing a study leaves its formulas and aliases
+defined, on purpose, so that opening the next one does not throw away the work
+set up for it; but a formula over columns that are not loaded evaluates to
+nothing and an alias resolves to a channel no file carries, so neither is a
+candidate for an axis while nothing is open. `Session.parameters` answers "what
+may the user name" and `Session.plottable_parameters` answers "what can carry an
+axis", and anything choosing a channel on the user's behalf reads the second.
+Until 2.1.1 both questions were answered by the first, so passing through zero
+open files re-pointed every tile's x axis at whichever alias sorted first, and
+the study opened next found that name valid and left it there.
+
+**Nothing polls the disk.** Re-reading a file happens when you press *Reload* in
+the DATA tab, and at no other time.
+
+Up to 2.1.0 a timer stat-ed every open file every three seconds and put up a
+dialog when one had changed. It was wrong in both directions. It interrupted
+work that had nothing to do with the file it was asking about — the question
+arrives while you are reading a plot of something else, and answering it is the
+only way back. And it could not be trusted anyway: a solver halfway through
+rewriting its output is a file that has changed and must *not* be read, so the
+prompt's best case was asking a question it had no business asking and its worst
+case was talking you into a half-written file. Whether the data on disk is
+finished is a question only the person running the solver can answer, so now
+they answer it.
+
+Reloading re-reads the index and drops every cached sample, so it costs a full
+parse of the files it touches and runs on the worker thread like any other. A
+renamed file keeps its name, and a run keeps its name, its colour and its
+identity: run keys are built from the name the file was *first* given, not from
+its current label, so renaming a file and then reloading it no longer renames
+every one of its runs out from under the styles attached to them.
 
 ---
 

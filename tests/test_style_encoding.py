@@ -11,6 +11,7 @@ import unittest
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "python"))
 
+import aoeviewer
 from aoeviewer.model import (
     AppState,
     ColorMode,
@@ -44,9 +45,14 @@ class TestCurveKeys(unittest.TestCase):
         self.assertEqual(curve_color_key(tile, "ALPHA", "s1", "0.8"),
                          "iso::MACH::0.8")
 
-    def test_colour_by_simulation_is_the_default(self):
+    def test_colour_by_parameter_is_the_default(self):
+        # A tile is nearly always asked which quantity a line is, and colouring
+        # by run answers a different question -- one a twenty-five-run study
+        # answers with twenty-five colours that name nothing the user chose.
         tile = _tile()
-        self.assertEqual(curve_color_key(tile, "ALPHA", "s1", "0.8"), "sim::s1")
+        self.assertEqual(tile.color_mode, ColorMode.PARAMETER)
+        self.assertEqual(curve_color_key(tile, "ALPHA", "s1", "0.8"),
+                         "param::ALPHA")
 
     def test_style_by_file_is_independent_of_colour(self):
         tile = _tile(color_mode=ColorMode.PARAMETER, style_mode=StyleMode.FILE)
@@ -124,7 +130,10 @@ class TestWorkspaceStyleFields(unittest.TestCase):
             save_workspace(path, state, ["/a.aoe"], {}, {})
             data = load_workspace(path)
             self.assertEqual(data["version"], 3)
-            self.assertEqual(data["app_version"], "2.1.0")
+            # The schema is what a reader has to understand; app_version only
+            # says which build wrote the file, so it tracks __version__ rather
+            # than being pinned here.
+            self.assertEqual(data["app_version"], aoeviewer.__version__)
             restored = AppState()
             restored.load_dict(data)
             self.assertEqual(restored.tile.color_mode, ColorMode.PARAMETER)

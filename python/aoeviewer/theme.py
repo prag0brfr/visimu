@@ -90,7 +90,10 @@ FONT_SMALL_PX = 9     # hints, section titles, table headers, the status bar
 # heading instead of shouting over it.
 PLOT_TITLE_PT = 7.5     # the tile title
 PLOT_AXIS_PT = 7.0      # axis names and their tick numbers
-PLOT_LEGEND_PT = 7.0    # legend rows
+PLOT_LEGEND_PT = 6.0    # legend rows -- smaller than the axes on purpose:
+                        # a legend is a key that is read once and then only
+                        # glanced at, and on a 3x3 grid it was eating the
+                        # corner of every tile at the axis size.
 PLOT_LABEL_PT = 6.5     # crosshair readout, slope figure, captions
 
 # The vertical tab rail down the left edge, whose text is drawn rotated.

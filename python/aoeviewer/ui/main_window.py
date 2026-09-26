@@ -82,10 +82,6 @@ class MainWindow(QMainWindow):
         # does not; None means "assume nothing".
         self._loaded_signature = None
         self._ui_enabled = True
-        # (path, size, mtime) of files the user has said not to reload. Held
-        # rather than acted on, so declining leaves the plots as they are --
-        # see _check_for_changes().
-        self._declined_reloads = set()
         self.tasks = TaskRunner(self)
         self.tasks.started.connect(self._on_task_started)
         self.tasks.finished.connect(self._on_task_finished)
@@ -104,13 +100,8 @@ class MainWindow(QMainWindow):
         self._update_window_title()
         self.apply_theme()
 
-        # Poll for files changing on disk. Cheap (a stat per file) and it means
-        # a running solver's output can be watched live.
-        self._watch_timer = QTimer(self)
-        self._watch_timer.setInterval(3000)
-        self._watch_timer.timeout.connect(self._check_for_changes)
-        self._watch_timer.start()
-        self._suppress_reload_prompt = False
+        # Nothing polls the disk. Re-reading a file is something the user asks
+        # for, with Reload in the DATA tab -- see reload_files().
 
         if initial_files:
             self.load_files(initial_files)
@@ -293,6 +284,7 @@ class MainWindow(QMainWindow):
             self.panel_stack.addWidget(widget)
 
         self.data_panel.add_files_requested.connect(self.open_files)
+        self.data_panel.reload_requested.connect(self.reload_files)
         self.data_panel.selection_changed.connect(self._on_selection_changed)
         self.data_panel.files_changed.connect(self.refresh_all)
         self.param_panel.tile_changed.connect(self._on_tile_content_changed)
@@ -650,70 +642,85 @@ class MainWindow(QMainWindow):
         except CoreError:
             return False
 
-    def _file_stamp(self, index: int):
-        """(path, size, mtime) of one open file as it is on disk right now."""
-        handle = self.session.file(index)
-        if handle is None:
-            return None
-        try:
-            info = os.stat(handle.path)
-        except OSError:
-            return None
-        return (handle.path, info.st_size, info.st_mtime)
+    def reload_files(self, indices=None) -> None:
+        """Re-read files from disk, because the user asked.
 
-    def _check_for_changes(self) -> None:
-        if self._suppress_reload_prompt:
-            return
-        # The core session is not internally synchronised, and this runs on the
-        # GUI thread from a timer. Walking the file list while a worker is
-        # adding to it reads a vector that may be reallocating underneath.
+        Nothing watches the disk. Until 2.1.1 a timer stat-ed every open file
+        every three seconds and put up a dialog when one had changed, which
+        was wrong in both directions: it interrupted work that had nothing to
+        do with the file, and it could not be trusted anyway, since a solver
+        halfway through rewriting its output is a file that has changed and
+        must not be read. Reloading is a decision about whether the data on
+        disk is finished, and only the person running the solver has it.
+
+        `indices` names the files; an empty list or None means every open one.
+        """
         if self.tasks.busy:
-            return
-        stale = self.session.stale_files()
-        # Drop the ones already declined, unless they have changed again since.
-        stale = [index for index in stale
-                 if self._file_stamp(index) not in self._declined_reloads]
-        if not stale:
+            self.status_label.setText(
+                "Busy — try Reload again when the current task finishes.")
             return
 
-        self._suppress_reload_prompt = True
-        try:
-            names = ", ".join(
-                self.session.file(i).name for i in stale if self.session.file(i)
-            )
-            answer = QMessageBox.question(
-                self,
-                "Files changed on disk",
-                "These files changed:\n\n{0}\n\nReload them?".format(names),
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if answer == QMessageBox.StandardButton.Yes:
-                for index in stale:
-                    handle = self.session.file(index)
-                    if handle:
-                        handle.reload()
-                # Reloaded, so nothing about these is declined any more.
-                self._declined_reloads.clear()
-                self.refresh_all()
-            else:
-                # No means no. This used to reload anyway -- the only way to
-                # stop the timer asking again was to re-read the timestamps,
-                # and re-reading them is a reload -- so declining swapped the
-                # data under the plots, which is the one thing the question was
-                # asked to prevent.
-                #
-                # What the timer actually needs is to recognise the change it
-                # has already been told about, and that is a fact about the
-                # file on disk rather than about the session. Remembering the
-                # size and mtime that were declined costs a stat per tick and
-                # leaves the loaded data alone; if the file changes again, the
-                # stamp no longer matches and the question comes back.
-                for index in stale:
-                    stamp = self._file_stamp(index)
-                    if stamp is not None:
-                        self._declined_reloads.add(stamp)
-        finally:
-            self._suppress_reload_prompt = False
+        targets = [index for index in (indices or range(self.session.file_count))
+                   if self.session.file(index) is not None]
+        if not targets:
+            self.status_label.setText("Nothing to reload — no files are open.")
+            return
+
+        # Run names are the user's and the file knows nothing about them, so
+        # they are carried across the reload by hand. They travel on each
+        # run's own key, which survives a reload now precisely so that this
+        # and the styles can be put back on the right runs.
+        names = self._collect_display_names()
+        paths = {index: self.session.file(index).path for index in targets}
+
+        def work():
+            reloaded, failed = [], []
+            for index in targets:
+                handle = self.session.file(index)
+                if handle is None:
+                    continue
+                try:
+                    ok = handle.reload()
+                except CoreError as exc:
+                    failed.append("{0}: {1}".format(
+                        os.path.basename(paths.get(index, "")), exc))
+                    continue
+                if not ok:
+                    failed.append("{0}: could not be re-read".format(
+                        os.path.basename(paths.get(index, ""))))
+                    continue
+                reloaded.append(index)
+                # The file on disk is not the one the old sidecar describes,
+                # so the reload will have fallen back to parsing the text.
+                # Writing the new sidecar here costs the parse the user is
+                # already waiting for, rather than the next open.
+                self._build_cache_for(paths.get(index, ""), index)
+            # Put the run names back, on whatever runs still answer to the
+            # keys they were given to.
+            self._apply_display_names({
+                "file_names": names.get("files", {}),
+                "sim_names": names.get("simulations", {}),
+            })
+            return reloaded, failed
+
+        def done(result):
+            reloaded, failed = result
+            # Every sample pointer the plots were holding belonged to the old
+            # parse. refresh_all() drops the resident signature, re-derives
+            # the ISO answer and repaints from scratch, which is exactly what
+            # a reload needs.
+            self.refresh_all()
+            if failed:
+                QMessageBox.warning(
+                    self, "Some files could not be reloaded",
+                    "\n".join(failed[:10]))
+            self.status_label.setText(
+                "{0} file(s) reloaded from disk.".format(len(reloaded))
+                if reloaded else "No file was reloaded.")
+
+        self.tasks.submit(
+            "Re-reading {0} file(s) from disk...".format(len(targets)),
+            work, done)
 
     # ----------------------------------------------------------- refresh
 
@@ -727,7 +734,15 @@ class MainWindow(QMainWindow):
         # anything looks at them. This is the deliberate, once-per-file-change
         # moment for it, and the panels no longer do it as a side effect of
         # being displayed.
-        notes = self.state.resolve_missing_parameters(self.session.parameters)
+        #
+        # plottable_parameters, not parameters: closing a study leaves its
+        # formulas and aliases defined, so the plain list is still non-empty
+        # with no file open at all -- and this then "repaired" every tile by
+        # pointing its x axis at whichever alias sorted first. Swapping one
+        # study for another, which is remove-then-add, lost the x axis of
+        # every tile on the way through zero files.
+        notes = self.state.resolve_missing_parameters(
+            self.session.plottable_parameters)
         if notes:
             _log.info("re-pointed missing parameters: %s", "; ".join(notes))
             self.status_label.setText(
@@ -797,7 +812,7 @@ class MainWindow(QMainWindow):
         # x axis the default one. Silent and idempotent, and it has to be here
         # rather than in a panel: panels refresh only when their tab is shown,
         # so doing it there made the result depend on where you had clicked.
-        self.state.apply_parameter_defaults(self.session.parameters)
+        self.state.apply_parameter_defaults(self.session.plottable_parameters)
 
         # Covers every route by which a tile can acquire parameters -- paste,
         # reorder, a new page, a loaded workspace -- not just the edit path.
@@ -1184,8 +1199,72 @@ class MainWindow(QMainWindow):
                 aliases[name] = target
         return computed, aliases
 
+    def _collect_display_names(self) -> Dict[str, dict]:
+        """The labels the DATA tab shows, keyed by things that survive a reload.
+
+        A file is keyed by its path and a run by the core's stable key, never
+        by index: a workspace may be opened against files that have grown a run
+        or lost one, and a name pinned to position 7 would then land on
+        whichever run happens to sit there.
+
+        Runs are collected only where the name differs from the identifier the
+        file itself carries: a run keeps that identifier until someone renames
+        it, so storing the untouched ones would put a thousand redundant
+        entries in the workspace of a thousand-run study for no gain. A file's
+        name is always collected, because the automatic one already depends on
+        what else is open -- two files of the same basename make the second
+        "out.aoe (2)" -- and writing it down is cheaper than reasoning about
+        which of them a reader would regenerate.
+        """
+        files: Dict[str, str] = {}
+        simulations: Dict[str, Dict[str, str]] = {}
+        for handle in self.session.files:
+            key = handle.path
+            if not key:
+                continue
+            if handle.name:
+                files[key] = handle.name
+            renamed = {
+                sim.key: sim.name
+                for sim in handle.simulations
+                if sim.name and sim.name != sim.sim_id
+            }
+            if renamed:
+                simulations[key] = renamed
+        return {"files": files, "simulations": simulations}
+
+    def _apply_display_names(self, data: dict) -> None:
+        """Put saved file and run labels back on the freshly opened files.
+
+        Runs on the worker thread, right after the files are added and before
+        anything reads their names, so the first paint already shows them.
+        Silently skips whatever no longer matches: a workspace naming a run
+        that this data does not have is not an error worth a dialog, it is a
+        label with nothing to sit on.
+        """
+        file_names = data.get("file_names")
+        sim_names = data.get("sim_names")
+        if not isinstance(file_names, dict) and not isinstance(sim_names, dict):
+            return
+        for handle in self.session.files:
+            key = handle.path
+            if not key:
+                continue
+            if isinstance(file_names, dict):
+                name = file_names.get(key)
+                if isinstance(name, str) and name.strip():
+                    handle.rename(name)
+            if isinstance(sim_names, dict):
+                per_sim = sim_names.get(key)
+                if isinstance(per_sim, dict) and per_sim:
+                    for sim in handle.simulations:
+                        name = per_sim.get(sim.key)
+                        if isinstance(name, str) and name.strip():
+                            sim.rename(name)
+
     def _write_workspace(self, path: str) -> bool:
         computed, aliases = self._collect_definitions()
+        names = self._collect_display_names()
         try:
             save_workspace(
                 path,
@@ -1193,6 +1272,7 @@ class MainWindow(QMainWindow):
                 [f.path for f in self.session.files],
                 computed,
                 aliases,
+                names,
             )
         except OSError as exc:
             QMessageBox.warning(self, "Could not save", str(exc))
@@ -1207,6 +1287,9 @@ class MainWindow(QMainWindow):
             counts.append("{0} formula(s)".format(len(computed)))
         if aliases:
             counts.append("{0} alias(es)".format(len(aliases)))
+        renamed = sum(len(per_sim) for per_sim in names["simulations"].values())
+        if renamed:
+            counts.append("{0} renamed run(s)".format(renamed))
         if self.state.iso_states:
             counts.append("{0} ISO filter(s)".format(len(self.state.iso_states)))
         detail = " (including {0})".format(", ".join(counts)) if counts else ""
@@ -1260,6 +1343,10 @@ class MainWindow(QMainWindow):
                     missing.append(file_path)
                     continue
                 self._build_cache_for(file_path, handle.index)
+
+            # Before anything else reads a name: the panels and the legend all
+            # ask the session what a file is called.
+            self._apply_display_names(data)
 
             # Aliases first: a formula may be written in terms of one.
             unresolved_aliases = []

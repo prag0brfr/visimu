@@ -1,0 +1,3339 @@
+% aoeViewer -- User and Reference Guide
+% Author: Paulo R. A. Gilz
+%
+% This document supersedes both the 2.0.0 User and Reference Guide and the
+% 2.1.1 user-guide addendum: everything those two said is here, with the
+% passages the 2.1.0 and 2.1.1 releases invalidated rewritten rather than
+% appended to.
+%
+% Build:  pdflatex aoeViewer-2.1.1-User-and-Reference-Guide.tex   (three times,
+%         so the table of contents and the cross-references settle)
+
+\documentclass[11pt,a4paper,oneside]{report}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{mathpazo}
+% Latin Modern's own typewriter, scaled down to sit with Palatino. No extra
+% font package: the guide has to build on a plain TeX Live, which is what the
+% machines this ships to have.
+\renewcommand{\ttdefault}{lmtt}
+\usepackage{microtype}
+\usepackage[margin=2.6cm,headheight=14pt]{geometry}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage[most]{tcolorbox}
+\usepackage{amsmath}
+\usepackage{fancyvrb}
+% Identifiers in this guide are long -- AOEVIEWER_CORE, sys._MEIPASS/aoeviewer,
+% aoe_channel_pinned -- and typewriter text does not hyphenate by default, so a
+% paragraph carrying two of them runs into the margin. htt lets them break.
+\usepackage[htt]{hyphenat}
+\usepackage[hidelinks,bookmarks=true]{hyperref}
+
+\definecolor{aoeaccent}{HTML}{1F6FE0}
+\definecolor{aoered}{HTML}{E8232A}
+\definecolor{aoerule}{HTML}{C8CDD4}
+\definecolor{aoeshade}{HTML}{F4F6F8}
+
+\hypersetup{
+  pdftitle={aoeViewer 2.1.1 -- User and Reference Guide},
+  pdfauthor={Paulo R. A. Gilz},
+  pdfsubject={The interface, the algorithms, the file format, the C ABI and the scripting API},
+  colorlinks=false,
+}
+
+\newcommand{\appver}{2.1.1}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\footnotesize aoeViewer \appver{} --- User and Reference Guide}
+\fancyhead[R]{\footnotesize\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\footrulewidth}{0pt}
+\fancypagestyle{plain}{\fancyhf{}\renewcommand{\headrulewidth}{0pt}%
+  \fancyfoot[C]{\footnotesize\thepage}}
+
+\setlist[itemize]{itemsep=2pt,topsep=4pt,parsep=0pt}
+\setlist[description]{itemsep=3pt,topsep=4pt,parsep=0pt}
+
+% Boxes, carried over from the 2.0.0 guide's conventions.
+% A grey box records something the source says and the prose might not have.
+% A red box records a genuine limitation.
+\newtcolorbox{aoenote}[1]{%
+  enhanced, breakable, colback=aoeshade, colframe=aoerule,
+  boxrule=0.5pt, arc=1.5pt, left=8pt, right=8pt, top=6pt, bottom=6pt,
+  fonttitle=\bfseries\small, title={#1}, coltitle=black,
+  colbacktitle=aoeshade, borderline north={0pt}{0pt}{aoeshade}}
+\newtcolorbox{aoelimit}[1]{%
+  enhanced, breakable, colback=white, colframe=aoered,
+  boxrule=0.7pt, arc=1.5pt, left=8pt, right=8pt, top=6pt, bottom=6pt,
+  fonttitle=\bfseries\small, title={#1}, coltitle=white,
+  colbacktitle=aoered}
+\newtcolorbox{aoenew}[1]{%
+  enhanced, breakable, colback=white, colframe=aoeaccent,
+  boxrule=0.7pt, arc=1.5pt, left=8pt, right=8pt, top=6pt, bottom=6pt,
+  fonttitle=\bfseries\small, title={#1}, coltitle=white,
+  colbacktitle=aoeaccent}
+
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\key}[1]{\textsf{\small\fbox{#1}}}
+\newcommand{\tab}[1]{\textsc{#1}}
+
+% Listings are verbatim, and have to be: they hold #, _, %, backslashes,
+% braces and && -- every one of which TeX would otherwise read as an
+% instruction. fancyvrb rather than plain verbatim so the size and the frame
+% can be set once here instead of around every block.
+\DefineVerbatimEnvironment{aoecode}{Verbatim}{%
+  fontsize=\small, xleftmargin=10pt, samepage=false,
+  frame=leftline, framerule=0.6pt, rulecolor=\color{aoerule},
+  framesep=8pt, baselinestretch=1.0}
+
+\titleformat{\chapter}[display]
+  {\normalfont\huge\bfseries}{\chaptertitlename\ \thechapter}{10pt}{\Huge}
+\titlespacing*{\chapter}{0pt}{0pt}{24pt}
+
+\begin{document}
+
+\begin{titlepage}
+\centering
+\vspace*{3cm}
+{\small\scshape\color{aoeaccent} A fast viewer for AOE simulation result files\par}
+\vspace{2.2cm}
+{\Huge\bfseries aoeViewer\par}
+\vspace{0.5cm}
+{\Large Version \appver\par}
+\vspace{2.4cm}
+{\LARGE User and Reference Guide\par}
+\vspace{0.6cm}
+{\large\itshape The interface, the algorithms, the file format,\\
+the C ABI and the scripting API\par}
+\vspace{3cm}
+{\large Paulo R. A. Gilz\par}
+\vfill
+{\small This edition replaces the 2.0.0 guide and the 2.1.1 addendum.\par}
+\end{titlepage}
+
+\tableofcontents
+\clearpage
+
+\chapter*{About this edition}
+\addcontentsline{toc}{chapter}{About this edition}
+\markboth{About this edition}{}
+
+This is a single document. It replaces two: the \emph{2.0.0 User and Reference
+Guide} and the \emph{\appver{} user-guide addendum}, which existed only because
+the guide had not been revised. Everything those two said is here. Where the
+2.1.0 and \appver{} releases changed behaviour the 2.0.0 text described, the
+text has been rewritten rather than annotated, so nothing in this guide has to
+be read against a correction printed elsewhere.
+
+Passages that describe behaviour introduced or changed after 2.0.0 are marked
+with a blue box naming the version, so a reader who knows 2.0.0 can find what
+moved without reading the whole guide again. Chapter~\ref{ch:whatsnew}
+summarises the same ground in two pages.
+
+Every label, default, range and limit quoted here was read from the source of
+version \appver. Where the code and an earlier edition of this guide
+disagreed, the code won, and the discrepancy is recorded in a grey box. Where a
+genuine limitation exists, it is recorded in a red box. This edition carries no
+figures: it is a text reference, and the screenshots of the 2.0.0 edition
+described an interface that has since moved.
+
+One version number is worth separating from the others before it causes
+confusion. \textbf{The application is at \appver; the core library is still at
+2.0.0}, which is what \code{aoe\_version()} returns and what
+\code{-version} prints as the core version. Nothing in the C ABI changed
+across the 2.1 releases --- every change was above the seam --- so the core did
+not need a new number.
+
+\chapter{What changed since 2.0.0}
+\label{ch:whatsnew}
+
+\section{In 2.1.0}
+
+\begin{description}
+\item[Dual encoding.] A curve now carries two independent identities. \emph{Colour by}
+  --- Parameter, Simulation or ISO --- decides the colour and nothing else.
+  \emph{Style by} --- None, File, Simulation or ISO --- decides the dash pattern
+  and the marker. \emph{None} is the 2.0.0 behaviour, in which dash and marker
+  hang off the colour key. See \S\ref{sec:style}.
+\item[Two style tables.] The single \emph{Curves} table of 2.0.0 became two: \emph{Colour},
+  with one row per coloured identity, and \emph{Line}, with one row per styled
+  identity. Both scroll.
+\item[Titles carry the names; axes do not.] The captions beside Y and under X are
+  blank. The tile title names every selected parameter, as
+  \code{ALPHA, NZ = f(TIME)}, and wraps onto two lines rather than truncating.
+\item[PARAMS puts the selection first.] On the active tile, the ticked Y parameters
+  are listed before the rest, in the order they were ticked. The filter still
+  only hides names.
+\item[Workspaces record more.] The schema is still version~3, and files also carry
+  \code{app\_version} and, per tile, \code{style\_mode} and
+  \code{style\_iso\_param}.
+\end{description}
+
+\section{In \appver}
+
+\begin{description}
+\item[Renamed files and runs survive a workspace.] A name given in \tab{data} is saved
+  and restored. See \S\ref{sec:workspaces}.
+\item[\emph{Style by ISO} reaches the legend.] Ticking \emph{ISO} in the legend row now
+  writes every ISO identity a curve carries, not only the colour's. Colouring
+  by parameter while styling by ISO used to produce one row per parameter with
+  no ISO value in it. See \S\ref{sec:legend}.
+\item[The ISO parameter checkbox selects values.] It is a select-all over the values
+  beneath it, tri-state, rather than the filter's own on/off flag --- which
+  moved to the row's context menu as \emph{Use this filter}. See \S\ref{sec:iso}.
+\item[Unticking a parameter returns it to its place.] It no longer stays at the top of
+  the \tab{params} list once it is no longer selected.
+\item[Legends are smaller.] One point less, less padding inside the frame and less
+  space between a swatch and its text. The row that reports a capped legend
+  now names the cap instead of only counting what it left out.
+\item[Files are reloaded on request, not on a timer.] The three-second disk poll and
+  its \emph{Files changed on disk} dialog are gone; \emph{Reload} in the
+  \tab{data} tab re-reads what you ask it to. See \S\ref{sec:reload}.
+\item[A run keeps its identity across a reload.] Run keys are built from the name a
+  file was first given rather than from its current label, so renaming a file
+  and then reloading it no longer detaches every colour and dash set for its
+  runs.
+\item[Reusing a workspace against another study keeps the axes.] Removing one file and
+  adding another used to lose every tile's x axis on the way through zero open
+  files. See \S\ref{sec:swap}.
+\item[Colour by Parameter is the default,] and leads the row.
+\item[Rebuilds that change nothing cost less.] The plot's own settings and the drawn
+  annotations are written only when they differ; the \tab{params} filter waits
+  for the typing to stop; a file of more than 200 runs opens closed in
+  \tab{data}. None of this changes what is drawn --- see \S\ref{sec:redrawcache}.
+\end{description}
+
+\chapter{What aoeViewer is}
+
+aoeViewer reads AOE simulation result files --- plain-text tables of many runs
+against many channels, routinely hundreds of megabytes --- and plots them
+interactively. It is built as a C++17 core under a Python and Qt interface, and
+the seam between them is a plain C ABI, so the core is one shared library that
+any CPython 3.8 or later can load through \code{ctypes} and that any language
+with a C foreign-function interface can drive equally well.
+
+\section{The shape of the program}
+
+\begin{center}
+\small
+\begin{tabular}{@{}p{0.34\textwidth}p{0.58\textwidth}@{}}
+\toprule
+\textbf{Layer} & \textbf{Responsibility} \\
+\midrule
+\code{core/} (C++17) &
+  Memory-maps the result file, builds a sample index, parses columns on demand
+  across a thread pool, evaluates computed parameters, decimates series for
+  display, buckets ISO values into intervals, and reads and writes the
+  \code{.aoec} sidecar. Owns all sample memory and the cache budget. \\
+\addlinespace
+\code{core/include/aoe/aoe\_c\_api.h} &
+  The seam: an opaque-handle C ABI with a thread-local error string. Everything
+  above this line is written without a C++ compiler. \\
+\addlinespace
+\code{python/aoeviewer/\_core.py} &
+  Discovers and loads the shared library through \code{ctypes}, and wraps
+  returned pointers in zero-copy NumPy views whose lifetime is pinned to the
+  underlying block. \\
+\addlinespace
+\code{python/aoeviewer/session.py} &
+  A Pythonic fa\c{c}ade --- \code{Session}, \code{FileHandle},
+  \code{SimulationHandle}, \code{IsoGroup} --- which is also the public
+  scripting API. \\
+\addlinespace
+\code{python/aoeviewer/model.py} &
+  \code{AppState}: everything the core does not own. Pages, tiles, selections,
+  ISO filter definitions, styles, annotations, scale constraints, and the
+  workspace file format. Contains no Qt. \\
+\addlinespace
+\code{python/aoeviewer/ui/} &
+  The Qt layer: the main window, the twelve side panels, the plot grid and the
+  plot tiles. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+A rule visible throughout the source is that anything testable without a
+display lives in a Qt-free module. \code{model.py}, \code{scales.py},
+\code{isogroups.py} and \code{projection.py} import no Qt, which is why the
+decimation budget, the log-axis conversion, the interval arithmetic and the
+orthographic projection can all be tested headlessly, and are.
+
+\section{What the program does}
+
+Five ideas account for most of the interface.
+
+\textbf{A page of tiles.} The plotting area is a grid of up to twenty-five
+independent tiles, arranged from $1 \times 1$ to $5 \times 5$, and there may be
+any number of pages. Each tile is a complete plot definition: its own x channel,
+its own set of y channels, its own legend, its own axis locks, its own colouring
+and styling rules, and optionally its own three-dimensional projection.
+
+\textbf{Two independent constraints on what is drawn.} The \tab{data} tab
+chooses runs by name. The \tab{iso} tab chooses runs by the value some parameter
+holds constant across a run --- a mass, a Mach number, a configuration. The two
+compose with a logical AND: a curve is drawn if and only if its run is ticked in
+\tab{data} and admitted by every active ISO filter. Neither tab ever writes into
+the other's state.
+
+\textbf{Two independent encodings of what is drawn.} Colour names one identity
+and the dash pattern names another, chosen separately per tile. Several files of
+the same parameters on one tile is the case this exists for: colour by
+parameter, style by file, and the eye reads both at once.
+
+\textbf{Channels that need not exist in the file.} A computed parameter is an
+expression over the channels that are there ---
+\code{deriv(THETA, TIME)}, \code{NZ / max(NZ)},
+\code{ALTITUDE[TIME=last] - ALTITUDE[TIME=first]} --- evaluated in the core,
+per run, and thereafter indistinguishable from a channel the file carried. An
+alias is a second name for an existing channel, so a cryptic column can be given
+a readable one without touching the data.
+
+\textbf{Drawing what the screen can show, exporting what the data says.} A tile
+with twenty-five runs of five hundred thousand samples does not hand two and a
+half million points to Qt. It asks the core for a min/max decimation of exactly
+the visible window at roughly two points per horizontal pixel, so that narrow
+spikes survive but the item count stays in the low thousands. The CSV export
+does the opposite and writes every sample, because a plot is a picture and an
+export is data.
+
+\chapter{Getting started}
+
+\section{What you need}
+
+Building the core requires nothing but a C++ compiler --- GCC 8 or later, Clang
+7 or later, MSVC 2019, or MinGW-w64 --- and GNU make (or
+\code{mingw32-make.exe} on Windows). CMake is supported as an alternative but
+is not required. Running the graphical application additionally needs three
+Python packages: \code{numpy}, for array views over the core's buffers;
+\code{PySide6-Essentials} together with \code{shiboken6}, for the Qt widgets;
+and \code{pyqtgraph}, for the plotting canvas. Building the standalone
+executable adds \code{PyInstaller}.
+
+\section{Building and running}
+
+\begin{aoecode}
+# 1. Build the core
+./build.sh                  # Linux and macOS
+build.bat                   # Windows (MinGW)
+
+# 2. Check that it works
+./build.sh test             # or: build.bat test
+
+# 3. Run
+PYTHONPATH=python python -m aoeviewer                # Linux and macOS
+set PYTHONPATH=python && python -m aoeviewer         # Windows
+\end{aoecode}
+
+The build produces \code{build/libaoecore.so} on Linux,
+\code{build/libaoecore.dylib} on macOS and \code{build/aoecore.dll} on
+Windows. Two directories are generated rather than kept in the repository:
+\code{build/}, holding the compiled core and the PyInstaller work files, and
+\code{dist/}, holding the frozen executable.
+
+To try the program without real data, generate a sample:
+
+\begin{aoecode}
+python tools/gen_sample.py sample.aoe --sims 6 --rows 40000
+PYTHONPATH=python python -m aoeviewer sample.aoe
+\end{aoecode}
+
+\subsection{Where the library is looked for}
+
+\code{\_core.library\_path()} searches in a fixed order, most specific first:
+the environment variable \code{AOEVIEWER\_CORE} (which may name either a file or
+a directory); \code{sys.\_MEIPASS} and \code{sys.\_MEIPASS/aoeviewer}, which is
+where a PyInstaller bundle unpacks; the directory of the executable when frozen;
+the package directory; \code{<project>/build}; and finally the working
+directory. If none of them yields a loadable library, the raised
+\code{CoreError} lists every directory that was searched and suggests building
+the core first. On Windows a load failure that looks like a missing dependency
+adds a hint to run \code{objdump -p "<path>" | findstr "DLL Name"}.
+
+\section{Command-line options}
+
+Four options are recognised, and two of them are diagnostic tools worth knowing
+before you need them.
+
+\begin{center}
+\small
+\begin{tabular}{@{}p{0.24\textwidth}p{0.68\textwidth}@{}}
+\toprule
+\textbf{Option} & \textbf{Effect} \\
+\midrule
+\code{files...} & Result files to open at startup, given as positional arguments. \\
+\addlinespace
+\code{-version} & Prints the application version (\appver), the core version
+  (2.0.0), the path of the core library actually loaded, the worker count and
+  the log path. \\
+\addlinespace
+\code{-selftest} & Imports \code{numpy}, \code{PySide6},
+  \code{PySide6.QtWidgets} and \code{pyqtgraph} one at a time, loads the core
+  through \code{ctypes}, then constructs a \code{QApplication}, falling back to
+  the offscreen platform when there is no display. Prints \code{OK} or
+  \code{FAIL} per component, then either \emph{All checks passed.} or a count of
+  failures. This is the first thing to run when the program will not start. \\
+\addlinespace
+\code{-memory-limit MB} & Cap on cached sample data, default \code{2048.0},
+  floored at 64\,MB. Columns beyond the cap are dropped least-recently-used
+  first and re-read on demand. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Logging, and what to do when it will not start}
+
+The logger is named \code{aoeviewer} and writes \code{aoeviewer.log} through a
+rotating handler of 2\,MB with three backups. The directory is chosen in order:
+the environment variable \code{AOEVIEWER\_LOG\_DIR}; the directory of the
+executable when frozen, or the project root when running from source;
+\code{\textasciitilde/.aoeviewer}; and the working directory. On startup the log
+records the application and core versions, the core library path, the Python and
+platform versions, the worker count and the PySide6, pyqtgraph and NumPy
+versions --- which between them identify almost every environment problem.
+
+The application installs \code{sys.excepthook},
+\code{threading.excepthook} and a Qt message handler, so an unhandled exception
+anywhere, including inside a Qt callback, reaches the log rather than the void.
+If construction of the main window fails, the traceback is logged and printed,
+and a dialog titled \emph{aoeViewer could not start} appears with the log path as
+its informative text and the traceback as its detail.
+
+\section{The first plot}
+
+When the program opens with no arguments the window is empty: a grid of one tile
+labelled \emph{empty tile}, and a \tab{data} tab with nothing in it.
+
+Getting to a plot takes two steps. Press \emph{Add files} in the \tab{data} tab
+and choose one or more result files; each appears as a top-level row with its
+runs beneath it, and every run is ticked by default. Then open the \tab{params}
+tab, where the x axis has already defaulted to the first channel whose name
+begins with \code{TIME}, and tick one or more y channels. The tile draws as soon
+as it has both an x channel and at least one y channel.
+
+Opening a file of any size is done on a worker thread, and for files of 8\,MB or
+more the same task also writes an \code{.aoec} sidecar beside the result file.
+That happens once; subsequent opens of the same file skip the index scan
+entirely and are several times faster. Chapter~\ref{ch:reading} describes the
+mechanism.
+
+\chapter{The window}
+
+\section{Anatomy}
+
+The window has six regions. Across the top is the main toolbar, holding
+workspace load, save and save-as, the two exports, the auto-fit button and ---
+pushed to the right edge --- the four mouse modes. The title bar above it names
+the workspace currently open, with a leading asterisk while there are unsaved
+changes. Down the left edge runs the tab rail, a 21-pixel strip of vertically
+painted labels which selects which of the twelve panels is shown beside it. The
+panel itself occupies a splitter pane that can be dragged between 230 and 600
+pixels wide. To its right, the plot area is divided into the page and tile bar
+along its top and the grid of tiles below. The status bar along the bottom
+carries, from left to right, the description of any running background task or
+the standing summary of what is loaded, an indeterminate progress bar while a
+task runs, the crosshair readout, and the size of the sample cache.
+
+The active tile is the one every per-tile control acts on, and it is marked by a
+two-pixel accent border rather than a one-pixel neutral one. Clicking any tile
+makes it active. That border is set through a guard that returns early when the
+state has not changed, which is not a micro-optimisation:
+\code{QWidget.setStyleSheet} performs no comparison of its own and repolishes
+the widget and all its children, and since a tile is a \code{QGraphicsView} that
+means a full scene repaint. Without the guard, one click on a $5 \times 5$ page
+would repaint twenty-five plots.
+
+\section{The main toolbar}
+
+Nine buttons in three groups: the workspace, the two exports, and auto-fit ---
+then, pushed to the right edge, the four mouse modes. Every one of them is a
+labelled icon, and every icon is painted at request time rather than loaded from
+a file.
+
+\begin{center}
+\small
+\begin{tabular}{@{}p{0.23\textwidth}p{0.17\textwidth}p{0.52\textwidth}@{}}
+\toprule
+\textbf{Button} & \textbf{Shortcut} & \textbf{What it does} \\
+\midrule
+Load workspace & \key{Ctrl+L} & Opens a saved \code{.aoews} workspace, replacing everything currently loaded. \\
+Save workspace & \key{Ctrl+S} & Overwrites the current workspace, asking for a path only if there is not one yet. The tooltip names the file it would write. \\
+Save workspace as\ldots & \key{Ctrl+Shift+S} & Always asks for a path, then continues in the new file and leaves the old one as it was. \\
+Image & --- & Saves the active page as a PNG, exactly as displayed. \\
+CSV & --- & Writes the active tile's curves to a CSV file at full resolution. \\
+Fit & \key{Ctrl+0} & Auto-scales every tile, honouring axis locks. Double-clicking one plot fits just that one. \\
+Select & \key{Ctrl+1} & Mouse mode: click to activate a tile; drag annotations. \\
+Inspect & \key{Ctrl+2} & Mouse mode: click a curve to read every channel; drag to measure a slope. \\
+Pan & \key{Ctrl+3} & Mouse mode: drag to move the view. \\
+Zoom & \key{Ctrl+4} & Mouse mode: wheel zooms, drag a rectangle to zoom into it. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+There is deliberately no \emph{Open} action: \emph{Add files} in the \tab{data}
+tab and \emph{Load workspace} here already cover it.
+
+The toolbar is permanent by construction. Its context menu is suppressed, its
+\code{toggleViewAction} is disabled and hidden, and
+\code{MainWindow.createPopupMenu} returns nothing, because hiding the only
+toolbar in a window that has no menu bar would leave no way to bring it back.
+Its icons are not image files: they are painted on demand by
+\code{ui/icons.py} onto a $100\times100$ canvas and cached by name, colour and
+size, so they follow the theme and survive a PyInstaller bundle that ships no
+assets.
+
+\section{Mouse modes}
+
+The four modes are exclusive, and the inactive ones are genuinely off rather
+than merely ignored --- in Select and Inspect the view box has mouse interaction
+disabled on both axes, and the wheel event is swallowed. Switching mode writes a
+one-line hint into the status bar.
+
+Switching into Inspect brings the \tab{inspect} panel to the front, and clicking
+a curve brings it forward again every time, because that is where the answer
+appears. Leaving Inspect clears the inspection dot. A locked axis stays locked
+whatever the mode says: the limits are re-applied and per-axis mouse interaction
+disabled on every redraw, so no drag or wheel gesture can escape a range you have
+frozen.
+
+\begin{center}
+\small
+\begin{tabular}{@{}p{0.11\textwidth}p{0.52\textwidth}p{0.11\textwidth}p{0.16\textwidth}@{}}
+\toprule
+\textbf{Mode} & \textbf{Drag does} & \textbf{Wheel} & \textbf{Annotations} \\
+\midrule
+Select & Moves markers and the edges of shaded areas; moves the legend and text captions. & inert & movable \\
+Inspect & Rubber-bands a slope line; a drag shorter than six pixels counts as a click and inspects instead. & inert & frozen \\
+Pan & Pans the view. On a 3D tile: turns it; middle-drag or \key{Shift}+drag slides it; right-drag or \key{Ctrl}+drag zooms. & inert & frozen \\
+Zoom & Rubber-bands a rectangle to zoom into. & zooms & frozen \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Annotations are movable only in Select mode and only on a two-dimensional tile.
+
+\section{The status bar}
+
+The standing summary reads \emph{N file(s), P run(s) plotted, M parameter(s)}.
+When an ISO filter is holding runs back it becomes more explicit ---
+\emph{4 file(s), 17 of 25 run(s) plotted, 8 held back by the ISO filter(s), 42
+parameter(s)} --- which is the shortest honest description of a state that would
+otherwise look like lost data.
+
+The progress bar is deliberately indeterminate: it has range 0 to 0, a fixed
+width of 120 pixels and no text. The core reports no progress from inside a
+parse, and a fabricated percentage would be worse than an honest working. On the
+right, \emph{cache NN MB} is the sample data the core is holding; its tooltip
+explains that columns are dropped automatically when the figure exceeds the
+limit and re-read when needed again.
+
+\section{Files that change underneath you}
+\label{sec:reload}
+
+\begin{aoenew}{Changed in \appver{} --- nothing polls the disk}
+Up to 2.1.0 a timer fired every three seconds, asked the core which open files
+had changed, and put up a dialog titled \emph{Files changed on disk} offering
+to reload them.
+
+It was wrong in both directions. It interrupted work that had nothing to do
+with the file it was asking about --- the question arrives while you are
+reading a plot of something else, and answering it is the only way back. And it
+could not be trusted anyway: a solver halfway through rewriting its output is a
+file that has changed and must \emph{not} be read, so the prompt's best case
+was asking a question it had no business asking, and its worst case was talking
+you into a half-written file.
+
+Whether the data on disk is finished is a question only the person running the
+solver can answer. Now they answer it.
+\end{aoenew}
+
+\emph{Reload}, in the \tab{data} tab, re-reads the selected file or files from
+disk; with nothing selected it re-reads every open file, which is what ``the
+solver has just finished'' usually calls for. Selecting a run means the file it
+belongs to --- there is no such thing as reloading one run. The same action is
+on the row's right-click menu, named after the file it would re-read.
+
+A reload drops every cached sample for those files and re-reads the index, so
+it costs a full parse and runs on the worker thread exactly as opening does; a
+sidecar the new contents have invalidated is rewritten in the same pass, which
+spends the parse the user is already waiting for rather than the next open's.
+
+Names survive it. The file keeps the name you gave it, every run keeps its own,
+and so do their colours and dashes.
+
+\begin{aoenote}{Why a reload used to lose the styles of a renamed file}
+A run's key is \code{<file>::<id>::<ordinal>}, and \code{reload()} re-opens the
+dataset and rebuilds every key. While the \code{<file>} part was the
+\emph{display} name, renaming a file and then reloading it renamed every one of
+its run keys with it --- and every colour, dash and marker the user had chosen
+was suddenly attached to a key nothing answered to.
+
+It was invisible while reloading was something a timer occasionally offered.
+Making it a button people press on purpose is what brought it out. The key is
+built from the name the file was \emph{first} given, which renaming does not
+touch and a reload does not change.
+\end{aoenote}
+
+On closing, if anything has been modified, a three-way prompt titled
+\emph{Unsaved changes} offers to save the workspace first; \emph{Cancel} aborts
+the close. The application then waits up to thirty seconds for background work
+to finish before destroying the session, because tearing the core down while a
+worker is still inside it would write into freed memory.
+
+\section{Theme}
+
+At the foot of the tab rail sits a button labelled \emph{L / D} whose tooltip
+reads \emph{Switch between light and dark}. It flips the whole application,
+including the plot canvases, the legend grounds, the painted toolbar icons and
+the text captions.
+
+The stylesheet sets every colour it depends on instead of inheriting from the
+desktop, because Qt's default palette differs enough between Linux and Windows
+that an application which is correct on one can be unreadable on the other. Two
+details are worth knowing. Check and radio indicators are drawn explicitly,
+including the ones inside tree, list and table views --- those are drawn by the
+views rather than by \code{QCheckBox}, and they are the ticks beside a run in
+\tab{data}, a parameter in \tab{params} and a value in \tab{iso}. And the type
+scale exists only as a set: widget text is sized in pixels (10\,px body, 9\,px
+for hints, section titles and the status bar) while plot text is sized in points
+(7.5\,pt tile titles, 7\,pt axes, 6\,pt legend rows, 6.5\,pt readouts and
+captions), because a stylesheet that sets a pixel size makes
+\code{QFont.pointSizeF()} report $-1$ and any code that reads a font back would
+have to guess.
+
+\begin{aoenew}{Changed in \appver{} --- legend type}
+Legend rows were 7\,pt, the same as the axes, until \appver. They are 6\,pt now,
+with less padding inside the legend's frame and less space between a row's
+swatch and its text. A legend is a key that is read once and glanced at
+thereafter, and at the axis size it was taking a visible corner out of every
+tile on a $3 \times 3$ page.
+\end{aoenew}
+
+\chapter{The twelve panels}
+
+The tab rail selects one of twelve panels. Selecting a tab refreshes that panel
+immediately and marks the others stale, so they are refreshed lazily when next
+shown --- which is why no panel is allowed to write application state while
+refreshing. Five of the panels act on the active tile only (\tab{params},
+\tab{style}, \tab{scale}, \tab{3d}, \tab{text}); the rest are global.
+
+\section{DATA --- choosing runs}
+\label{sec:data}
+
+The panel is a tree with one top-level row per open file and one child row per
+run. \emph{Add files} opens the file dialog, which filters on AOE result files
+(\code{*.aoe *.dat *.txt}). \emph{Remove} unloads the selected files, and acts
+only on file rows --- selecting a single run and pressing \emph{Remove} must not
+unload the whole file it belongs to. \emph{Clear all} unloads everything.
+
+Ticking a run plots it. Ticking a file row plots every run in that file, and
+clearing it plots none of them; the box is tri-state, so a file with only some of
+its runs ticked shows the indeterminate mark. The same two operations are on the
+context menu by name --- \emph{Plot all 25 runs in flight\_b.aoe} and \emph{Plot
+no runs in flight\_b.aoe} --- along with \emph{Rename\ldots}, \emph{Reload
+\ldots{} from disk} and, on a file row, \emph{Copy full path}. At the foot of
+the panel, \emph{Plot all} and \emph{Plot none} act across every loaded file,
+driven from the session rather than from the tree. \emph{Reload}, beside
+\emph{Rename}, re-reads files from disk; \S\ref{sec:reload} describes what it
+does and why nothing does it on its own.
+
+\begin{aoenew}{Changed in \appver{} --- a very large file opens closed}
+A file of more than 200 runs arrives with its runs hidden until you open it.
+Expanding a node is what makes Qt lay out and build view items for its
+children, so a twelve-hundred-run study --- the size the performance chapter
+measures --- paid for all twelve hundred rows on load, before anyone had looked
+at one. Nobody scrolls through twelve hundred rows to find a run either.
+
+Nothing is missing: every run is in the tree, its tick is in force, and
+\emph{Plot all} still reaches it. Whichever way you leave a file, open or
+closed, is remembered --- by path, so it survives a reload and a rename.
+\end{aoenew}
+
+Renaming, by double-click or from the menu, changes the display name only. The
+identity a style attaches to is a separate key that never changes, so
+recolouring does not follow a rename; the tooltip of a renamed run records what
+the file calls it.
+
+\begin{aoenew}{New in \appver{} --- names are saved}
+A name given here is written into the workspace and restored when it is loaded.
+Before \appver{} it lived only for the session, so a study whose files had been
+given readable names came back as \code{flight\_b.aoe} the next morning.
+\S\ref{sec:workspaces} describes how the names are keyed and what an older
+workspace does.
+\end{aoenew}
+
+\begin{aoenote}{Why the list does not blink}
+The tree is rebuilt only when its structure changes --- a signature over each
+file's index, name, path and the index, name and file-level identifier of each of
+its runs. Ticking a box leaves every widget in place and writes only the check
+states, so scroll position and expansion survive. Before this, selecting a run
+rebuilt the whole tree, which read as a flicker and lost your place in a
+twenty-five-run file.
+\end{aoenote}
+
+A run that is ticked here but excluded by an ISO filter is painted grey, and its
+tooltip gains a sentence explaining that it is held back rather than unselected.
+That greying is the visible half of the two-constraint model described in
+\S\ref{sec:iso}.
+
+\section{PARAMS --- choosing the axes of a tile}
+\label{sec:params}
+
+\tab{params} sets the x channel and the y channels of the active tile, and
+nothing else; the legend, grid, log scale and marker settings that once lived
+here moved to \tab{style}. The x combo and the y list both display the channel's
+label --- the name with its unit appended, as in \code{ALTITUDE [ft]}, when the
+file's dialect carries one --- but both carry the bare name as their data, so a
+unit can never be mistaken for part of a name.
+
+The filter box matches against the channel name, uppercased. If the text
+contains \code{*} or \code{?} it is treated as a wildcard pattern; otherwise it
+is a substring test. Non-matching rows are hidden rather than removed, so the
+ticks of channels you have filtered out of sight are still in force.
+
+It refilters 400\,ms after the last keystroke rather than on every one. These
+files carry hundreds of channels --- 585 in one of the dialects this reads ---
+so a letter is several hundred rows hidden or shown and a relayout of the list,
+and the answer between two letters of the same word is not one anybody reads.
+It is the same delay, for the same reason, that the \tab{text} panel uses
+before it commits a caption.
+
+Right-clicking a channel offers \emph{Create alias for NAME\ldots}, \emph{Use as
+X axis} and \emph{Copy name}. The alias dialog is pre-filled with a readable
+guess made by replacing underscores with spaces and capitalising words.
+
+\begin{aoenew}{Changed in 2.1.0 and \appver{} --- the order of the list}
+In 2.0.0 the y list was in file order and the tile's y list took the channels in
+the order they appeared in the list, not the order you ticked them.
+
+Since 2.1.0 the ticked channels of the active tile are listed \emph{first}, in
+the order they were ticked, and the rest follow in file order. That order is
+also the tile's y list, so it is the order the title names them in and the order
+the legend and the CSV export use. The filter still only hides rows: a selected
+name that does not match stays selected and stays at the top, hidden until the
+filter lets it through.
+
+\appver{} fixed the other half of that. Unticking a channel now returns it to its
+place among the unselected ones. In 2.1.0 the promotion was applied to the
+list's own order, which has no way back --- once a name had been moved to the
+top, ``the order as given'' \emph{was} the promoted one --- so an unticked
+channel stayed at the top until something else rebuilt the list. The promotion
+is recomputed from the file order on every tick now.
+\end{aoenew}
+
+\begin{aoenote}{Displayed default versus committed default}
+Refreshing the panel displays a sensible x channel --- the first whose name
+starts with \code{TIME}, otherwise the first channel --- but does not write it to
+the tile. The default is committed once per redraw, by
+\code{AppState.apply\_parameter\_defaults()}, and only for tiles that already
+have a y or z channel. Blank tiles are left blank.
+\end{aoenote}
+
+\section{COMPUTE --- channels the file does not contain}
+
+A computed parameter is a name and an expression. Type both and press
+\emph{Create}; the expression is validated on every keystroke, and the line
+beneath the field reads \emph{Valid} or carries the core's parse error.
+Validation evaluates nothing --- it parses and resolves identifiers only --- so
+it is cheap enough to run while you type.
+
+Once created, the parameter behaves exactly like a channel read from the file.
+It appears in \tab{params}, in \tab{iso}, in the \tab{inspect} tables, in the CSV
+export, and it can be referenced by other formulas. \emph{Edit selected} loads a
+definition back into the fields; the name field is disabled while editing,
+because renaming would orphan every expression that referred to it. Applying an
+edit re-evaluates the parameter everywhere. \emph{Remove selected} removes it,
+and also removes everything that depended on it, saying which: \emph{Removed
+MACH\_SQ, and ENERGY which depended on it}.
+
+The \emph{Help} button opens the complete syntax reference, which is also
+reproduced in Chapter~\ref{ch:formula}.
+
+\section{ALIAS --- a second name for a channel}
+
+Choose a channel, type a display name, press \emph{Add alias}. The new name
+appears everywhere a channel name can appear and resolves to the same data.
+Aliases are resolved in the core, chains are followed, and a cycle such as
+\code{A -> B -> A} is broken rather than hung. The defined list shows each alias
+with the name it resolves to, and \emph{Remove selected} deletes one.
+
+\begin{aoenote}{Aliases are saved, and survive data that has moved on}
+An alias is written into the workspace and restored with it. If the channel
+behind it is not in the files the workspace reopens with, the alias is kept
+rather than dropped --- it costs nothing until it resolves, and the file it
+belongs to may be opened next --- and the load reports it so that an axis
+plotting nothing has an explanation.
+\end{aoenote}
+
+\section{ISO --- filtering runs by a value they hold constant}
+\label{sec:iso}
+
+An ISO parameter is one whose value is constant within a run but differs between
+runs: the initial mass of a sweep, a Mach number, a configuration index. The
+\tab{iso} tab filters the runs by those values, and several ISO parameters can
+filter at once, combining with a logical AND so that each one narrows the set
+further.
+
+Choose a parameter in the \emph{Filter by} combo, which lists only parameters not
+already filtered on, and press \emph{Add}. The parameter appears as a checkable
+node whose badge summarises the selection --- \emph{all 75}, \emph{none of 75} or
+\emph{2/3} --- followed by \emph{paused} when the filter is switched off,
+\emph{grouped} when it is grouped, \emph{not in the loaded files} when no open
+file carries it, or \emph{N outside the groups} when some values fall outside
+every interval. Its children are the individual values, or the interval names
+once grouped, each separately checkable.
+
+The tab is a \textbf{tree}: one collapsible node per parameter over its own
+values, so every filter and everything selected in it is on screen at once. It
+replaced a list of parameters above a list of the selected one's values, which
+could only ever show one filter's values at a time --- with three active there
+was no way to see what was selected without clicking through them and
+remembering.
+
+\begin{aoecode}
+ v MACH      3/12
+     0.70
+     0.75
+     0.80
+ > WEIGHT    all 5   grouped
+ > INITIAL_MASS   2/3   paused   grouped
+\end{aoecode}
+
+\begin{aoenew}{Changed in \appver{} --- what a parameter's checkbox does}
+It is a \textbf{select-all over the values beneath it}. Ticking it ticks every
+value --- or every interval, when the parameter is grouped --- unticking it
+unticks them all, and it shows a partial tick when some but not all are on.
+That is the same thing the \emph{All} and \emph{None} buttons do to the selected
+parameter, reachable now from the row itself.
+
+Up to 2.1.0 that box carried the filter's own on/off flag, so the obvious
+reading of a checkbox sitting above a list of checkboxes did something else
+entirely, and clicking it appeared to leave the values alone.
+
+\textbf{The on/off flag moved to the row's right-click menu}, as \emph{Use this
+filter}, where it is named rather than guessed at. Switching it off keeps the
+values you ticked --- which is what makes ``with and without this'' a two-click
+comparison --- and the row says \emph{paused}, so a filter that is not narrowing
+anything still accounts for itself in the tree.
+\end{aoenew}
+
+Four buttons act on the selected parameter: \emph{Group\ldots} opens the interval
+editor, \emph{All} and \emph{None} tick or untick every value, and \emph{Remove}
+stops filtering by it. The context menu carries the same operations, plus
+\emph{Ungroup} and \emph{Use this filter}. Ungrouping keeps the intervals in
+state, so re-grouping returns to what you had set up.
+
+Ticking an individual value also switches the filter on, since choosing what to
+show is a statement that the filter should be applied. Unticking everything does
+not switch it off, and does not switch it on either: it says nothing about
+whether the filter is paused, so a paused filter stays paused rather than being
+activated to admit nothing.
+
+\subsection{Grouping values into intervals}
+
+The header of the grouping dialog states how many distinct values there are and
+the range they span. The \emph{Groups} spin box is bounded above by the number of
+values --- there can never be more groups than values --- and \emph{Distribute
+evenly} splits the observed range into equal intervals, discarding boundaries
+edited by hand. The table is editable in its \emph{Name}, \emph{From} and
+\emph{To} columns; \emph{Values} is read-only.
+
+The editing model is the reason overlapping intervals are impossible rather than
+merely rejected. $N$ groups are stored as $N+1$ sorted edges, so the \emph{From}
+of one row and the \emph{To} of the row above are the same number; editing either
+moves that single edge, clamped between its neighbours. Interior gaps and
+overlaps are therefore unrepresentable. The two outer edges may still be moved
+inward, which is how an outlier is deliberately excluded, and the note beneath
+the table then reports how many values fall outside every group. A comma is
+accepted as a decimal point, and a cell that cannot be parsed silently restores
+its previous value. Changing the group count clears hand-typed names and
+re-splits evenly; names you typed yourself are never regenerated.
+
+Bounds are inclusive at both ends and the first claiming group wins, so a value
+sitting exactly on a shared edge belongs to the earlier interval.
+
+\subsection{Two constraints, composed}
+
+The decisive property of this panel is what it does not do: applying a filter
+never writes into the \tab{data} selection. A run is drawn if and only if
+\[
+  \text{ticked in \tab{data}} \;\wedge\; \text{admitted by every active ISO filter.}
+\]
+Ticking a run whose ISO value is excluded therefore puts it on no tile, and
+changing an ISO filter never re-ticks the \tab{data} tab. The panel's summary
+line says how many of the \tab{data} tab's runs are being held back, and the
+status bar repeats it.
+
+\begin{aoenote}{What this replaced}
+An earlier version wrote the filter result into the run selection. Applying a
+mass filter then silently re-ticked the \tab{data} tab, and re-ticking a run in
+\tab{data} appeared to widen the filter: two controls, one piece of state, each
+overwriting the other's answer. The intersection is now computed only where
+curves are actually drawn, and memoised, because every tile asks the same
+question on every rebuild.
+\end{aoenote}
+
+Two details of the admission rule are worth stating. A run whose value for the
+parameter is not a number is never admitted --- it has no value for that
+parameter, so no interval can claim it. And for an ungrouped filter, a value
+absent from the tick map counts as on, so a value that appears only after a new
+file is opened is shown rather than silently hidden.
+
+\subsection{What a workspace keeps, and what it does when the data has moved on}
+
+The filter definitions are saved: which parameters are filtered on, their
+intervals, and which values are ticked. What is not saved is the answer --- which
+runs those filters admit describes the files the last workspace had open, and is
+rebuilt once the new ones are known.
+
+A workspace outlives the run it was made from. The solver is re-run with fewer
+channels, a file is replaced, a parameter is renamed; none of that may raise, and
+none of it may quietly empty the plot. Three cases are distinguished, and the
+load reports each of them in one dialog titled \emph{Workspace loaded with
+differences}.
+
+\begin{center}
+\small
+\begin{tabular}{@{}p{0.36\textwidth}p{0.31\textwidth}p{0.25\textwidth}@{}}
+\toprule
+\textbf{Situation} & \textbf{What happens} & \textbf{Shown as} \\
+\midrule
+No open file carries the parameter & The filter constrains nothing: it cannot speak about a channel that is not there. & \emph{not in the loaded files} \\
+\addlinespace
+The parameter is there, but no run falls in a ticked interval & The filter genuinely admits nothing, and the plot is correctly empty. & \emph{no run satisfies it} \\
+\addlinespace
+The column is there but a run's value is not a number & That run alone is excluded --- the column exists and this run has no value for it. & greyed in \tab{data} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{aoenote}{A filter with nothing to say says nothing}
+The first row of that table used to read the other way: a filter on a parameter a
+file did not carry excluded every one of that file's runs. That is defensible
+read on its own and wrong in every case it actually arises. It made a filter on a
+parameter only some files carry hide every run of the others, and --- once
+filters became part of a saved workspace --- it made a workspace whose ISO
+parameter had since disappeared open to an empty plot with nothing at all to
+explain it.
+\end{aoenote}
+
+Entries that cannot be read at all are skipped individually rather than failing
+the load: a value that is not a number, an interval with non-numeric bounds, an
+entry that is not an object. A reversed interval is normalised rather than
+refused, and a grouped filter whose intervals did not survive is demoted to
+ungrouped rather than left in a state the tab would have to invent intervals for.
+
+Very long value lists are truncated in the tree at four hundred children, with a
+non-checkable row reading \emph{\ldots and N more, still filtered on}. The ticks
+for those values live in the state, so the filter still applies to them; only the
+rows are omitted, because laying out several thousand tree items is slow enough
+to be felt. A parameter's checkbox acts on \emph{every} value, including the ones
+past that cap.
+
+\section{STYLE --- colour, line, marker and legend}
+\label{sec:style}
+
+The panel opens with four per-tile switches --- \emph{Legend}, \emph{Grid},
+\emph{Log Y} and \emph{Points} --- whose defaults are on, on, off and off.
+\emph{Points} draws a circular marker on every curve of the tile that has no
+marker of its own; a per-curve marker overrides it.
+
+\subsection{Two encodings, chosen separately}
+
+\begin{aoenew}{New in 2.1.0 --- Colour by and Style by}
+In 2.0.0 there was one choice, \emph{Colour by}, and the dash pattern and marker
+hung off whatever key it produced. A curve therefore had one identity, and a tile
+showing the same three channels from three files could distinguish the channels
+or the files but not both.
+
+There are two choices now, made independently on each tile.
+\end{aoenew}
+
+\textbf{Colour by} --- \emph{Parameter}, \emph{Simulation} or \emph{ISO} --- sets
+the colour and nothing else. \emph{Parameter} is the default, and leads the
+row: a tile is nearly always asked which quantity a line is, and colouring by
+run answers a different question --- one that a twenty-five-run study answers
+with twenty-five colours that name nothing the user chose. Each radio is
+identified by its mode rather than by its place in the row, which is also what
+a workspace stores, so the row can be reordered without re-labelling a saved
+tile. Choosing \emph{ISO} reveals an \emph{ISO parameter}
+combo. If the tile has no ISO parameter yet, the combo displays the default
+without writing it, and selecting the radio commits that choice immediately ---
+so that the table below is built from the same parameter the plot will use.
+Getting this wrong was a real defect: the table was built from the old choice and
+showed the wrong rows until something else forced a refresh.
+
+\textbf{Style by} --- \emph{None}, \emph{File}, \emph{Simulation} or \emph{ISO}
+--- sets the dash pattern and the marker. \emph{None} is the 2.0.0 behaviour:
+dash and marker follow the colour key. Choosing \emph{ISO} reveals a second
+combo, \emph{Style ISO}, which need not name the same parameter the colour does.
+
+The pairing this exists for is several files of the same parameters on one tile:
+\emph{Colour by Parameter} and \emph{Style by File}. The colour says which
+quantity, the dash says which file, and the two read at once.
+
+\begin{center}
+\small
+\begin{tabular}{@{}lp{0.34\textwidth}p{0.30\textwidth}@{}}
+\toprule
+\textbf{Colour by} & \textbf{One colour per} & \textbf{Key} \\
+\midrule
+Parameter & y channel of the tile (the default) & \code{param::<name>} \\
+Simulation & plotted run & \code{sim::<run key>} \\
+ISO & value or interval of the chosen ISO parameter & \code{iso::<param>::<label>} \\
+\bottomrule
+\end{tabular}
+
+\vspace{8pt}
+
+\begin{tabular}{@{}lp{0.34\textwidth}p{0.30\textwidth}@{}}
+\toprule
+\textbf{Style by} & \textbf{One dash per} & \textbf{Key} \\
+\midrule
+None & --- & the colour key above \\
+File & open file & \code{file::<path>} \\
+Simulation & plotted run & \code{sim::<run key>} \\
+ISO & value or interval of the \emph{Style ISO} parameter & \code{iso::<param>::<label>} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The two key namespaces are the same, which is deliberate: a tile that colours and
+styles by the same thing gets the same key from both, and a curve keeps one
+identity rather than two that could drift apart.
+
+\emph{Apply encoding to all tiles} copies all four choices --- both modes and
+both ISO parameters --- onto every tile of every page, hidden tiles included.
+
+Dash patterns are handed out in order of first use from \code{solid},
+\code{dash}, \code{dot}, \code{dashdot}; past the fourth distinct identity the
+cycle repeats and a marker is added from the ten shapes, so a fifth file is
+still told apart from the first.
+
+\subsection{What decides a curve's colour}
+
+A colour, once allocated, is kept for the session. The palette has twelve entries
+and the registry hands them out in order of first use, so the first three curves
+on a tile are always red, then blue, then dark green, whatever the colouring mode
+--- allocation depends on the order keys are first seen, not on what they
+describe. Three curves is the common case, and a set of figures whose three
+colours mean the same three things throughout is easier to read than one whose
+first colour depends on how many curves happened to be on the tile. There is
+deliberately no cyan near the front: cyan and a light green are the same colour
+once a line is one pixel wide. The remaining entries are ordered for separation.
+Loading another file therefore never recolours what is already on screen.
+
+\emph{Re-assign palette} deliberately forgets the current assignments so the next
+redraw allocates afresh, and \emph{Reset widths} drops per-curve widths so all
+follow the global setting. Two global spin boxes set the line width, from 0.1 to
+10.0 with a default of 1.6, and the marker size, from 1.0 to 20.0 with a default
+of 6.0.
+
+\subsection{The two tables}
+
+\begin{aoenew}{Changed in 2.1.0 --- one table became two}
+The single \emph{Curves} table of 2.0.0 is now a \emph{Colour} table and a
+\emph{Line} table, because the two encodings have different row sets: three
+parameters and four files is three colour rows and four line rows, not twelve of
+anything. Both scroll when the list is long.
+\end{aoenew}
+
+\emph{Colour} has one row per coloured identity in the current \emph{Colour by}
+mode, with a swatch that opens a colour dialog. \emph{Line} has one row per
+styled identity in the current \emph{Style by} mode, with a dash combo over
+\code{solid}, \code{dash}, \code{dot} and \code{dashdot}, and a marker combo over
+eleven shapes from \emph{none} to \emph{hexagon}. With \emph{Style by} set to
+\emph{None} the Line table shows a single unselectable row reading \emph{Style by
+is None --- dash follows colour}; when nothing is plotted, both show
+\emph{Nothing plotted yet}.
+
+\subsection{The legend}
+\label{sec:legend}
+
+A legend row is assembled from up to four parts, each switched separately:
+\emph{Parameter} (on by default), \emph{ISO}, \emph{File} and \emph{Simulation},
+joined by vertical bars. The dash pattern and marker are never spelled out in
+words, because the legend already draws a sample of the curve.
+
+With \emph{File} and \emph{Simulation} off, rows whose text is identical are
+merged. That merging is the point of the switches: twenty-five runs sharing three
+ISO intervals produce three rows rather than twenty-five saying the same thing.
+
+\begin{aoenew}{Fixed in \appver{} --- ISO and \emph{Style by ISO}}
+Ticking \emph{ISO} writes every ISO identity the curve carries, not only the
+colour's.
+
+Before \appver{} only the \emph{Colour by} parameter's label was consulted. On a
+tile colouring by parameter and styling by ISO that label is empty --- colour is
+not keying on ISO, so no ISO labels were looked up at all --- so \emph{ISO} wrote
+nothing, every row came out as just the parameter name, and the rows, being
+identical, were merged into one. A tile whose dashes carried the whole sweep had
+a legend that could not explain it.
+
+It reads \code{ALT | MACH = 0.75} now, one row per value, ordered by value ---
+or by interval, when the parameter is grouped --- exactly as the colour path
+already was. When \emph{Colour by} and \emph{Style by} name the same ISO
+parameter it is written once, not twice.
+\end{aoenew}
+
+Beyond sixty rows the legend stops adding them and appends a pen-less entry
+reading \emph{\ldots and N more (legend caps at 60 rows)}. The cap is what
+keeps a large study viewable: pyqtgraph lays out two graphics items per row, and
+a thousand-run study froze the application here before it existed. The row names
+the cap rather than only counting what it left out, because a bare count reads
+as missing data --- every curve those rows would have named is drawn, and
+turning \emph{File} and \emph{Simulation} off merges the identical rows, which
+usually brings the count back under the cap by itself.
+
+The \emph{Corner} combo snaps the legend to any of the four corners. Dragging the
+legend on the plot puts it anywhere, switches the corner to \emph{custom} and
+keeps the position, including in a saved workspace. \emph{Apply legend to all
+tiles} copies this tile's whole legend configuration --- whether it is shown, its
+corner or dragged position, and which parts make up a row --- onto every tile of
+every page, and reports how many tiles changed or says that every tile already
+had it.
+
+\subsection{Titles and axis captions}
+
+\begin{aoenew}{Changed in 2.1.0 --- the title carries the names}
+The captions beside Y and under X are blank. The tile's title names every
+selected parameter and the x channel, as \code{ALPHA, NZ = f(TIME)}, and a long
+list wraps onto a second line rather than being truncated.
+
+A caption beside the axis repeated what the title already said and spent a strip
+of a tile that is often one ninth of a page. The unit reaches the reader through
+the tick values and the \tab{inspect} tables instead.
+\end{aoenew}
+
+A tile with nothing to draw says so in the same place: \emph{empty tile},
+\emph{no parameter selected (x: TIME)}, \emph{ALTITUDE (no x axis selected)}, or
+\emph{3D tile --- choose X, Y and Z}. A three-dimensional tile reads
+\code{ALTITUDE = f(EAST, NORTH)}.
+
+\section{SCALE --- axis ranges and cross-tile constraints}
+
+While an axis is unlocked, its two boxes follow the plot as you pan and zoom, so
+ticking \emph{Lock X range} or \emph{Lock Y range} is a one-click way to freeze
+exactly what you are looking at. Locked, the boxes are the range: they are
+enabled, and typing in one moves the frame. The boxes span $\pm 10^{12}$ with six
+decimals and do not commit per keystroke --- a value takes effect on
+\key{Enter} or when the field loses focus. A minimum typed above its maximum is
+normalised rather than allowed to blank the plot.
+
+A locked range is a hard bound, not a starting point: the view's limits are set
+and per-axis mouse interaction disabled, so no drag or wheel can leave it. A
+degenerate range is refused, because a view frozen at zero width looks exactly
+like a crash.
+
+The two \emph{Apply} buttons attach a range to the variable rather than to the
+tile. \emph{Apply X range to every tile with the same X axis} gives every plot
+against that x channel, on every page, the same horizontal scale, so they can be
+compared directly. \emph{Apply Y range to every tile sharing a parameter} does
+the same for any tile showing any of this tile's y channels. Because these
+constraints are re-applied on every redraw, they also govern tiles that acquire
+the parameter later --- which is the whole point, and which the first
+implementation got wrong by walking only the tiles that existed when the button
+was pressed.
+
+\subsection{When two constraints meet on one axis}
+
+A tile has one y axis and may draw several channels on it, so it can be asked for
+two different vertical windows at once. Consider three tiles: the first draws
+\code{ALTITUDE}, the second draws \code{ALTITUDE} and \code{MACH}, the third
+draws \code{MACH}. Constrain \code{ALTITUDE} from the first tile and \code{MACH}
+from the third, and the second tile now carries two incompatible demands.
+
+No arithmetic satisfies both, so none is invented. Parameters that ask for the
+same window are applied normally. Parameters that disagree leave the tile exactly
+as you had it --- free, and therefore auto-fitting to show all of its data ---
+and the \tab{scale} tab says so, naming the parameters and their ranges, with the
+offending entries marked in the \emph{Constrained variables} list. A button,
+\emph{Use the range that covers both}, then offers the compromise as something
+you choose rather than something you are given; it locks this tile, not the
+variables, so the tiles whose scales the constraints were set to fix keep them.
+
+\begin{aoenote}{Why not simply take the union?}
+Taking the smallest window containing both is the obvious answer, and it is what
+the program used to do. It is wrong twice over. A union is a superset of both
+ranges and therefore honours neither, which defeats the entire purpose of the
+feature: the point of constraining a variable is that two tiles showing it can be
+compared directly, and under a union they cannot. And when the two ranges differ
+in magnitude the union destroys the smaller channel --- \code{ALTITUDE} at
+$[0, 13000]$ unioned with \code{MACH} at $[0, 1]$ leaves Mach occupying
+0.008\,\% of the axis height, a flat line along the bottom edge, with nothing on
+screen to explain it. Which parameter survived depended on its magnitude rather
+than on any decision the user had made.
+\end{aoenote}
+
+The x axis cannot fail this way. A tile has exactly one x channel, so the lookup
+returns at most one range however many x constraints are declared; the conflict
+is not representable. The same channel may carry one window as an x axis and a
+different one as a y axis, which is correct --- they are different axes --- and
+the \emph{Constrained variables} list labels every entry with the axis it belongs
+to.
+
+Three-dimensional tiles are skipped entirely. Their frame is the projection's own
+centre and zoom, and the two-dimensional ranges describe data extents that mean
+nothing to a projection; locking them did no visible harm but left a tile
+mysteriously locked if it was ever switched back to two dimensions.
+
+The \emph{Constrained variables} list shows every such constraint, and \emph{Clear
+all variable constraints} removes them while leaving per-tile locks alone.
+\emph{Unlock both and auto-fit} releases this tile and also pops its parameters
+out of the variable-wide constraints --- without which the next redraw would
+simply re-lock it.
+
+\begin{aoenote}{When the frame moves}
+A tile is fitted once, when it first acquires data. After that the frame moves
+only on \emph{Fit}, on a double-click, or when \tab{scale} changes something. An
+ordinary redraw --- restyling a curve, ticking a run, toggling the grid --- never
+moves the frame. Locking x on a tile whose y is free is the one exception: the y
+axis is re-fitted inside the new x window, computed by a single pass in the core
+that understands a non-monotonic x, because otherwise a windowed manoeuvre sits
+as a flat line at the bottom of the tile.
+\end{aoenote}
+
+\section{3D --- three channels against each other}
+
+Ticking \emph{Draw the active tile in 3D} turns the active tile into an
+orthographic projection of three channels, filling in plausible axes if the tile
+has none. The three combos set x, y and z; a 3D tile uses exactly one y channel.
+\emph{Rotation} sweeps the azimuth from 0 to 359 degrees and \emph{Tilt} the
+elevation from $-89$ to $+89$, clamped rather than wrapped because past straight
+up or down the projection turns inside out. Four presets --- \emph{Iso},
+\emph{Top}, \emph{Front}, \emph{Side} --- set the pair directly, and \emph{Apply
+these axes to every 3D tile} copies axes and view onto every other tile already
+in 3D.
+
+Two switches control the depth cues. \emph{Orientation axes (X, Y, Z)} draws the
+fixed-size triad in the corner, coloured by the universal convention --- x red, y
+green, z blue --- and hovering it names the channel on each axis and its range.
+\emph{Reference grid and tick values} draws the back-wall grid and its numbers;
+without them the projection has no depth cue and no numeric scale, but on a very
+dense trajectory they can be turned off.
+
+Each channel is normalised independently onto $[-0.5, 0.5]$, so three channels
+with unrelated units stay readable together; a channel that never moves collapses
+to the middle of the cube, which is the honest picture of a constant. In Pan mode
+a drag turns the object, middle-drag or \key{Shift}+drag slides it and
+right-drag or \key{Ctrl}+drag zooms; in Zoom mode the wheel zooms. Double-click
+or \key{Ctrl+0} frames everything again.
+
+Both encodings apply here. Colour and dash are resolved exactly as on a
+two-dimensional tile, so \emph{Style by File} distinguishes the trajectories of
+two files in one cube. A projection has no legend, so the legend switches do
+nothing on a 3D tile.
+
+\begin{aoelimit}{Markers and areas are not drawn on a 3D tile}
+A vertical line is not a plane, and the indices a marker dot would use refer to
+the thinned, projected arrays rather than to samples. Annotations are therefore
+restricted to two-dimensional tiles.
+\end{aoelimit}
+
+\section{INSPECT --- reading values off a curve}
+
+Switch the mouse to Inspect and click a curve. The header names the file, the run
+and the x value at the click; the \emph{At a point} tab then lists every channel
+of that run at that sample, with its unit, printed to six significant figures and
+with a dash where a value is not a number. \emph{Copy to clipboard} writes the
+header and one tab-separated line per visible row --- visible meaning after the
+channel filter, which accepts the same wildcards as \tab{params}.
+
+The nearest curve is found in pixels, not in data units. The two axes carry
+unrelated scales, so a distance measured in data space would always pick the
+channel with the larger numbers.
+
+The \emph{Statistics} tab gives minimum, maximum, mean, standard deviation and
+sample count for every combination of plotted run and y channel of the active
+tile. By default it reports over the visible x window and follows pan and zoom;
+\emph{Whole channel instead of the visible range} widens it. Its header states
+the scope exactly, including the mixed case that arises when some runs have an x
+channel shorter than their y channel and therefore cannot be windowed at all.
+Both tables copy to the clipboard tab-separated.
+
+Dragging in Inspect mode measures a gradient instead. A dashed line follows the
+pointer with the running figure beside it, and on release the panel reports the
+slope, the two deltas, both endpoints and the inverse. A purely vertical drag
+reports the change in y over no change in x rather than an infinity. A drag
+shorter than six pixels is treated as a click, so a slightly unsteady hand still
+inspects a point.
+
+\section{AREA --- shaded bands}
+
+\emph{Add} places a band across the middle of what the active tile currently
+shows --- from 40\,\% to 60\,\% of the visible x span --- using that tile's x
+channel. The editor beneath sets visibility, the x channel, the two bounds, the
+colour and the opacity, which runs from 0.02 to 1.0 with a default of 0.20. The
+bounds are normalised on commit, and the two buttons \emph{Show all} and
+\emph{Hide all} act on every band at once.
+
+Bands are global: they appear on every page, on every tile whose axes can express
+them. They are drawn \emph{over} the curves, because a band underneath them lost
+its edges wherever a curve crossed one.
+
+In Select mode the edges of a band can be dragged directly on the plot, and the
+panel follows. There is deliberately no caption field: a caption typed here
+rebuilt the tile on every keystroke, deleting the very item being edited. Name a
+band with a \tab{text} note placed over it.
+
+\section{MARKERS --- an instant, drawn two ways}
+
+A marker is a value of one channel --- \code{TIME = 707.35}, say. \emph{Add}
+places one at the midpoint of the active tile's x window. The editor sets
+visibility, the channel, the position, the colour and the dot size, which runs
+from 2.0 to 30.0 with a default of 9.0.
+
+The dual rendering is the feature. On a tile whose x axis is the marker's channel
+the marker is a dashed vertical line, draggable in Select mode. On any other tile
+it becomes a dot on each curve, at the sample where the condition holds --- which
+says something a vertical stripe could not: on a plot of angle of attack against
+altitude, where the aircraft was at that instant.
+
+A marker that falls outside a run's range is refused rather than clamped to the
+last sample, because a clamped dot would silently claim the condition had been
+met. The band's equivalent rendering redraws the matching stretch of every curve
+in the band's colour, with separate passes through the band left unjoined.
+
+\section{TEXT --- captions on a tile}
+
+Captions belong to the active tile --- the deliberate opposite of markers and
+areas --- and are positioned as a fraction of it, from 0.0 to 1.0 in each
+direction with $y = 0$ at the top. \emph{Add text} appends a note reading
+\emph{Note}, staggered downward from any notes already there. The editor sets
+visibility, the text (several lines are fine), the position, the point size from
+4 to 72, bold, and the colour, which starts as the current theme's text colour.
+Nine \emph{Place} buttons are corner and edge presets. \emph{Copy to all tiles}
+deep-copies this tile's captions onto every visible tile of every page.
+
+Typing does not commit on every keystroke: a 400\,ms idle timer fires after you
+stop, or the caption commits when the field loses focus, or immediately on
+\emph{Update text now}. Committing per keystroke used to flicker the tile and
+steal the caret. Notes can also be dragged directly on the plot in Select mode,
+and the spin boxes follow; clicking outside every note passes the click through,
+so empty space still selects the tile.
+
+\chapter{Pages, grids and tiles}
+\label{ch:pages}
+
+\section{The page and tile bar}
+
+The bar immediately above the grid governs layout. On the left, a combo switches
+page, flanked by previous and next buttons, and a name field renames the current
+page on \key{Enter} or when it loses focus. Four small buttons add a page,
+remove the current one, and move it earlier or later in the order. Removing the
+last remaining page is refused.
+
+In the middle, the \emph{Grid} button drops a five-by-five matrix in the manner
+of a word processor's table picker. Sweeping the pointer highlights the layout
+and the caption underneath reads, for example, \emph{2 x 3 (6 tiles)}; releasing
+chooses it. Cells whose layout would exceed twenty-five tiles are painted faint
+and cannot be chosen.
+
+To its right, \emph{Tile N} names the active tile and four arrows swap it with
+its neighbour to the left, above, below or right; each arrow is enabled only when
+that move is possible, and the active index follows the tile so the move is its
+own inverse. Finally \emph{Copy}, \emph{Cut}, \emph{Paste} and \emph{Clear} act
+on the active tile's whole configuration. Pasting installs an independent deep
+copy, so pasting twice gives two tiles that can then diverge. This clipboard
+lives in the process only and is not saved to a workspace.
+
+\section{How a page is modelled}
+
+Every page always carries twenty-five tile objects regardless of its grid, and
+the visible count is the product of rows and columns, capped at twenty-five.
+Shrinking a grid therefore hides tiles rather than destroying them, and they
+return unchanged when it grows again. Only the visible tiles are written to a
+workspace; loading pads the list back up to twenty-five.
+
+The tile widgets themselves are recreated only when the shape of the grid
+changes. Constructing a pyqtgraph plot widget costs tens of milliseconds, so a
+fresh $5 \times 5$ page costs most of a second; switching between two pages of
+the same shape reuses the widgets and merely redraws them.
+
+\section{What a tile remembers}
+
+\begin{center}
+\small
+\begin{longtable}{@{}p{0.34\textwidth}p{0.44\textwidth}p{0.15\textwidth}@{}}
+\toprule
+\textbf{Field} & \textbf{Meaning} & \textbf{Default} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Field} & \textbf{Meaning} & \textbf{Default} \\
+\midrule
+\endhead
+\code{x\_param}, \code{y\_params} & the channels drawn; a 3D tile adds \code{z\_param} & empty \\
+\code{show\_legend} & legend visible & on \\
+\code{legend\_position} & corner, or \code{custom} once dragged & \code{top-left} \\
+\code{legend\_x}, \code{legend\_y} & dragged position as a fraction of the view & 0.02, 0.02 \\
+\code{legend\_show\_param} & the channel name appears in a legend row & on \\
+\code{legend\_show\_iso} & every ISO identity of the curve appears & off \\
+\code{legend\_show\_file} & the file name appears & off \\
+\code{legend\_show\_sim} & the run's own identifier appears & off \\
+\code{legend\_show\_style} & withdrawn; read for compatibility, never drawn & off \\
+\code{lock\_x}, \code{lock\_y} & the axis is frozen at the stored range & off \\
+\code{x\_min}, \code{x\_max} & horizontal range, in data units & 0.0, 1.0 \\
+\code{y\_min}, \code{y\_max} & vertical range, in data units even in log mode & 0.0, 1.0 \\
+\code{view\_initialised} & this tile has been fitted once already & off \\
+\code{log\_y} & logarithmic y axis & off \\
+\code{show\_grid} & grid lines & on \\
+\code{show\_points} & fallback circular marker on every curve & off \\
+\code{color\_mode} & parameter, simulation or ISO & parameter \\
+\code{color\_iso\_param} & the ISO parameter that colours the tile & empty \\
+\code{style\_mode} & none, file, simulation or ISO & none \\
+\code{style\_iso\_param} & the ISO parameter that dashes the tile & empty \\
+\code{plot3d} & draw as an orthographic projection & off \\
+\code{azimuth}, \code{elevation} & view angles in degrees & 45.0, 25.0 \\
+\code{show\_3d\_axes}, \code{show\_3d\_grid} & triad and back-wall grid & on, on \\
+\code{view3d\_cx}, \code{view3d\_cy}, \code{view3d\_half} & 3D pan centre and zoom half-width & 0.0, 0.0, 0.95 \\
+\code{texts} & the tile's captions & empty \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+All of it is saved in a workspace. \code{style\_mode} and
+\code{style\_iso\_param} are the two fields 2.1.0 added; a workspace written by
+2.0.0 carries neither and opens with \emph{Style by} set to \emph{None}, which is
+exactly the behaviour it was written under.
+
+\begin{aoenote}{Why \code{legend\_show\_style} is still there}
+It was offered in an early build as \emph{Line style marker} and never read by
+anything that draws: the legend shows a sample of the curve itself, dash pattern
+and marker included, so spelling those out in the text said nothing the row was
+not already showing. The field is retained so that a workspace written while it
+existed still loads.
+\end{aoenote}
+
+The tile's title is generated from this state and states plainly when something
+is missing. With several y channels it names them all and wraps onto two lines;
+see \S\ref{sec:style}.
+
+Two 3D view fields deserve a note. The pan centre and zoom half-width are kept
+separately from the two-dimensional ranges, because those describe data ranges
+and mean nothing for a projection. The default half-width of 0.95 is chosen
+because the normalised cube's half-diagonal is $\sqrt{3}/2 \approx 0.866$, so
+0.95 frames the whole box at any rotation with a small margin.
+
+\section{Robustness when the files change}
+\label{sec:swap}
+
+When the set of open files changes, the application re-points anything that no
+longer resolves and reports what it did in the status bar --- for example
+\emph{page 2, tile 3: x axis VTAS -> TIME}. A missing z channel and a missing
+colour-by or style-by ISO parameter are cleared; a missing x axis falls back to
+the default. A missing y channel is deliberately left named: it plots nothing
+today and comes back when the file is reopened, which is friendlier when a study
+is loaded one file at a time.
+
+\textbf{With no file open at all, none of that happens.} Closing a study does
+not destroy a layout, and reusing one workspace against another study --- remove
+the old file, add the new one --- keeps every tile's axes.
+
+\begin{aoenew}{Fixed in \appver{} --- swapping studies lost the x axis}
+Closing a study leaves its computed parameters and aliases defined. That is
+deliberate: opening the next study should not throw away the formulas and the
+readable names set up for it. What it also did was convince this step that
+something was still loaded. \code{Session.parameters} is the union of file
+headers, computed channels and aliases, so with nothing open it came back
+\emph{non-empty} --- and the guard here tested whether that list was empty
+rather than whether a file was open.
+
+So removing \code{sample1.aoe} re-pointed every tile's x axis at whichever
+alias or formula sorted first, and adding \code{sample2.aoe} found that name
+perfectly valid and left it alone. \code{TIME} was gone from every tile and
+nothing said why.
+
+The two questions have two answers now. \code{parameters} answers ``what names
+may the user write'', and still lists everything. \code{plottable\_parameters}
+answers ``what can carry an axis'', and is empty while no file is open --- a
+formula over columns that are not loaded evaluates to nothing, and an alias
+resolves to a channel no file carries. Everything that chooses a channel on the
+user's behalf reads the second.
+\end{aoenew}
+
+A tile whose x channel is genuinely absent from the new study is still
+re-pointed, and the status bar still says so.
+
+\chapter{Exporting, and saving your work}
+
+\section{Image}
+
+\emph{Image} writes the active page as a PNG, grabbing the plot grid widget
+exactly as displayed: every visible tile with its legend, markers, shaded areas
+and captions, at screen resolution, without the toolbar, rail or panels. The
+extension is appended if you omit it. This is the way to get a figure out of the
+program and into a report.
+
+\section{CSV}
+
+\emph{CSV} writes the active tile's curves at full resolution, on a worker
+thread. The header row is \code{file}, \code{run}, \code{parameter}, the name of
+the tile's x channel, and \code{value}; note that the fourth column header is the
+channel's name rather than a literal. There is then one row per sample per
+combination of plotted run and y channel, in the order the runs are plotted and
+then the order of the tile's y list, with both numbers written to nine
+significant figures. Runs whose x or y channel is empty are skipped, and the
+status bar reports the sample count written.
+
+\begin{aoenote}{Why the export is not what you see}
+The plot is decimated to roughly two points per horizontal pixel. The export is
+not: silently handing someone twelve hundred of their five hundred thousand
+points would be a trap. If the tile is empty or nothing is plotted, the button
+says so rather than writing an empty file.
+\end{aoenote}
+
+\section{Workspaces}
+\label{sec:workspaces}
+
+A workspace is a single JSON file with the extension \code{.aoews}. It carries
+the list of open files by absolute path, the names you gave those files and their
+runs, every computed parameter, every alias, every ISO filter with its intervals
+and ticks, every page with its visible tiles and their complete state --- both
+encodings included --- the run selection, the whole style registry, the markers,
+the shaded areas, the variable-wide scale constraints, the theme and the mouse
+mode. What it deliberately does not carry is any derived answer --- which runs
+the ISO filters admit describes the files that were open when it was written, and
+is recomputed against whatever is open when it is read.
+
+The schema is at version~3. Files also record \code{app\_version}, which is the
+build that wrote them and is informational only.
+
+\subsection{Save, and Save as}
+
+There are two buttons, not one with a modifier, because which file is being
+written is the thing that gets got wrong. \emph{Save workspace} (\key{Ctrl+S})
+overwrites the current workspace, asking for a path only if there is not one yet.
+\emph{Save workspace as\ldots} (\key{Ctrl+Shift+S}) always asks, and then
+continues in the new file --- leaving the one you came from exactly as it was on
+disk. That is how a variant is made.
+
+Three places say which file you are in. The window title carries its name, with a
+leading asterisk while there are unsaved changes. The \emph{Save} tooltip names
+the file it would overwrite in full, or says that there is no workspace file yet
+and it will ask. And the status line after a save repeats the path and what went
+with it --- \emph{Workspace saved to C:\textbackslash study\textbackslash
+sweep.aoews (including 2 formula(s), 1 alias(es), 4 renamed run(s), 3 ISO
+filter(s))}.
+
+\subsection{Names given to files and runs}
+
+\begin{aoenew}{New in \appver}
+A file or run renamed in \tab{data} (\S\ref{sec:data}) comes back under that name
+when the workspace is loaded. Before \appver{} the name lived only for the
+session.
+\end{aoenew}
+
+The names ride in two optional keys, \code{file\_names} and \code{sim\_names}.
+Both are keyed by identity rather than by position --- a file by its path, a run
+by the core's \code{<file>::<id>::<ordinal>} key --- because a workspace is
+routinely opened against files that have since gained a run or lost one, and a
+name pinned to ``the seventh run'' would then land on whichever run happens to sit
+there. A name whose file or run is not in the data is dropped without comment;
+there is nothing for it to label.
+
+Runs are written only where the name differs from the identifier the file itself
+carries, so a thousand-run study does not write a thousand entries saying
+nothing. A file's name is always written, because the automatic one already
+depends on what else is open --- two files of the same basename make the second
+\emph{out.aoe (2)}.
+
+Neither key is written when nothing was renamed. A workspace from 2.1.0 or
+earlier carries neither and loads exactly as before, with each file and run under
+the name its own contents give it. Both are extra keys rather than a schema bump
+for that reason: nothing older needs to understand them to keep working, and
+nothing newer is confused by their absence.
+
+The names are applied on the worker thread, immediately after the files are
+opened and before anything reads a name, so the first paint already shows them.
+
+\subsection{Loading against data that has moved on}
+
+Loading reads the file, then does everything that touches the core on a worker
+thread: clears the session, opens each file, builds any missing sidecars, applies
+the saved display names, installs the aliases, and re-creates the computed
+parameters.
+
+Aliases are installed before the formulas, since a formula may be written in
+terms of one. The formulas are then installed in as many passes as it takes,
+repeating until a pass installs nothing new. A single pass is not enough: a JSON
+object has no dependency order, so a formula defined in terms of another would be
+refused --- correctly, as an unknown name --- and silently dropped. Repeating
+settles any acyclic chain, and what is left over genuinely cannot be defined
+against this data.
+
+Nothing here stops the workspace loading. Whatever resolves is in place, and one
+dialog titled \emph{Workspace loaded with differences} then lists what could not
+be: files that could not be opened, formulas that could not be defined and why,
+aliases whose channel is absent (kept, in case it returns), ISO filters on
+parameters none of these files carry, and ISO filters that no run satisfies.
+
+JSON was chosen over an ad-hoc delimited format because such a format breaks the
+moment a file path or a parameter name contains the delimiter, and cannot be
+extended without a version bump nobody implements. The loader is tolerant by
+design: it sets only the attributes it recognises and ignores the rest, which is
+how workspaces written when markers and bands still had a caption field continue
+to load, and how a 2.0.0 workspace loads into the two-encoding model with
+\emph{Style by} at \emph{None}.
+
+\begin{aoenote}{What a workspace still does not carry}
+The active tile index, the tile clipboard, the memory limit, the window geometry,
+and the hidden tiles of a shrunken grid. The \code{"version"} key is written but
+nothing branches on it; the loader's tolerance of unknown keys is what stands in
+for version handling.
+\end{aoenote}
+
+\section{Background work, and why the interface freezes when it does}
+
+Anything that touches the core runs on a worker thread: opening files, building
+sidecars, loading a workspace, reading channels, reading every channel of a
+clicked run, and writing a CSV. This works because \code{ctypes} releases the
+interpreter lock for the duration of every call, so a Python thread sitting
+inside a core function genuinely runs in parallel with the event loop --- while
+the core is using all of its own worker threads inside that one call.
+
+The governing constraint is that the core session is not internally
+synchronised, so only one thread may touch it at a time. Rather than take a lock,
+which would merely move the freeze from the paint loop to the click handler, the
+application disables the panels, the rail, the page bar and the grid while a task
+runs, and the tiles show a placeholder. Tasks queue rather than overlap, and for
+redraw work only the newest queued request is kept, since an older one is by then
+worthless. There is no cancellation: a running task cannot be interrupted.
+
+Most redraws never reach a worker at all. Before dispatching, the application
+computes a signature of which channels each file must supply and which runs are
+plotted; when that matches what is already resident and no task is running, the
+grid is redrawn synchronously on the interface thread. Restyling a curve,
+toggling a grid or editing a limit is that kind of redraw, and routing it through
+a background task cost far more than the read it was meant to cover --- starting
+a task disables and re-enables the panels, the rail and the whole grid, and every
+plot repaints on each of those transitions.
+
+\chapter{The AOE file format}
+
+\section{Overall shape}
+
+An AOE result file is plain ASCII text. There is no magic number, no preamble, no
+version field and no binary header; the only structure is a set of directive
+lines whose first non-blank character is an asterisk, with whitespace-separated
+decimal numbers between them.
+
+\begin{aoecode}
+*PARAMETRES
+ 'TIME'   'ALPHA'  'MACH'  'NZ'
+*TABLEAU : SIM_001
+ 0.000 1.2340 0.7500 1.2500
+ 0.020 1.2350 0.7501 1.2499
+*TABLEAU : SIM_002
+ ...
+*FIN
+\end{aoecode}
+
+The parser recognises exactly two keywords, \code{*PARAMETRES} and
+\code{*TABLEAU} --- note the French spelling of the first, without accent. A line
+is treated as a directive if and only if its first non-blank character is an
+asterisk; the keyword is then located by substring search within that line, which
+is why a form such as \code{*TABLEAU NUM SIMU: 1.2.0} is recognised as readily as
+\code{*TABLEAU : SIM\_001}. Any other asterisk directive --- \code{*FIN},
+\code{*ENTITY}, a comment line --- closes the open block and ends header reading.
+Nothing is required to terminate the file: \code{*FIN} is not special-cased, it
+is simply one more directive that closes the last block.
+
+\begin{aoenote}{No magic bytes, and what that costs}
+Because nothing identifies the format, the only test of whether a file is an AOE
+file is whether parsing it yields at least one parameter. A file that maps
+successfully but contains no usable \code{*PARAMETRES} block is rejected; a file
+with headers but no \code{*TABLEAU} at all opens successfully with zero runs,
+because nothing rejects that case. Opening also fails if the file cannot be
+mapped, which deliberately includes a zero-length file.
+\end{aoenote}
+
+\section{Two header dialects}
+
+The \code{*PARAMETRES} block comes in two forms, and the parser chooses per line
+rather than per file.
+
+The \textbf{packed} dialect puts several single-quoted names on one line and
+carries no units. Every non-empty quoted token on the line becomes a parameter,
+and its unit is the empty string.
+
+\begin{aoecode}
+*PARAMETRES
+ 'TIME'   'ALPHA'   'MACH'   'NZ'
+\end{aoecode}
+
+The \textbf{indexed} dialect puts one parameter per line, prefixed by an ordinal
+and suffixed by a unit. The first quoted token is the name, the second --- if
+present --- is the unit, and anything further along the line is ignored.
+
+\begin{aoecode}
+*PARAMETRES
+      1 'TIME' 's'
+      2 'PARAMETER001'  ''
+      3 'PARAMETER002'  'deg'
+\end{aoecode}
+
+The test that distinguishes them is deliberately strict: digits, then only
+blanks, then a quote. A packed line begins with the quote itself and so can never
+match. The strictness matters more than it looks. Treating every quoted token on
+an indexed line as a name turns a 585-parameter file into 1156 parameters, puts
+\code{deg}, \code{ft} and \code{s} into the parameter list, and shifts every
+column index --- so that asking for \code{TIME} silently returns another
+channel's samples. Correspondingly, quote extraction deliberately emits empty
+tokens, because the indexed dialect writes an absent unit as \code{''} and
+dropping it would shift the following line's unit onto the wrong parameter.
+
+The header section is opened by the first \code{*PARAMETRES} encountered; a
+second block is ignored, which is what allows these files to repeat the header
+before every run. It is closed by whichever comes first: a line that yields no
+names once names have started, a blank line once names have started, or any
+asterisk directive.
+
+\section{How runs are delimited}
+
+A \code{*TABLEAU} line opens a run. Its identifier is everything after the first
+colon on the line, whitespace-trimmed; if there is no colon, or nothing after it,
+the identifier becomes \code{SIM\_} followed by the run's one-based ordinal,
+without zero padding. The run's data begins at the start of the line following
+the marker, and its end offset is provisionally the end of the file and is
+rewritten the moment the next directive is met. That design --- recording the end
+as the scan goes --- is why the later parse tasks need neither a search nor a
+per-line terminator test.
+
+Each run also carries a unique key of the form
+\code{flight\_a.aoe::SIM\_001::0}: the file's name, the identifier from the
+file, and the ordinal. Styles are attached to it and \code{sim\_names} in a
+workspace is keyed on it, so it has to stay still under everything that is not
+an identity change.
+
+Two things are not identity changes. Renaming a run does not touch it --- the
+key is not derived from a run's display name. And renaming a \emph{file} does
+not touch it either: the \code{<file>} part is the name the file was first
+given, which \code{Session} derives from the path before the file is parsed,
+not the label it currently carries.
+
+\begin{aoenote}{Why the second of those had to be said out loud}
+The \code{<file>} part \emph{was} the display name, and it went unnoticed
+because nothing rebuilt the keys. \code{reload()} does: it re-opens the dataset
+and builds every key again. So once reloading became something a user does on
+purpose (\S\ref{sec:reload}), renaming a file and then reloading it renamed
+every one of its run keys, and every colour, dash and marker chosen for those
+runs was left attached to keys nothing answered to.
+\end{aoenote}
+
+\section{Records, rows and wrapped lines}
+
+A logical record holds one value per header. Fortran writers wrap a record across
+several physical lines when it exceeds the format width, so the column counter
+carries across newlines and resets only after a full set of columns has been
+read. During the index scan the parser records how many values appeared on the
+first data line inside a run; only when that equals the column count is the file
+known to be one record per line, and only then may byte ranges be split at
+newlines for parallel parsing.
+
+A data line is one whose first non-blank character is a digit, a minus, a plus or
+a full stop. Everything else inside a run's byte range --- free text, blank lines
+--- is skipped silently, and a skipped line does not reset the wrapped-record
+column counter.
+
+Lines are split on the line-feed character, then trimmed on the right of any run
+of carriage returns, spaces and tabs, and on the left of whitespace. Both Unix
+and Windows line endings are therefore handled; classic Mac files, which use a
+lone carriage return, are not.
+
+\section{Numeric encoding}
+
+Values are decimal text, never binary. The reader accepts rather more than
+\code{strtod} would, because Fortran output requires it.
+
+\begin{center}
+\small
+\begin{tabular}{@{}p{0.27\textwidth}p{0.22\textwidth}p{0.42\textwidth}@{}}
+\toprule
+\textbf{Form} & \textbf{Example} & \textbf{Notes} \\
+\midrule
+Plain & \code{1.5}, \code{-0.002}, \code{+3} & leading sign accepted \\
+C exponent & \code{1.5e3}, \code{1.5E-3} & \\
+Fortran double exponent & \code{1.234D+05}, \code{1.234d5} & \code{D} and \code{d} are read as \code{E} \\
+Fortran bare-sign exponent & \code{1.234+05} & accepted only once mantissa digits have been seen \\
+Non-numeric token & \code{NaN}, \code{Inf}, \code{*****} & becomes a quiet NaN --- never zero \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The last row is a design decision worth stating plainly: an unreadable value
+becomes not-a-number, so a gap in the data leaves a gap in the curve, rather than
+a spurious zero that would silently distort both the plot and any statistic
+computed over it.
+
+Mantissa digits accumulate into a 64-bit integer up to nineteen significant
+digits with the decimal exponent tracked separately, and are scaled once at the
+end against an exactly-representable table of powers of ten. Digits beyond the
+nineteenth increment the exponent in the integer part or are dropped in the
+fractional part. If an exponent marker turns out not to be followed by digits the
+pointer is rewound, so \code{1.5e} reads as \code{1.5} and leaves the \code{e} to
+the caller. The result is computed as a double and narrowed to a float for
+storage.
+
+\section{File extensions}
+
+The core is entirely extension-agnostic: it takes a path, maps it, and parses the
+content. The only place a suffix appears is the cache-path builder, which appends
+\code{.aoec} to the full source name. The extension list lives solely in the file
+dialog's filter, which accepts \code{*.aoe}, \code{*.dat}, \code{*.txt},
+\code{*.res} and \code{*.out}. Those are the same format under different
+customary names; the two real dialects are the packed and indexed header forms,
+and they are distinguished by content rather than by filename.
+
+\chapter{How the data is read}
+\label{ch:reading}
+
+\section{Memory mapping}
+
+The file is memory-mapped, read-only, in one view covering the whole file. There
+is no chunked or windowed mapping and no explicit page handling; demand paging is
+left entirely to the operating system, which is the right choice for a file that
+will be read column-by-column in an order the program cannot predict.
+
+On POSIX the file is opened with \code{O\_RDONLY | O\_CLOEXEC}, sized with
+\code{fstat} --- a size of zero or less is a failure --- and mapped with
+\code{PROT\_READ} and \code{MAP\_PRIVATE}, with \code{madvise} asking for
+sequential access ahead of the index scan. On Windows the path is explicitly
+widened from UTF-8 to UTF-16 before \code{CreateFileW}, because the ANSI entry
+points failed silently on non-ASCII paths, and the share mode permits a solver to
+keep writing the file while it is open. There, asking for sequential access is a
+deliberate no-op: the flag would have to be set at open time and it measurably
+hurts the random column access that follows.
+
+The modification time is read per platform --- nanoseconds on POSIX,
+100-nanosecond ticks on Windows --- and returned as an opaque, monotonically
+increasing integer whose units differ between platforms and must never be
+interpreted. It is only ever compared for equality.
+
+\section{One index pass, then lazy parallel columns}
+
+Opening a file performs a single linear walk that records only the header names,
+the units, how many values appeared on the first data line of a run, and for each
+run its identifier, its unique key and the byte offsets at which its data begins
+and ends. No sample data is read. Opening a 578\,MB file is therefore a scan, not
+a parse, and if a valid sidecar attaches the scan does not happen at all ---
+headers, units, run identifiers, byte ranges and the values-per-line figure all
+come straight out of the sidecar's header.
+
+Samples arrive later, per column and per run, the first time something asks for
+them. Each load maps the file afresh, clamps every recorded byte range to the
+file's current length --- the solver this tool watches truncates and rewrites its
+output, so the index may have been built against a longer file --- computes which
+columns are not already resident, divides the work into units, and dispatches
+them across the thread pool. Nothing already cached is re-read. Once parsed, the
+per-column chunks are stitched together outside the per-run locks, summarised in
+parallel, and published.
+
+A byte range is split for parallelism only when the file is known to be one
+record per line, and only when the span exceeds 2\,MiB; chunk boundaries are then
+advanced to the next line feed so that no line is ever split across two workers.
+The summary pass and the sidecar's copy path both run across the pool as well.
+
+\begin{aoenote}{No SIMD, no OpenMP}
+It is worth saying explicitly, because it is often assumed of code this fast:
+there are no vector intrinsics and no OpenMP anywhere in the core. A search
+across the sources and build files for \code{immintrin}, \code{\_\_m128},
+\code{\_\_m256}, \code{-mavx}, \code{-msse}, \code{-march=} and
+\code{-fopenmp} returns nothing. The parallelism is an ordinary thread pool; the
+only vector-like trick is scalar SWAR in the token skipper.
+\end{aoenote}
+
+\section{The inner loop}
+
+The innermost loop of the program is the one that turns bytes into floats, and it
+is written accordingly. A flat vector maps column index to output slot, because a
+hash lookup per token was measurably too slow. Output vectors are pre-reserved
+from the observed bytes-per-line of the first line rather than grown. The column
+counter is declared outside the line loop, which is what carries a wrapped record
+across newlines. Wanted columns go through the float parser; unwanted columns go
+through a much cheaper token skipper. Slack is returned to the allocator only
+when there is enough of it to be worth a reallocation.
+
+Text-to-number conversion is hand-rolled rather than delegated to
+\code{strtod}, \code{strtof} or \code{std::from\_chars}. The reasons are recorded
+in the header: \code{strtof} is correctly rounded but locale-aware and roughly an
+order of magnitude slower, and \code{std::from\_chars} for floating-point types
+is missing from libstdc++ before version 11 and from older libc++.
+(\code{strtod} is used, but only for numeric literals in the formula parser,
+where performance is irrelevant.)
+
+The token skipper uses the classic SWAR has-zero idiom over a 64-bit word loaded
+by \code{memcpy} rather than by a cast --- a \code{reinterpret\_cast} there is
+undefined behaviour that some compilers do miscompile at \code{-O3} --- and
+locates the first separator byte with a count-trailing-zeros intrinsic.
+Big-endian builds fall back to a plain byte loop. The measured effect on a
+500\,MB file is about 2\,GB/s against about 1.1\,GB/s for a byte-at-a-time skip.
+
+\section{What happens to malformed input}
+
+The core throws no exceptions for malformed data and logs nothing. Every failure
+mode has a defined, quiet behaviour.
+
+\begin{center}
+\small
+\begin{tabular}{@{}p{0.44\textwidth}p{0.50\textwidth}@{}}
+\toprule
+\textbf{Situation} & \textbf{Behaviour} \\
+\midrule
+Non-numeric token & becomes a quiet NaN, token consumed; never zero \\
+The float parser cannot advance & the rest of the line is abandoned \\
+A line that does not start with a digit, sign or point & skipped; the column counter is not reset \\
+A blank line inside a run & skipped \\
+Wrong number of values on a wrapped record & the column counter drifts, and columns silently misalign from there on \\
+The file shrank since it was indexed & byte ranges are clamped to the current length \\
+The file cannot be mapped at load time & columns are marked loaded with an empty block, so the interface does not retry every frame and the channel reads as absent rather than as a line of zeros \\
+Empty or zero-length file & mapping fails, so opening fails \\
+No \code{*PARAMETRES} block & opening fails \\
+More units than headers & the unit list is resized to the header count \\
+The sidecar disagrees with the dataset's shape & the sidecar is ignored and the text parse takes over \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{The \code{.aoec} sidecar}
+
+The first time a file of 8\,MB or more is opened, the same background task that
+opened it also writes a sidecar beside it. Thereafter opening that file skips the
+index scan and loading a column becomes a copy out of a mapping.
+
+\subsection{Layout}
+
+The file begins with a fixed 128-byte header, followed by one 16-byte record per
+column, one 24-byte record per run, then the sample data aligned to a 64-byte
+cache line. The header carries the magic \code{"AOECACHE"} --- eight bytes, not
+NUL-terminated --- a format version of 1, a byte-order mark of
+\code{0x01020304}, the column and run counts, the values-per-line figure, and the
+source fingerprint. What is stored is column-major \code{float32} sample arrays,
+plus the complete index --- headers, units, run identifiers, run byte ranges in
+the source, values per line --- plus per-parameter-per-run summary statistics:
+minimum, maximum, whether any value is finite, whether there are gaps, and
+whether the channel is monotonic. No text is stored, no decimated form, and no
+formula results.
+
+\subsection{Deciding whether it is still valid}
+
+Three independent properties are compared for exact equality, and all three must
+match.
+
+\begin{center}
+\small
+\begin{tabular}{@{}p{0.20\textwidth}p{0.34\textwidth}p{0.38\textwidth}@{}}
+\toprule
+\textbf{Field} & \textbf{Catches} & \textbf{Would miss on its own} \\
+\midrule
+size & truncation, extension, append & an in-place rewrite of the same length \\
+modification time & an in-place rewrite & anything that restores timestamps: \code{rsync -{}-times}, a restore from backup, some build systems \\
+content hash & a rewrite that preserved both of the above & nothing --- it is the backstop \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The hash is 64-bit FNV-1a, chosen explicitly for being verifiable at a glance: it
+guards against a file changing underneath the program, not against an adversary
+crafting a collision. It is seeded with the file's length, so a file that is a
+strict prefix of another cannot collide with it, and the length is taken from the
+same open handle that the bytes are read through, so length and content always
+describe the same file. Files of 4\,MiB or less are hashed in full. Larger files
+are sampled: sixty-four evenly spaced windows of 64\,KiB, the first at offset zero
+and the last ending at the end of the file, with each window's offset folded into
+the hash before its bytes so that identical blocks moved to a different place in
+a rearranged file do not cancel out. The cost of validating a sidecar is
+therefore capped at about 4\,MiB of reading however large the source is --- which
+is exactly why the advantage of a sidecar widens as files grow.
+
+\subsection{Where sidecars live}
+
+Two locations are tried, nearest first. Beside the source, the sidecar is the
+full source name with \code{.aoec} appended --- \code{run.aoe} becomes
+\code{run.aoe.aoec}, keeping the original extension so it can never collide with
+a differently-suffixed file of the same stem. Failing that, a per-user cache
+directory is used, with the full source path hashed into the filename so that two
+files called \code{results.aoe} in different directories do not share a cache.
+
+\begin{center}
+\small
+\begin{tabular}{@{}p{0.24\textwidth}p{0.68\textwidth}@{}}
+\toprule
+\textbf{Platform} & \textbf{Per-user cache directory} \\
+\midrule
+Windows & \code{\%LOCALAPPDATA\%\textbackslash aoeViewer\textbackslash cache}, falling back to \code{\%APPDATA\%}, then \code{\%TEMP\%} \\
+macOS & \code{\$HOME/Library/Caches/aoeviewer} \\
+Linux and others & \code{\$XDG\_CACHE\_HOME/aoeviewer}, else \code{\$HOME/.cache/aoeviewer} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\code{AOE\_CACHE\_DIR} overrides that fallback location entirely. Each candidate
+is tried in turn and the first that both opens and matches is used; one that
+fails to match is skipped rather than treated as fatal, because the other
+location may hold a current one. Caching can be switched off entirely by setting
+\code{AOE\_CACHE} to \code{0}, \code{false}, \code{no} or \code{off}; the
+variable is read once per process, because an environment lookup on Windows is a
+system call.
+
+\subsection{What it buys}
+
+On a 73\,MB generated file of 1200 runs by 1000 rows by 6 channels, measured end
+to end:
+
+\begin{center}
+\small
+\begin{tabular}{@{}lrr@{}}
+\toprule
+\textbf{Operation} & \textbf{From text} & \textbf{From sidecar} \\
+\midrule
+Open (index) & 213\,ms & 22\,ms \\
+Preload 2 channels across 1200 runs & 81\,ms & 7\,ms \\
+Fetch 1200 curves & 6\,ms & 5\,ms \\
+ISO scan & 7\,ms & 0.3\,ms \\
+\midrule
+\textbf{Total} & \textbf{306\,ms} & \textbf{32\,ms} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Roughly a tenfold improvement. Writing the sidecar took 0.24\,s once, and it
+occupies 27.7\,MB against a 73.1\,MB source --- \code{float32} is more compact
+than the decimal text it came from. The two structural wins are that opening does
+not scan, and that loading a column becomes a copy out of a mapping plus a copy
+of the precomputed summary, so the summarising pass does not run at all.
+
+\begin{aoenote}{The 8\,MB threshold lives in the interface, not the core}
+\code{MainWindow.CACHE\_THRESHOLD\_BYTES} is \code{8 * 1024 * 1024}, and the
+decision to write a sidecar is made there. Below that size, parsing is quick
+enough that a sidecar would save nothing measurable and would only leave an extra
+file beside the results. The consequence is that a script using the Python API
+gets no sidecar unless it calls \code{build\_cache()} itself. Every reason to
+skip is silent: a read-only share, a full disk, caching switched off.
+\end{aoenote}
+
+\section{The memory budget}
+
+The core owns all sample memory and reports how much it is holding. When that
+figure exceeds the configured limit --- 2048\,MB by default, floored at 64\,MB
+--- the interface asks the core to trim to 80\,\% of the cap, which gives the
+eviction some hysteresis instead of trimming on every redraw. Eviction is
+least-recently-used by column, and is always safe: an evicted column is simply
+re-read the next time something asks for it.
+
+Eviction can never free a buffer a visible curve is reading from. Arrays handed
+to Python are read-only views of the core's memory rather than copies, and each
+carries a pin object as its NumPy base which keeps the underlying block alive for
+as long as any view exists. That is also why an eviction invalidates the fast
+redraw path: what was resident before says nothing about what is resident now, so
+the next redraw re-checks.
+
+\chapter{Computed parameters: the formula language}
+\label{ch:formula}
+
+A computed parameter is a named expression over the channels that exist,
+evaluated in the core, per run, and thereafter indistinguishable from a channel
+the file carried. This chapter is the complete language reference.
+
+\section{How an expression is executed}
+
+An expression is compiled once into a flat bytecode and evaluated by a stack
+machine vectorised over rows. It is deliberately not an abstract syntax tree
+walked per sample. Compilation happens once per formula rather than once per run;
+the bytecode stores variable slots and data is bound at evaluation time, so no
+pointer can dangle when a later column load reallocates a vector. There is no
+per-node allocation and no virtual call.
+
+The evaluator tracks whether each stack entry is a broadcast scalar or a real
+buffer, so \code{2 * 9.81} collapses to a single float rather than filling a
+million-element array, and buffers are drawn from a reused pool so that a deep
+expression allocates a handful of buffers rather than one per operator.
+
+\section{Operators}
+
+\begin{center}
+\small
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Level} & \textbf{Operators} & \textbf{Associativity} & \textbf{Meaning} \\
+\midrule
+1 (lowest) & \code{||} & left & logical or \\
+2 & \code{\&\&} & left & logical and \\
+3 & \code{==} \code{!=} & left & equality \\
+4 & \code{<=} \code{>=} \code{<} \code{>} & left & comparison \\
+5 & \code{+} \code{-} & left & addition \\
+6 & \code{*} \code{/} \code{\%} & left & multiplication, division, remainder \\
+7 & unary \code{-} \code{+} \code{!} & right & sign and logical not \\
+8 (highest) & \code{\textasciicircum} & right & power \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Because \code{\textasciicircum} is right-associative,
+\code{2\textasciicircum3\textasciicircum2} is 512 rather than 64.
+
+Three behaviours are worth knowing before they surprise you. Division by zero
+yields not-a-number, never an infinity: the reason is stated twice in the source,
+that an infinity silently destroys the plot's y range whereas a NaN simply breaks
+the line where the data is bad. The same applies to \code{\%} and to \code{mod}.
+Comparisons yield exactly 1.0 or 0.0, so they can be multiplied into arithmetic.
+And the logical operators do not short-circuit --- both sides are always
+evaluated --- which matters only in that a costly right-hand side is not skipped.
+
+The power operator binds tighter than unary minus on its left, so
+\code{-2\textasciicircum2} is $-(2^2)$, matching engineering calculators, while
+\code{2\textasciicircum-3} still works because the exponent side is parsed as a
+unary expression. Logical not never swallows an inequality, and \code{!NaN} is
+\code{0.0}.
+
+\section{Element-wise functions}
+
+These operate one sample at a time.
+
+\begin{center}
+\small
+\begin{longtable}{@{}p{0.28\textwidth}p{0.62\textwidth}@{}}
+\toprule
+\textbf{Function} & \textbf{Behaviour} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Function} & \textbf{Behaviour} \\
+\midrule
+\endhead
+\code{abs(v)} & absolute value \\
+\code{sqrt(v)} & NaN for a negative argument \\
+\code{sin cos tan} & as the C library \\
+\code{asin(v) acos(v)} & NaN outside $[-1, 1]$ \\
+\code{atan(v)} & arctangent \\
+\code{exp(v)} & exponential \\
+\code{log(v) ln(v)} & natural logarithm; both names map to the same operation, and a non-positive argument gives NaN \\
+\code{log10(v)} & base-10 logarithm; non-positive gives NaN \\
+\code{floor ceil round} & as the C library \\
+\code{sign(v)} & $-1$, 0 or $+1$; NaN gives 0 \\
+\code{deg(v)} & radians to degrees \\
+\code{rad(v)} & degrees to radians \\
+\code{min(a,b) max(a,b)} & per-sample smaller or larger; NaN if either is NaN \\
+\code{atan2(a,b)} & two-argument arctangent \\
+\code{pow(a,b)} & as \code{a\textasciicircum b} \\
+\code{mod(a,b)} & remainder; NaN when \code{b} is zero \\
+\code{hypot(a,b)} & $\sqrt{a^2 + b^2}$ without intermediate overflow \\
+\code{clamp(x, lo, hi)} & constrains \code{x}; NaN stays NaN \\
+\code{if(cond, a, b)} & \code{a} when \code{cond} is non-zero and not NaN, else \code{b}. A NaN condition takes the false branch, and both branches are always evaluated \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{The three logarithms}
+
+Which logarithm a name gives is the easiest thing in this language to assume
+wrongly, since a pocket calculator's \code{log} is base ten and this one is not.
+There are two functions under three names.
+
+\begin{center}
+\small
+\begin{tabular}{@{}p{0.16\textwidth}p{0.74\textwidth}@{}}
+\toprule
+\textbf{Name} & \textbf{What it computes} \\
+\midrule
+\code{log(x)} & The natural logarithm, base $e = 2.71828\ldots$ --- \emph{not} base ten. This follows C and Fortran rather than a calculator keypad. \\
+\addlinespace
+\code{ln(x)} & Exactly the same function as \code{log}, under the name most engineering texts use. Write whichever reads better; the two give identical results. \\
+\addlinespace
+\code{log10(x)} & The base-ten logarithm. This is the one for decibels, orders of magnitude, and anything you would read off a logarithmic axis. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+All three return NaN for an argument that is zero or negative rather than an
+infinity, for the reason given above: a NaN breaks the line where the data is out
+of domain, an infinity would destroy the plot's y range. The inverse of
+\code{log} and \code{ln} is \code{exp(x)}; the inverse of \code{log10} is
+\code{pow(10, x)}.
+
+\begin{aoecode}
+DECIBELS = 20 * log10(AMPLITUDE / AMP_REF)
+DECADES  = log10(ALTITUDE)
+TAU      = -1 / deriv(ln(ENERGY), TIME)
+\end{aoecode}
+
+\begin{aoenote}{Taking a logarithm is not the same as drawing on one}
+The \emph{Log Y} checkbox in \tab{style} draws an existing channel on a base-ten
+axis and leaves the data untouched. Use that to look at a channel
+logarithmically. Use these functions when you want the logarithm itself as a
+channel --- to take a slope off it, say.
+\end{aoenote}
+
+\section{Whole-series functions}
+
+These cannot be evaluated one sample at a time --- a derivative needs its
+neighbours, a filter needs its own previous output --- so they operate on the
+finished buffer.
+
+\begin{center}
+\small
+\begin{longtable}{@{}p{0.28\textwidth}p{0.62\textwidth}@{}}
+\toprule
+\textbf{Function} & \textbf{Behaviour} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Function} & \textbf{Behaviour} \\
+\midrule
+\endhead
+\code{deriv(Y, X)} & $dY/dX$ by central differences, one-sided at the two ends, accumulated in double precision. A zero step gives NaN rather than an infinity. A single sample gives zero \\
+\code{integ(Y, X)} & cumulative trapezoidal integral starting at zero. NaN steps contribute nothing but the running total is still written out \\
+\code{lowpass(Y, X, fc)} & first-order recursive low pass with the cutoff in hertz. The timestep is taken from \code{X} at every sample, so uneven sampling is handled correctly. A non-positive cutoff performs no filtering at all rather than dividing by zero \\
+\code{highpass(Y, X, fc)} & the matching first-order high pass; the first output sample is zero \\
+\code{movavg(Y, N)} & centred moving average over \code{N} samples, computed by prefix sum so the cost is independent of the window size. NaN samples are excluded from both the sum and the count; an all-NaN window gives NaN \\
+\code{delta(Y)} & \code{Y} minus its first sample, so a leading NaN makes the whole channel NaN \\
+\code{min(Y) max(Y) mean(Y)} & reductions to one number, accumulated in double and ignoring NaN and infinity, then held flat across every sample so the result combines with per-sample channels by ordinary arithmetic \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+Overload resolution is by argument count, not by name. \code{max(NZ)} is the
+run's peak; \code{max(NZ, NY)} is the per-sample larger of two channels. Each run
+is reduced separately, which is what makes \code{NZ / max(NZ)} normalise every
+run against its own peak. If a name exists but no definition has that arity, the
+error names the counts that would have worked --- \emph{min() takes 1 or 2
+arguments, not 3}.
+
+Passing a scalar where a series function expects its \code{X} argument fills the
+result with NaN, because a constant x would make every step zero.
+
+\section{Constants and the lookup form}
+
+Three constants are recognised, case-insensitively: \code{pi}, \code{e} and
+\code{nan}. There is no \code{inf}, and no \code{true} or \code{false} ---
+comparisons already yield one and zero.
+
+The lookup form reads one channel at the moment another channel satisfies a
+condition, and broadcasts that single value across the whole series:
+
+\begin{aoecode}
+NAME[COND=value]    # NAME at the sample where COND is closest to value
+NAME[COND=first]    # NAME at the first sample where both are real
+NAME[COND=last]     # NAME at the last sample where both are real
+\end{aoecode}
+
+For a numeric target the sample minimising the absolute difference wins; samples
+whose condition is NaN are skipped, though a NaN value at the winning condition
+is returned as it stands. For \code{first} and \code{last} the scan runs from the
+respective end looking for the first index at which both the condition and the
+value are real numbers, so leading and trailing gaps are skipped and the lookup
+returns an actual sample rather than NaN. If nothing is found the result is NaN.
+
+\section{Worked examples}
+
+\begin{aoecode}
+LOAD_FACTOR  = NZ * 9.80665
+PITCH_RATE   = deriv(THETA, TIME)
+DISTANCE     = integ(VTAS, TIME)
+CLIMB_RATE   = deriv(ALTITUDE, TIME)
+ALPHA_SMOOTH = lowpass(ALPHA, TIME, 2.0)
+ALPHA_NOISE  = highpass(ALPHA, TIME, 5.0)
+DRIFT        = HEADING - HEADING[TIME=first]
+ALT_GAINED   = ALTITUDE[TIME=last] - ALTITUDE[TIME=first]
+HIGH_MACH    = if(MACH > 0.8, ALPHA, nan)
+ENERGY       = 0.5 * MASS * (VX^2 + VY^2)
+NZ_NORM      = NZ / max(NZ)
+NZ_ENVELOPE  = max(NZ, NY)
+ALPHA_EXCESS = ALPHA - mean(ALPHA)
+\end{aoecode}
+
+\code{HIGH\_MACH} is worth a second look: substituting NaN for the samples you do
+not want breaks the line there, which is how you isolate a flight phase without
+editing the data.
+
+\section{Names, dependencies and errors}
+
+Any identifier that is not a call, a lookup or one of the three constants becomes
+a variable. Names are resolved after alias resolution, and a name must be either
+a physical column of some open file or another computed channel --- otherwise the
+definition is refused with \emph{unknown parameter 'X'}.
+
+Formulas may reference other computed parameters, and the dependency graph is
+checked at definition time rather than discovered at plot time. The new
+definition is installed tentatively, the graph is walked with a depth limit of
+32, and on detection the previous definition is restored and the error reads
+\emph{'NAME' would depend on itself}. Exceeding the depth limit is reported the
+same way. Removing a parameter removes everything defined in terms of it, and the
+interface reports which.
+
+Every variable is bound once, up front; a variable that resolves to nothing is a
+hard failure reading \emph{no data for parameter 'X'}. The sample count is the
+shortest of the bound channels, and is never allowed to exceed it --- the engine
+never reads past the shortest channel involved. A formula with no variables at
+all, such as \code{pi} or \code{2 + 3 * 4}, would otherwise have no length to
+fill, so the run's first column is consulted for a row count, falling back to a
+single row.
+
+Validation, which is what runs as you type in the \tab{compute} tab, compiles the
+expression and checks every variable against the set of known names without
+touching any data. The distinct compile-time messages are \emph{empty
+expression}, \emph{unexpected trailing text}, \emph{expected ')'},
+\emph{malformed number}, \emph{unexpected character}, \emph{expected ',' or ')'
+in function arguments}, \emph{unknown function 'X'}, the arity message, four
+specific lookup messages, and \emph{invalid expression} as a last resort. The
+lookup messages are unusually helpful and worth quoting:
+
+\begin{aoecode}
+expected a parameter name inside [ ]
+expected '=' in lookup, e.g. SPEED[TIME=0.5]
+expected a number, 'first' or 'last' in lookup,
+    e.g. SPEED[TIME=0.5] or SPEED[TIME=last]
+expected ']' in lookup
+\end{aoecode}
+
+\begin{aoenote}{Two consequences of caching}
+Results are cached per run and per name, and failures are cached too, as an
+empty block. Without that the interface would retry the same doomed evaluation on
+every repaint; and the tempting alternative --- substituting a zero --- would
+turn a channel that could not be computed into a flat line that looks like data.
+
+A computed channel also carries no unit. Deriving one through a formula would
+mean dimensional analysis, and a wrong unit on an axis is worse than none.
+\end{aoenote}
+
+\chapter{The algorithms behind the plots}
+\label{ch:algorithms}
+
+\section{Decimation: drawing what the screen can show}
+
+A tile with twenty-five runs of half a million samples cannot hand two and a
+half million points to a plotting library and stay interactive. Nor can it keep
+every thousandth sample: stride sampling silently deletes every spike between
+the samples it keeps, and on flight-test data that is exactly the part an
+engineer is looking for. aoeViewer therefore uses min/max bucketing.
+
+The visible index span is divided into exactly \code{max\_points} buckets by
+index, so bucket sizes differ by at most one sample. Within each bucket the
+minimum and maximum y are found, skipping NaN, and both are emitted in x order
+--- swapped if necessary so the polyline never doubles back. Where a bucket's
+extremes coincide, one point is emitted; where a bucket is entirely NaN, a
+single NaN is emitted at the bucket's first x, so the line breaks visibly
+instead of interpolating across missing data. The output is therefore at most
+$2 \times \code{max\_points}$ points. Below a count of twice the budget there is
+nothing to gain, and the span is copied through verbatim.
+
+\begin{aoenote}{What the guarantee is, and is not}
+Every bucket's extremes survive, so the drawn envelope is pixel-accurate: no
+peak or trough can be lost at any zoom level, because it is either the minimum
+or the maximum of whatever bucket it falls into. What is not preserved is the
+shape between extremes within a bucket, nor the exact ordering of intermediate
+samples. NaN gaps are preserved as gaps, at bucket granularity.
+\end{aoenote}
+
+\subsection{Selecting the visible window}
+
+Before bucketing, the visible x window must be turned into an index span, and
+this is where a subtlety lives. When x is known to be non-decreasing, two binary
+searches find the span in logarithmic time. When it is not --- and a phase-plane
+plot such as Mach against altitude over a climb and descent is not --- a full
+scan finds the outermost indices whose x falls inside the window and keeps
+everything between them.
+
+The reason is a real defect the scan fixes. On a climb-and-descend trajectory x
+rises and then falls, so a binary search brackets only the first crossing and
+the entire descending half of the trajectory silently disappears ---
+differently depending on where you have panned to. One sample is also kept on
+each side of the window, so the curve is drawn to the plot border rather than
+stopping just short of it.
+
+\subsection{The pixel budget}
+
+The front end asks for roughly two points per horizontal pixel --- one for each
+bucket's high and low --- so a 600-pixel tile draws about 1200 points whether
+the channel holds ten thousand samples or ten million. A second ceiling of
+1\,500\,000 points applies across all the curves of one tile together, so that a
+page with many curves cannot overwhelm Qt.
+
+That second ceiling is a named function rather than an inline expression for a
+reason recorded in the source: written as a bare division it acted as a floor at
+moderate curve counts, raising the target from 1800 to 10\,000 at seventy-five
+curves and pushing one and a half million points into Qt on every pan.
+
+The visible window is padded by five per cent on each side so the curve stays
+drawn to the tile's edges while panning. The quoted end-to-end effect on a heavy
+page is a sixty-fold reduction: 15.9 million samples become 266 thousand drawn
+points across 225 curves.
+
+\subsection{Statistics over the same window}
+
+The statistics shown in \tab{inspect} use Welford's one-pass method rather than
+accumulating a sum of squares, because a sum of squares loses precision on a
+channel with a large offset --- altitude in feet, squared, overflows single
+precision quickly. The reported standard deviation is the sample standard
+deviation and is zero for a single sample. NaN and infinite samples are skipped.
+On a non-monotonic x with a window given, every sample is tested individually
+rather than bracketing a span, for exactly the phase-plane reason above.
+
+\section{The redraw cache}
+\label{sec:redrawcache}
+
+Most rebuilds do not change a single drawn point. Toggling the grid, restyling
+one colour, dragging a marker, editing the legend, coming back to a page --- all
+of them arrive at \code{rebuild()}, and all of them used to throw away every
+item and re-decimate every curve from full resolution for an answer identical to
+the one already on screen. Four caches now stand between a rebuild and the work
+it would otherwise do.
+
+\subsection{The resample key}
+
+The decimation result for a group of curves is tagged with a resample key: the
+quantised lower edge of the view, the span rounded to twelve significant
+figures, the point target, and whether the axis is logarithmic. A group whose
+key is unchanged is skipped entirely.
+
+Both halves of that key are necessary. Quantising only the endpoints hides every
+zoom whose lower edge scales with its width --- the windows $0 \ldots 1$ and
+$0 \ldots 0.25$ quantise into the same bucket --- so zooming in around the
+origin gained no resolution. Rounding to twelve significant figures is needed
+because a view range read back from a plot wobbles in the last bits of a double,
+which would otherwise invalidate the cache on every mouse move.
+
+\subsection{Adopting the drawn items}
+
+Each group records a signature over its curves: the curve's identity, and the
+address and length of the x and y buffers behind it. A reloaded file, or a
+column that was evicted by the memory cap and re-read, lands at a different
+address and so compares unequal. When the signature matches, the existing
+graphics item is adopted and merely restyled; the group keeps its resample key,
+so no points are recomputed either.
+
+Comparing addresses is sound only because the previous groups are still alive
+and still referencing those buffers while the comparison runs --- a buffer that
+is still referenced cannot have been freed and another put at its address. That
+is why \code{rebuild()} holds the old groups rather than dropping them first.
+
+\begin{aoenote}{One item per pen}
+Curves that share a pen cannot be told apart on screen, so they are concatenated
+into a single polyline with one NaN between consecutive runs and drawn with a
+connect rule that breaks the line there. Twelve hundred runs times two
+parameters --- 2400 graphics items --- becomes about twelve. Everything except
+painting is still per curve: the crosshair readout, click-to-inspect, marker
+dots, area segments and the CSV export all need to know which run and which
+parameter a sample belongs to.
+\end{aoenote}
+
+\subsection{The plot's own settings}
+
+\begin{aoenew}{New in \appver}
+Grid, log mode, axis captions and the title are written only when one of them
+differs from what was last written.
+\end{aoenew}
+
+They were re-applied on every rebuild, and most rebuilds change none of them.
+\code{setLogMode} is what made that expensive rather than merely redundant:
+pyqtgraph propagates it to every data item on the plot, which invalidates each
+curve's cached display data, and then re-enables auto-range --- which the tile
+then has to undo in its own view restoration. A rebuild the two caches above had
+just arranged to cost nothing threw away the transformed points of every curve
+on the tile and moved the frame, twice, for a setting nobody had touched.
+
+The title is guarded in the same comparison rather than separately: it is a pure
+function of the tile's parameters and the theme's foreground colour, so one
+comparison answers for all of it. A placeholder message writes over the title,
+so showing one forgets the comparison --- without that, a tile that showed
+\emph{loading\ldots} while a file opened kept the placeholder as its heading.
+
+\subsection{The drawn annotations}
+
+\begin{aoenew}{New in \appver}
+Markers and shaded bands keep their items unless the annotations, the tile's x
+channel, whether they can be dragged, or the curves have changed.
+\end{aoenew}
+
+This is the same idea applied to the overlay pass, and it matters for the same
+reason the item adoption does. The dot form of a marker searches each curve for
+the sample where the condition holds, and the band form redraws a stretch of
+every curve it crosses, so a thousand-run tile paid for both on every rebuild
+--- including the rebuilds that changed neither a curve nor an annotation.
+
+The curves are part of that comparison because the dot sits \emph{on} a curve
+and the band \emph{is} a stretch of one; they are compared by buffer address,
+with the same soundness argument as above.
+
+One ordering detail is load-bearing. The overlay list is shared with the 3D data
+box and its tick values, which the 3D rebuild draws before the overlay pass
+runs. So the pass returns early on a 3D tile \emph{before} clearing anything,
+and the 3D rebuild owns the clear on the way in --- which is also what takes
+away two-dimensional markers that have no meaning in a projection.
+
+\section{ISO grouping}
+
+Automatic grouping divides the observed range of the distinct values into evenly
+spaced intervals. The extremes are found ignoring NaN and infinity; the step is
+computed in double precision; and the last interval's upper bound is set to the
+observed maximum exactly, rather than recomputed, so accumulated floating-point
+error cannot leave the largest sample outside every group. A sweep with a single
+distinct value yields one group whose bounds are equal, rather than several
+degenerate empty ones.
+
+\subsection{Boundaries}
+
+Every interval except the last is half-open, $[\min, \max)$; the last is fully
+closed, $[\min, \max]$. A value that is not a number belongs to no group. Two
+clamping fallbacks catch a value sitting a hair outside the extreme bounds
+through rounding --- without them the maximum sample of a sweep can vanish ---
+while a value between two non-adjacent manual intervals still belongs to none.
+
+\begin{aoenote}{A documented inconsistency}
+The core header describes group bounds as inclusive at both ends, and the
+Python-side helpers implement inclusive-at-both-ends with the first claiming
+group winning. The core's own \code{iso\_group\_index} is half-open except for
+the last interval. The two agree on every value except one sitting exactly on a
+shared edge, which the core assigns to the later interval and the interface to
+the earlier one. In practice this is invisible --- the edge is a value no sample
+holds, because the edges are derived from the observed range rather than from
+the samples --- but it is a genuine discrepancy.
+\end{aoenote}
+
+Where grouping is configured but the interval list is empty, nothing is
+filtered. Nothing sorts the interval list after the user has edited it, so
+overlapping manual bounds are resolved by the first match in the order given.
+
+When a new file is opened, an automatically grouped parameter is rebuilt over
+the new range and the active flags are carried across by position, so
+deselections survive. A manually grouped parameter keeps its bounds, and only
+names that still look automatically generated --- empty, or containing the exact
+separator \code{" - "} --- are refreshed, so hand-typed labels are preserved.
+
+\subsection{How values are written}
+
+ISO values are formatted to two decimals with trailing zeros trimmed, so
+\code{0.750000} becomes \code{0.75} and \code{3.000000} becomes \code{3}. Values
+that round to zero, and values of a million or more, are written as a power of
+ten with a compacted exponent: \code{1.20e+06} becomes \code{1.2e6}. A negative
+zero is normalised to \code{0}.
+
+The small-end boundary is decided by rounding rather than by a threshold, and
+the reasoning is worth knowing because it affects the labels you see. A value
+arrives as a single-precision float, so the literal \code{0.01} is stored as
+\code{0.00999999978}; comparing that against $10^{-2}$ would send \code{0.01}
+itself to scientific notation --- the one value a Mach or tolerance sweep is
+most likely to contain. Asking instead whether the rounded form is still
+non-zero puts the boundary where it belongs. The large end genuinely is a
+threshold, and it is about label length: past a million the integer part alone
+is longer than the value written as a power of ten.
+
+\section{Legend order, and why it stopped shuffling}
+
+A legend row is ranked by an intrinsic property of what it describes, not by the
+order the curves happened to be walked in. In ISO mode a grouped label ranks by
+its position in the grouping and an ungrouped label by the value itself; the
+lowest rank wins when two runs share a label. Groups are then sorted by a tuple:
+ISO rank, parameter order, file, run when colouring by ISO; parameter order,
+style-ISO rank, file, run when colouring by parameter; file, run, style-ISO
+rank, parameter order when colouring by simulation.
+
+Before this, the order was the order in which each group was first seen while
+walking the selection, so unticking a single run could reshuffle 0--10, 10--15,
+15--20 into 15--20, 0--10, 10--15. Nothing about the data had changed; only the
+walk had.
+
+The style-ISO rank joined the tuple in \appver, with the legend text that made
+it necessary: a tile coloured by parameter and dashed by ISO now emits one row
+per ISO value (\S\ref{sec:legend}), and without an intrinsic rank for those rows
+they came out in the order the runs were walked --- the same reshuffling this
+section exists to have ranked away.
+
+\section{Logarithmic axes}
+
+pyqtgraph's logarithmic mode does not scale the axis: it plots the base-10
+logarithm of the samples on a linear axis and relabels the ticks. Everything
+crossing the view boundary is therefore in log units, while a tile's stored
+minimum and maximum are, and must remain, in data units. A dedicated module owns
+that conversion, and it exists because of a specific defect: ticking \emph{Log
+Y} on a channel spanning 1 to 1000 framed the view at log-space 1 to 1000 ---
+data $10^1$ to $10^{1000}$ --- while the curve sat at log values 0 to 3. The
+tile looked empty, double-clicking recomputed the same answer, and those mixed
+numbers then propagated as a variable-wide limit onto tiles that were not in
+logarithmic mode at all.
+
+Converting a value to view space returns nothing at all when the value is
+non-positive, so the caller must decide what to do rather than being handed a
+silently wrong number. When the low end of a requested range has no logarithm,
+the frame is taken as three decades below the high end rather than refusing to
+frame at all. At draw time non-positive samples are blanked to NaN so the
+drawable part of the curve still shows.
+
+\section{The three-dimensional projection}
+
+The projection is orthographic, and deliberately so: these plots exist to have
+values read off them, and under perspective the same interval covers different
+distances depending on where it sits in the frame.
+
+Each of the three channels is normalised independently onto $[-0.5, 0.5]$, so
+channels with unrelated units stay readable together; a degenerate or non-finite
+range collapses to zero, which puts a channel that never moves in the middle of
+the cube. The path is then rotated about the vertical axis by the azimuth,
+tilted by the elevation, and depth is dropped:
+\begin{align*}
+  r_x &= x \cos A - y \sin A, & r_y &= x \sin A + y \cos A, \\
+  \text{screen}_x &= r_x, & \text{screen}_y &= z \cos E - r_y \sin E,
+\end{align*}
+with depth $z \sin E + r_y \cos E$ retained only for ordering what is drawn in
+front of what.
+
+A projected path cannot be min/max decimated, because that needs a monotonic x
+and a trajectory through space is monotonic in none of the three axes. Plain
+striding is the honest option here, and it is what is used, against a budget
+derived from the tile width as in the two-dimensional case.
+
+Rotating does not rebuild the tile. Only the grid, the triad and the projection
+are redone; the channel reads, the bounds and the thinning are left alone, which
+is what makes dragging to rotate smooth rather than a sequence of full reloads.
+
+The back-wall grid picks, for each axis, the face lying behind the data from the
+current viewpoint, so the grid never draws over the trajectory and swaps faces
+as you turn it. Its tick values are chosen in steps of 1, 2, 2.5 or 5 times a
+power of ten, counted rather than accumulated so they cannot drift outside the
+box, and the whole grid is drawn as a single graphics item. The orientation
+triad is parented to the view box rather than to the data, so panning and
+zooming never reach it and it keeps a constant size; its axes follow the
+universal convention of red, green and blue for x, y and z, and are painted back
+to front by depth.
+
+\chapter{The C ABI}
+\label{ch:abi}
+
+Everything above the core is written without a C++ compiler, and the reason is
+this interface: sixty exported functions taking only C types and opaque handles.
+It is declared in \code{core/include/aoe/aoe\_c\_api.h}.
+
+Nothing in it changed across the 2.1 releases. \code{aoe\_version()} returns
+\code{"2.0.0"}, which is the core's version and not the application's
+(\appver); \code{-version} prints both.
+
+\section{Handles, versioning and errors}
+
+\begin{aoecode}
+typedef struct aoe_session aoe_session;   /* opaque; the API's whole context */
+typedef struct aoe_pin     aoe_pin;       /* opaque; keeps a block alive */
+\end{aoecode}
+
+A pin holds the sample block itself, not a path back to the session, so
+releasing one after the session has been destroyed is well defined. That matters
+because on the Python side pins are released by the garbage collector, in its
+own order and at its own time.
+
+The only version marker is \code{aoe\_version()}, which returns a string. There
+is no numeric ABI-version symbol and no version macro in the header.
+
+Errors are reported per session. \code{aoe\_last\_error()} returns the message
+from the most recent failure, or the empty string. It is cleared at the start of
+every mutating call but not by read-only calls, so it means the last failure
+since the last mutating call rather than strictly the last call. Failure is
+signalled by a sentinel that depends on the return type: $-1$ for a function
+returning an index, 0 for a boolean or a count, an empty string --- never a null
+pointer --- for a string, a null pointer for a float array, and zero for a size.
+Index arguments out of range are errors rather than crashes, and a null session
+pointer is handled without being dereferenced.
+
+\begin{aoenote}{Exceptions never cross the boundary}
+Every session-taking entry point funnels through a guard that catches
+\code{std::exception}, putting its message into the session's error slot, and
+any other exception as \emph{unknown error}. Unwinding out of a C function is
+undefined behaviour, and with \code{ctypes} on the other side it would take the
+interpreter down.
+\end{aoenote}
+
+\section{Thread safety}
+
+The session carries a reader/writer lock --- an \code{SRWLOCK} on Windows, a
+\code{pthread\_rwlock\_t} elsewhere. Read-only entry points take it shared, so
+many concurrent readers are allowed; mutating ones take it exclusively and clear
+the error string. The mutating set is: adding, removing, clearing and reloading
+files; setting a file or run display name; setting and removing aliases; setting
+and removing computed parameters; building and discarding a cache; and the two
+calls that write into the session's scratch string, \code{aoe\_resolve} and
+\code{aoe\_iso\_format}, which are logically reads but take the write lock
+because of that scratch.
+
+The pure-mathematics functions --- decimation, the series helpers,
+nearest-index, and the ISO grouping arithmetic --- take no session at all and
+are fully re-entrant on caller-owned buffers. Below the ABI, each run has its
+own mutex guarding its column vector and its map of computed results, which is
+what lets the thread pool fill different runs concurrently; an attached cache
+file is immutable once open and needs no locking.
+
+\begin{aoelimit}{One concurrency caveat in the source}
+\code{aoe\_cache\_path} takes only the shared lock yet writes the session's
+scratch string. Two concurrent readers can therefore each invalidate the other's
+returned pointer. Copy returned strings immediately --- which \code{ctypes} does
+automatically when the result type is declared as a C string, so the Python
+layer is not exposed to this.
+\end{aoelimit}
+
+\section{Function reference}
+
+In the table below, \emph{lock} is the lock the call takes; \emph{session} in a
+note means memory owned by the session and valid until the next call that
+changes the thing it came from; \emph{core buffer} means a zero-copy alias of a
+column buffer.
+
+\begingroup
+\small
+\begin{longtable}{@{}p{0.30\textwidth}p{0.10\textwidth}p{0.54\textwidth}@{}}
+\toprule
+\textbf{Function} & \textbf{Lock} & \textbf{Returns, and what to know} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Function} & \textbf{Lock} & \textbf{Returns, and what to know} \\
+\midrule
+\endhead
+\multicolumn{3}{@{}l@{}}{\textit{Library}} \\
+\code{aoe\_version()} & --- & \code{const char*}, a static literal, always valid. The \emph{core}'s version. \\
+\code{aoe\_worker\_count()} & --- & \code{int}. \\
+\addlinespace
+\multicolumn{3}{@{}l@{}}{\textit{Session}} \\
+\code{aoe\_session\_create()} & --- & \code{aoe\_session*}; caller owns. \code{NULL} on failure. \\
+\code{aoe\_session\_destroy(s)} & --- & consumes the handle; \code{NULL} safe. \\
+\code{aoe\_last\_error(s)} & --- & session; valid until the next call. \code{""} on failure. \\
+\addlinespace
+\multicolumn{3}{@{}l@{}}{\textit{Files}} \\
+\code{aoe\_add\_file(s, path)} & write & \code{int} index. \code{-1} and the error set on failure. \\
+\code{aoe\_remove\_file(s, file)} & write & invalidates every pointer from that file. \\
+\code{aoe\_clear\_files(s)} & write & invalidates all file-derived pointers; aliases and computed definitions survive. \\
+\code{aoe\_file\_count(s)} & read & \code{int}. \\
+\code{aoe\_file\_name(s, file)} & read & session. The display name. \code{""} on failure. \\
+\code{aoe\_file\_path(s, file)} & read & session. \code{""} on failure. \\
+\code{aoe\_stale\_files(s, out, max)} & read & \code{int} count; writes $\le$ \code{max} into \code{out}. \code{out=NULL} just counts. Returns the full count. \\
+\code{aoe\_reload\_file(s, file)} & write & \code{1}/\code{0}; drops cached samples and computed results for that file and re-reads the index. Run keys survive it. \\
+\code{aoe\_set\_file\_name(s, file, name)} & write & display only; empty or \code{NULL} ignored. Run keys are not rebuilt from it. \\
+\code{aoe\_set\_sim\_name(s, file, sim, name)} & write & display only; \code{unique\_key} untouched, so colours survive. \\
+\addlinespace
+\multicolumn{3}{@{}l@{}}{\textit{Runs}} \\
+\code{aoe\_sim\_count(s, file)} & read & \code{int}. \\
+\code{aoe\_sim\_id(s, file, sim)} & read & session; what the file calls it. \\
+\code{aoe\_sim\_name(s, file, sim)} & read & session; falls back to the id when the display name is empty. \\
+\code{aoe\_sim\_key(s, file, sim)} & read & session; the identity styles and workspaces are built on. \\
+\addlinespace
+\multicolumn{3}{@{}l@{}}{\textit{Channels and names}} \\
+\code{aoe\_header\_count(s, file)} & read & \code{int}. \\
+\code{aoe\_header(s, file, i)} & read & session. \\
+\code{aoe\_header\_unit(s, file, i)} & read & session; parallel to \code{aoe\_header}; never \code{NULL}. \\
+\code{aoe\_param\_unit(s, name)} & read & session; searches every open file, follows aliases; \code{""} for computed. \\
+\code{aoe\_param\_count(s)} & read & \code{int}; union of headers, computed and aliases, sorted. \\
+\code{aoe\_param(s, i)} & read & session. \\
+\code{aoe\_set\_alias(s, alias, target)} & write & no-op if either is empty or they are equal. \\
+\code{aoe\_remove\_alias(s, alias)} & write & --- \\
+\code{aoe\_resolve(s, name)} & write & session \emph{scratch} --- invalidated by the next scratch-writing call. \\
+\addlinespace
+\multicolumn{3}{@{}l@{}}{\textit{Computed parameters}} \\
+\code{aoe\_set\_computed(s, name, expr)} & write & \code{1}/\code{0}; clears cached computed results in every file. \code{0} and the error set on failure. \\
+\code{aoe\_remove\_computed(s, name)} & write & \code{int} count; removes transitively, names readable through the next entry. \\
+\code{aoe\_removed\_name(s, i)} & read & session; valid until the next \code{aoe\_remove\_computed}. \\
+\code{aoe\_is\_computed(s, name)} & read & \code{1}/\code{0}; resolves aliases first. \\
+\code{aoe\_computed\_source(s, name)} & read & session; the stored expression text. \\
+\code{aoe\_validate\_formula(s, expr)} & read & \code{1}/\code{0}; parses and checks variables, evaluates nothing. \\
+\addlinespace
+\multicolumn{3}{@{}l@{}}{\textit{Samples}} \\
+\code{aoe\_channel(s, file, sim, name, *count)} & read & core buffer, zero-copy. Valid only until the next eviction --- anything that keeps it must pin. \code{NULL} on failure. \\
+\code{aoe\_channel\_pinned(s, file, sim, name, *count, **pin)} & read & as above, and the caller owns \code{*pin}: the samples stay alive regardless of the memory cap until released. \\
+\code{aoe\_pin\_release(pin)} & --- & frees the pin; \code{NULL} safe. \\
+\code{aoe\_pin\_sorted(pin)} & --- & \code{1} when the samples are non-decreasing. Precomputed at parse time --- free. \\
+\code{aoe\_pin\_bounds(pin, *min, *max)} & --- & precomputed extent; what autoscaling needs without rescanning a million samples per curve per replot. \\
+\code{aoe\_pin\_count(pin)} & --- & \code{size\_t}. \\
+\code{aoe\_preload(s, file, sims, n, names, n)} & read & loads every physical column the names need in one parallel pass; \code{sims=NULL} means all. \\
+\addlinespace
+\multicolumn{3}{@{}l@{}}{\textit{Pure mathematics --- no session, fully re-entrant}} \\
+\code{aoe\_decimate(x, y, count, x\_min, x\_max, max\_points, out\_x, out\_y)} & --- & \code{size\_t} written; caller owns all buffers, \code{out} needs $\ge 2\times$\code{max\_points}. Uses the whole series when \code{!(x\_min < x\_max)}. \\
+\code{aoe\_decimate\_ex(\ldots, x\_sorted, \ldots)} & --- & as above plus \code{x\_sorted}: \code{1} sorted, \code{0} not, \code{-1} detect. Pass \code{0} for phase planes. \\
+\code{aoe\_series\_sorted(values, count)} & --- & \code{1}/\code{0}. \\
+\code{aoe\_series\_bounds(values, count, *min, *max)} & --- & \code{1}/\code{0}. \\
+\code{aoe\_nearest\_index(x, count, target)} & --- & \code{size\_t}; returns \code{0} for an empty series, indistinguishable from a genuine hit at index 0. \\
+\code{aoe\_series\_stats(x, y, count, x\_min, x\_max, out)} & --- & writes 7 doubles: min, max, mean, stddev, first, last, count. \code{x=NULL} or an empty window means the whole series. \\
+\code{aoe\_series\_stats\_ex(\ldots, x\_sorted, out)} & --- & same \code{x\_sorted} contract as \code{aoe\_decimate\_ex}. \\
+\addlinespace
+\multicolumn{3}{@{}l@{}}{\textit{Memory}} \\
+\code{aoe\_resident\_bytes(s)} & read & \code{size\_t} of sample data cached across every open file. \\
+\code{aoe\_trim\_memory(s, keep\_bytes)} & read & frees LRU columns until at or below \code{keep\_bytes}; returns the total afterwards. Always safe --- evicted data is re-read on demand. \\
+\addlinespace
+\multicolumn{3}{@{}l@{}}{\textit{Sidecar}} \\
+\code{aoe\_cache\_enabled()} & --- & \code{0} when \code{AOE\_CACHE} switches caching off. \\
+\code{aoe\_cache\_active(s, file)} & read & \code{1} when a valid sidecar is attached and serving reads. \\
+\code{aoe\_cache\_path(s, file)} & read & session \emph{scratch} --- see the caveat above. \\
+\code{aoe\_build\_cache(s, file)} & write & costs a full parse --- call off the UI thread. Memory bounded to one parameter across every run. \\
+\code{aoe\_discard\_cache(s, file)} & write & detaches and deletes every candidate sidecar; \code{1} when none remains. \\
+\addlinespace
+\multicolumn{3}{@{}l@{}}{\textit{ISO}} \\
+\code{aoe\_iso\_values(s, file, name, out, max)} & read & \code{int} count; writes $\le$ \code{max}, returns the full count; NaN where absent. \\
+\code{aoe\_iso\_distinct(s, name, out, max)} & read & ascending, NaN-free, de-duplicated across every open file; \code{out=NULL} to learn the count first. \\
+\code{aoe\_iso\_auto\_group(values, count, n, out\_bounds, max)} & --- & \code{out\_bounds} receives 2 floats per group. \\
+\code{aoe\_iso\_group\_index(value, bounds, n)} & --- & \code{int}; \code{-1} on failure. \\
+\code{aoe\_iso\_format(s, value)} & write & session \emph{scratch}; valid until the next call on this session. \\
+\bottomrule
+\end{longtable}
+\endgroup
+
+Three of these --- \code{aoe\_stale\_files}, \code{aoe\_iso\_values} and
+\code{aoe\_iso\_distinct} --- return the full count rather than the number
+actually written, so a caller can size a buffer with one call and fill it with a
+second.
+
+\begin{aoenote}{Two functions worth singling out}
+\code{aoe\_channel} hands back a zero-copy pointer into a column buffer which is
+valid only until the next eviction; anything that intends to keep the samples
+must use \code{aoe\_channel\_pinned} and release the pin when done. And a pin
+answers two questions for free, because both were computed at parse time:
+whether the samples are non-decreasing --- the precondition of any binary search
+over x --- and what their extent is, which is what autoscaling needs without
+rescanning a million samples per curve per replot.
+\end{aoenote}
+
+\section{Building against it}
+
+The core is built as a shared library with optimisation on and no dependency
+beyond the C++ standard library and the platform's mapping and threading calls.
+The export macro resolves to \code{\_\_declspec(dllexport)} on Windows and to a
+default-visibility attribute elsewhere when building shared, and to nothing when
+building statically. The artefact is \code{aoecore.dll},
+\code{libaoecore.dylib} or \code{libaoecore.so} according to platform. Because
+the header declares only C types, any language with a C foreign-function
+interface can drive it; the Python binding in this repository is one client
+rather than a privileged one.
+
+\chapter{The Python scripting API}
+\label{ch:scripting}
+
+Everything the interface can read, a script can read, through the same core and
+with the same performance. Importing the package is deliberately cheap: the
+exports are lazy, so importing \code{aoeviewer} pulls in neither NumPy nor the
+core library, which is what lets \code{-version}, \code{-help} and
+\code{-selftest} work on a machine where the core has not been built.
+
+\begin{aoecode}
+from aoeviewer import Session, FileHandle, SimulationHandle, IsoGroup, CoreError
+\end{aoecode}
+
+\section{The one rule}
+
+Arrays returned by \code{channel()} are read-only \emph{views} of C++ memory,
+not copies. They are fast because of that. They carry a pin object as their
+NumPy base, which keeps the underlying block alive for as long as any view
+exists --- so the memory cap can never free a buffer a script is still reading
+from --- but they stop being meaningful when the owning file is reloaded or
+removed. Copy explicitly if you need to outlive that.
+
+Asking twice for the same channel gives back the same buffer at the same
+address. Two caches in the plot tile are built on exactly that
+(\S\ref{sec:redrawcache}), so it is a property of the API rather than an
+accident of it.
+
+\section{Session}
+
+A \code{Session} is created with no arguments, raises \code{CoreError} if the
+core cannot be initialised, and is a context manager. Its \code{last\_error}
+property exposes the core's message.
+
+An absent channel yields an empty array rather than an error, and callers should
+treat that as nothing to plot: different files in one study legitimately hold
+different channels. In the stats dictionary, \code{ranged} is true only when the
+x window was actually applied --- a run whose x channel is shorter than its y
+channel cannot be windowed, and the figures are then whole-channel.
+
+\begingroup
+\small
+\begin{longtable}{@{}p{0.47\textwidth}p{0.47\textwidth}@{}}
+\toprule
+\textbf{Method or property} & \textbf{Meaning} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Method or property} & \textbf{Meaning} \\
+\midrule
+\endhead
+\code{add\_file(path) -> FileHandle} & opens a result file; raises \code{CoreError} on failure \\
+\code{remove\_file(index)}, \code{clear()} & unload one file, or all of them \\
+\code{file\_count}, \code{files}, \code{file(index)} & the open files \\
+\code{stale\_files() -> List[int]} & indices of files changed on disk since they were read \\
+\code{parameters -> List[str]} & every name: headers, computed channels and aliases \\
+\code{plottable\_parameters -> List[str]} & the same list, but empty while no file is open. Use it wherever a channel is being \emph{chosen} on the user's behalf \\
+\code{set\_alias(alias, target)}, \code{remove\_alias(alias)}, \code{resolve(name)} & aliases \\
+\code{unit(name)}, \code{label(name)} & the unit, and \code{"ALTITUDE [ft]"} --- one place decides how a channel is labelled \\
+\code{set\_computed(name, expr)} & defines a computed channel; raises \code{CoreError} carrying the parse message \\
+\code{remove\_computed(name) -> List[str]} & the name plus every dependant removed \\
+\code{is\_computed(name)}, \code{computed\_source(name)} & interrogate a definition \\
+\code{validate\_formula(expr) -> (ok, message)} & parses and checks names, evaluates nothing \\
+\code{channel(file, sim, name) -> ndarray} & read-only zero-copy view; an empty array when the channel is absent \\
+\code{preload(file, sims, names)} & turns N lazy single-column loads into one batched, multi-threaded read; an empty \code{sims} means all \\
+\code{decimate(x, y, max\_points, x\_range=None)} & min/max bucketing, at most $2\times$\code{max\_points} points \\
+\code{Session.bounds(values)} & static; extent ignoring NaN and infinity \\
+\code{Session.nearest\_index(x, target)} & static \\
+\code{Session.stats(y, x=None, x\_range=None)} & static; a dict of min, max, mean, std, first, last, count, ranged \\
+\code{resident\_bytes}, \code{trim\_memory(keep\_bytes)} & the cache, and LRU eviction that is always safe because columns are re-read \\
+\code{cache\_enabled}, \code{cache\_active(file)}, \code{cache\_path(file)} & sidecar state \\
+\code{build\_cache(file)}, \code{discard\_cache(file)} & write or delete a sidecar; building costs a full parse \\
+\code{iso\_values(file, name)} & one value per run, NaN where absent \\
+\code{iso\_distinct(name)} & sorted distinct values across every open file \\
+\code{iso\_auto\_group(values, n)}, \code{iso\_group\_index(value, groups)} & interval arithmetic \\
+\code{format\_value(value)} & the same formatting the lists show \\
+\bottomrule
+\end{longtable}
+\endgroup
+
+\section{Handles}
+
+A \code{FileHandle} carries its index and exposes \code{name}, \code{path},
+\code{headers}, \code{units} --- parallel to the headers, with empty strings
+where the dialect carries none, so the two can always be zipped ---
+\code{simulation\_count} and \code{simulations}. It can \code{rename(name)},
+which changes the display name only, and \code{reload()}, which re-reads the
+file from disk and leaves every run's key as it was. The simulation list is
+cached on the session, because building one handle costs three ABI calls and a
+thousand-run file would otherwise cost three thousand on every access.
+
+A \code{SimulationHandle} carries \code{file\_index}, \code{index},
+\code{sim\_id} --- what the file calls it --- \code{name}, which is what the
+user sees, and \code{key}, the identity styles attach to, which never changes.
+It can \code{rename(name)} and \code{channel(name)}.
+
+An \code{IsoGroup} is a named interval: \code{name}, \code{low}, \code{high},
+\code{active}, and \code{contains(value)}.
+
+\section{A worked script}
+
+\begin{aoecode}
+import numpy as np
+from aoeviewer import Session, CoreError
+
+with Session() as session:
+    handle = session.add_file("study/sweep.aoe")
+
+    # A derived channel, checked before it is relied on.
+    ok, message = session.validate_formula("deriv(THETA, TIME)")
+    if not ok:
+        raise SystemExit(message)
+    session.set_computed("PITCH_RATE", "deriv(THETA, TIME)")
+
+    # One batched, multi-threaded read for everything we are about to touch.
+    session.preload(handle.index, [], ["TIME", "ALPHA", "PITCH_RATE"])
+
+    # Bucket the runs by their Mach number.
+    machs = session.iso_distinct("MACH")
+    groups = session.iso_auto_group(machs, 3)
+
+    for sim in handle.simulations:
+        value = float(session.iso_values(handle.index, "MACH")[sim.index])
+        bucket = session.iso_group_index(value, groups)
+
+        t = sim.channel("TIME")           # read-only view, zero copy
+        q = sim.channel("PITCH_RATE")
+        stats = Session.stats(q, t, (5.0, 25.0))   # over 5 s .. 25 s only
+        if stats is None:
+            continue
+        print("{0} MACH={1} group={2} peak q={3:.4g} ranged={4}".format(
+            sim.sim_id, session.format_value(value),
+            groups[bucket].name if bucket >= 0 else "-",
+            stats["max"], stats["ranged"]))
+
+    # What a tile would actually draw for a 900 px wide plot.
+    t = handle.simulations[0].channel("TIME")
+    a = handle.simulations[0].channel("ALPHA")
+    dx, dy = session.decimate(t, a, max_points=1800, x_range=(0.0, 60.0))
+
+    print(session.label("ALPHA"), dx.size, "points drawn of", t.size)
+    print("cache", session.resident_bytes // (1024 * 1024), "MB")
+    session.trim_memory(256 * 1024 * 1024)
+\end{aoecode}
+
+Two habits are worth adopting. Call \code{preload} once for everything a loop
+will touch, rather than letting each \code{channel()} trigger its own load ---
+the batched read uses the whole thread pool and one mapping. And for a file of
+any size, call \code{build\_cache()} once; the graphical application does this
+automatically above 8\,MB, but a script gets no sidecar unless it asks.
+
+\begin{aoenote}{Useful extras in \code{\_core}}
+Beyond the fa\c{c}ade, \code{aoeviewer.\_core} exposes \code{library\_path()},
+the \code{Pin} type with its \code{sorted} flag and \code{bounds()},
+\code{pin\_of(array)} to recover the pin behind a view, the array adapters, and
+the module-level \code{VERSION} and \code{WORKER\_COUNT}.
+\end{aoenote}
+
+\chapter{Performance, limits and troubleshooting}
+\label{ch:performance}
+
+\section{Where the time goes}
+
+Three costs dominate, and each has its own mitigation. Parsing text into floats
+is paid once per column per run, in parallel, and is avoided entirely on the
+second and subsequent opens by the sidecar. Deciding what to draw is paid on
+every pan and zoom, and is bounded by the pixel budget rather than by the size
+of the data. Creating graphics items is paid when a tile's shape changes, and is
+minimised by concatenating curves that share a pen into one polyline and by
+adopting existing items whenever the data behind them is unchanged.
+
+A fourth cost, which is neither of those, is deciding to do work that was
+already done. Chapter~\ref{ch:algorithms} lists the four caches that stand
+between a rebuild and the work it would otherwise repeat, and the panels carry
+the same idea: each is rebuilt only when its \emph{rows} change, and a
+refresh that changes only which boxes are ticked writes the boxes in place.
+
+\begin{center}
+\small
+\begin{longtable}{@{}p{0.30\textwidth}p{0.62\textwidth}@{}}
+\toprule
+\textbf{Limit} & \textbf{Value and meaning} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Limit} & \textbf{Value and meaning} \\
+\midrule
+\endhead
+Tiles per page & 25, a $5 \times 5$ grid. Every page always holds 25 tile objects; shrinking a grid hides them rather than destroying them \\
+Points per pixel & 2 --- one for each bucket's high and low \\
+Points per tile & 1\,500\,000 across all its curves, as a second ceiling \\
+Legend rows & 60, after which the remainder is summarised as \emph{\ldots and N more (legend caps at 60 rows)} \\
+ISO value rows & 400 per parameter in the tree; the ticks for the rest still apply, and a parameter's checkbox still acts on all of them \\
+ISO values named in a tooltip & 8, then \emph{+N more} \\
+DATA auto-expand & 200 runs. A larger file opens closed; every run is still there, and the choice you make is remembered \\
+Sample cache & 2048\,MB by default, floored at 64\,MB, trimmed to 80\,\% of the cap on overflow \\
+Sidecar threshold & 8\,MB; below it, parsing is quick enough that a sidecar would save nothing measurable \\
+Formula dependency depth & 32, beyond which the definition is reported as cyclic \\
+Redraw coalescing & 25\,ms, so a drag produces one resample at its end rather than one per pixel \\
+Caption commit delay & 400\,ms of idle typing \\
+PARAMS filter delay & 400\,ms of idle typing \\
+Shutdown wait & 30\,s for background work to finish \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+The file-change poll that appeared in this table up to 2.1.0 is gone; see
+\S\ref{sec:reload}.
+
+\section{Getting the best out of it}
+
+Open each large file once and let the sidecar be written; the cost is paid on
+the first open and never again, and the status message says when it is
+happening. Prefer fewer, larger pages over many sparsely filled ones, since a
+fresh $5 \times 5$ page costs most of a second to build its widgets while
+switching between pages of the same shape merely redraws. Where a tile shows
+many runs of the same channel, turn the legend's \emph{File} and
+\emph{Simulation} parts off so identical rows merge --- sixty rows of legend
+cost more to lay out than the curves do. And if the cache figure in the status
+bar is climbing towards the cap on a machine with plenty of memory, raise the
+cap with \code{-memory-limit}: eviction is safe, but a column that is evicted
+and re-read is a column parsed twice.
+
+\section{Troubleshooting}
+
+\subsection{The program will not start}
+
+Run \code{python -m aoeviewer -selftest}. It checks each dependency separately
+and then the core, so the first \code{FAIL} names the problem. If the core is
+the failure, the error lists every directory that was searched; build it, or
+point \code{AOEVIEWER\_CORE} at the library. On Windows, a load failure that
+looks like a missing dependency suggests running \code{objdump -p} against the
+DLL to see what it wants. Whatever happens, the traceback is in
+\code{aoeviewer.log}, whose location is reported by \code{-version}.
+
+\subsection{A file opens but shows nothing}
+
+Opening succeeds as long as the file has a usable \code{*PARAMETRES} block, so a
+file with headers and no \code{*TABLEAU} opens with zero runs --- the
+\tab{data} tab will show the file with nothing beneath it. If runs are present
+but no curve appears, check in order: that runs are ticked in \tab{data} --- on
+a file of more than 200 runs the node opens closed, so click it open to see
+them; that no ISO filter is holding them back, which the status bar states
+explicitly; and that the tile has both an x channel and at least one y channel,
+which the tile's own title says in words.
+
+\subsection{The curves look wrong on a phase plane}
+
+A plot whose x channel is not monotonic --- Mach against altitude over a climb
+and descent, for instance --- needs the unsorted path through the decimator. The
+application always requests detection, so this is handled; but a script calling
+\code{decimate()} on such data should be aware that the sorted fast path would
+bracket only the first crossing. There is a related caveat in
+\code{nearest\_index}: its fast path is chosen by comparing the first and last
+samples, which is a heuristic rather than a sortedness test, so a phase-plane
+channel that happens to end above where it started can return a wrong index.
+
+\subsection{A value I expected is missing or reads as nan}
+
+An unreadable token becomes not-a-number rather than zero, by design, so a gap
+in the file is a gap in the curve. Division by zero and the out-of-domain cases
+of \code{sqrt}, \code{asin}, \code{acos} and the logarithms also yield NaN
+rather than an infinity, because an infinity would destroy the plot's y range.
+In \tab{inspect}, NaN prints as a dash.
+
+\subsection{A channel disappeared after I removed a computed parameter}
+
+Removing a computed parameter removes everything defined in terms of it, and the
+status message names what went. Re-create the dependency first, then the
+dependants.
+
+\subsection{Colours changed when I opened another file}
+
+They should not: a colour is allocated on first use and kept for the session,
+keyed on an identity that survives renaming --- including the renaming of the
+\emph{file}, and including a reload. If they did change, something called
+\emph{Re-assign palette}, which deliberately forgets the assignments so that the
+next redraw allocates afresh.
+
+\subsection{I reopened a workspace and the plot is empty}
+
+Both halves of what gets drawn are restored, so start by reading the status bar.
+If it says runs are held back by the ISO filters, open \tab{iso}: a filter whose
+node reads \emph{no run satisfies it} is doing exactly what it was asked to and
+the data no longer contains anything in that band, so widen or untick it. A
+filter reading \emph{not in the loaded files} is filtering nothing and is not
+the cause, and one reading \emph{paused} is not applying at all.
+
+If the status bar says no runs are plotted at all, the \tab{data} tab has
+nothing ticked --- the workspace records which runs were chosen by index, so
+opening it against a file with fewer runs leaves the missing ones simply absent.
+
+The dialog shown at load time, \emph{Workspace loaded with differences}, lists
+everything the workspace asked for that this data could not give: unopenable
+files, formulas that could not be defined and why, aliases whose channel is
+gone, and both ISO cases. If it did not appear, everything in the workspace
+resolved.
+
+\subsection{I swapped one study for another and the axes moved}
+
+They should not, since \appver{} --- see \S\ref{sec:swap}. If a tile's x axis
+did move, the status bar says so by name (\emph{page 2, tile 3: x axis VTAS ->
+TIME}), and it means the new files genuinely do not carry the channel that tile
+was plotting against.
+
+\appendix
+
+\chapter{Keyboard shortcuts and gestures}
+
+\begin{center}
+\small
+\begin{longtable}{@{}p{0.42\textwidth}p{0.52\textwidth}@{}}
+\toprule
+\textbf{Keys or gesture} & \textbf{Action} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Keys or gesture} & \textbf{Action} \\
+\midrule
+\endhead
+\key{Ctrl+L} & Load workspace \\
+\key{Ctrl+S} & Save workspace (overwrites the current file) \\
+\key{Ctrl+Shift+S} & Save workspace as --- asks, then continues in the new file \\
+\key{Ctrl+0} & Auto-fit every tile \\
+\key{Ctrl+1} \ldots \key{Ctrl+4} & Mouse mode: Select, Inspect, Pan, Zoom \\
+Click a tile & make it the active tile \\
+Double-click a tile & auto-fit that tile alone \\
+Double-click a row in \tab{data} & rename that file or run \\
+Double-click a row in \tab{compute} & load that definition for editing \\
+Click a file row's arrow in \tab{data} & open or close its runs; the choice is remembered \\
+Right-click in \tab{data} & plot all or no runs of a file; rename; reload from disk; copy the full path \\
+Right-click in \tab{params} & create an alias; use as x axis; copy the name \\
+Right-click in \tab{iso} & group, ungroup, select all or none, use this filter, remove the filter \\
+Drag in Inspect & measure a slope (shorter than 6\,px counts as a click) \\
+Drag a marker or band edge in Select & move it \\
+Drag the legend & place it freely; the corner becomes \emph{custom} \\
+Drag a caption in Select & move it within its tile \\
+Drag on a 3D tile in Pan & rotate \\
+Middle-drag or \key{Shift}+drag on a 3D tile & translate \\
+Right-drag or \key{Ctrl}+drag on a 3D tile & zoom \\
+Wheel on a 3D tile in Zoom & zoom \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\chapter{Environment variables}
+
+\begin{center}
+\small
+\begin{tabular}{@{}p{0.27\textwidth}p{0.65\textwidth}@{}}
+\toprule
+\textbf{Variable} & \textbf{Effect} \\
+\midrule
+\code{AOEVIEWER\_CORE} & Path to the core library, or to a directory containing it. Searched first, before every built-in location \\
+\code{AOEVIEWER\_LOG\_DIR} & Directory for \code{aoeviewer.log} \\
+\code{AOE\_CACHE} & Set to \code{0}, \code{false}, \code{no} or \code{off} to disable sidecar caching entirely. Read once per process \\
+\code{AOE\_CACHE\_DIR} & Overrides the per-user sidecar directory \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chapter{The workspace file}
+\label{app:workspace}
+
+A workspace is UTF-8 JSON with the extension \code{.aoews}, written with
+two-space indentation. The schema is at version~3.
+
+\begin{aoecode}
+{
+  "version": 3,
+  "app_version": "2.1.1",
+  "files":    ["/abs/path/run_a.aoe"],
+  "computed": {"LOAD_FACTOR": "NZ * 9.80665"},
+  "aliases":  {"Angle of attack": "ALPHA"},
+  "file_names": {"/abs/path/run_a.aoe": "Nominal climb"},
+  "sim_names":  {"/abs/path/run_a.aoe":
+                   {"run_a.aoe::SIM_001::0": "Cold day"}},
+  "pages": [
+    {"name": "Page 1", "rows": 2, "cols": 2, "tiles": [ ... ]}
+  ],
+  "active_page": 0,
+  "selected_sims": [[0, 0], [0, 1]],
+  "styles": {
+    "colors":  {"param::ALPHA": "#e8232a"},
+    "dashes":  {"file::/abs/path/run_a.aoe": "dash"},
+    "symbols": {"param::ALPHA": "o"},
+    "widths":  {"param::ALPHA": 2.0},
+    "line_width": 1.6,
+    "symbol_size": 6.0
+  },
+  "iso_states": [
+    {"param": "INITIAL_MASS", "active": true, "grouped": true,
+     "group_count": 3, "value_enabled": [],
+     "groups": [["57236 - 64495", 57236.3, 64495.9, true],
+                ["64495 - 71754", 64495.9, 71753.9, false]]}
+  ],
+  "markers": [
+    {"x_param": "TIME", "position": 5.0, "visible": true,
+     "color": "#ff3333", "dot_size": 9.0}
+  ],
+  "areas": [
+    {"x_param": "TIME", "x_min": 10.0, "x_max": 20.0,
+     "color": "#3380ff", "alpha": 0.2, "visible": true}
+  ],
+  "global_x_limits": {"TIME": [0.0, 60.0]},
+  "global_y_limits": {},
+  "dark_mode": true,
+  "mouse_mode": 0
+}
+\end{aoecode}
+
+Each entry of \code{"tiles"} carries the complete tile state listed in
+Chapter~\ref{ch:pages}, including its captions and both encodings. Only the
+visible tiles of a page are written; loading pads the list back up to
+twenty-five.
+
+\code{file\_names} and \code{sim\_names} are optional and written only when
+something was renamed (\S\ref{sec:workspaces}). \code{app\_version} records
+which build wrote the file and is informational only.
+
+\code{value\_enabled} is a list of pairs rather than an object because JSON
+object keys are strings: round-tripping \code{0.75} through an object hands back
+\code{"0.75"}, which would silently stop matching the value it is about.
+Non-finite keys are dropped, so the file stays portable JSON.
+
+The loader sets only the attributes it recognises and ignores the rest, which is
+how workspaces written when markers and bands still carried a caption field
+continue to load, how the withdrawn \code{legend\_show\_style} field is
+tolerated, and how a 2.0.0 workspace loads into the two-encoding model with
+\emph{Style by} at \emph{None}. The \code{"version"} key is written but nothing
+branches on it.
+
+Not saved: the active tile index, the tile clipboard, the memory limit, the
+window geometry, and the hidden tiles of a shrunken grid.
+
+\chapter{Defaults at a glance}
+
+\begin{center}
+\small
+\begin{longtable}{@{}p{0.34\textwidth}p{0.22\textwidth}p{0.36\textwidth}@{}}
+\toprule
+\textbf{Setting} & \textbf{Where} & \textbf{Default} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Setting} & \textbf{Where} & \textbf{Default} \\
+\midrule
+\endhead
+Window size & startup & $1500 \times 920$ \\
+Theme & rail foot & dark \\
+Mouse mode & toolbar & Select \\
+Grid & page bar & $1 \times 1$ \\
+Legend, Grid & \tab{style} & on \\
+Log Y, Points & \tab{style} & off \\
+Colour by & \tab{style} & \textbf{Parameter} \\
+Style by & \tab{style} & None \\
+First three curve colours & \tab{style} & red, blue, dark green \\
+Line width & \tab{style} & 1.6 (range 0.1--10.0) \\
+Marker size & \tab{style} & 6.0 (range 1.0--20.0) \\
+Legend corner & \tab{style} & top-left \\
+Legend parts & \tab{style} & Parameter only \\
+Axis locks & \tab{scale} & off \\
+ISO groups & \tab{iso} & 3 \\
+Azimuth, tilt & \tab{3d} & $45^\circ$, $25^\circ$ \\
+3D triad, 3D grid & \tab{3d} & on \\
+3D zoom half-width & \tab{3d} & 0.95 \\
+Band opacity & \tab{area} & 0.20 (range 0.02--1.0) \\
+Band colour & \tab{area} & \code{\#3380ff} \\
+Marker dot size & \tab{markers} & 9.0 (range 2.0--30.0) \\
+Marker colour & \tab{markers} & \code{\#ff3333} \\
+Caption size & \tab{text} & 10.0\,pt (range 4--72) \\
+Caption position & \tab{text} & 0.05, 0.05 \\
+Memory limit & command line & 2048\,MB (floor 64\,MB) \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\emph{Colour by} defaulted to \emph{Simulation} up to 2.1.0. Existing
+workspaces are unaffected --- every tile records its own mode.
+
+\chapter{Known limitations}
+
+The following are real shortcomings of this version, gathered here so they are
+easy to find.
+
+Entries that appeared here in earlier editions and have since been fixed are not
+repeated: ISO filters and aliases missing from the workspace, the undocumented
+\code{ln}, an ISO filter on an absent parameter hiding every run, display names
+lost on save, and a run's identity moving when its file was renamed and
+reloaded.
+
+\textbf{The workspace version is not interpreted.} A \code{"version"} of 3 is
+written and nothing reads it; there is no version-branching logic, so a future
+format change has no mechanism to fall back on. What stands in for it is the
+loader's tolerance of unknown keys and of missing ones.
+
+\textbf{Group boundaries differ by a hair between the two layers.} The core
+treats every interval except the last as half-open; the interface helpers treat
+all of them as inclusive at both ends with the first claiming group winning. The
+two disagree only for a value sitting exactly on a shared edge.
+
+\textbf{\code{nearest\_index} guesses at sortedness.} Its fast path is chosen by
+comparing the first and last samples rather than by testing monotonicity, so a
+phase-plane channel that ends above where it started can return a wrong index.
+
+\textbf{\code{aoe\_cache\_path} writes shared state under a read lock.} Two
+concurrent readers can invalidate each other's returned pointer. The Python
+layer is not exposed to it because \code{ctypes} copies the string immediately.
+
+\textbf{There is no cancellation.} A running background task cannot be
+interrupted; the interface is disabled until it completes. What exists instead
+is coalescing --- a newer queued request replaces an older one.
+
+\textbf{Markers and areas are not drawn on three-dimensional tiles.} This is a
+deliberate restriction rather than an oversight, but it is a restriction.
+
+\textbf{Classic Mac line endings are not supported.} Lines are split on the line
+feed, with carriage returns trimmed, so a file using lone carriage returns reads
+as a single line.
+
+\textbf{The \tab{data} tree holds one widget item per run.} A twelve-hundred-run
+file is twelve hundred of them. The cost is paid once per change to the set of
+open files rather than per interaction, and not auto-expanding a large file
+keeps Qt from laying them out --- but the items are built either way, and a
+model-backed view is what would avoid that.
+
+\textbf{Decimation scans the whole visible window.} That is what makes the
+min/max guarantee hold, but it means a fully zoomed-out view of a large study
+scans every sample of every drawn curve on each resample. A multi-resolution
+min/max pyramid stored in the sidecar would make that case cost what the screen
+can show instead; it would also change the sidecar format.
+
+\end{document}

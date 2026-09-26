@@ -135,7 +135,24 @@ public:
     bool is_open() const noexcept { return !headers_.empty(); }
     const std::string& path() const noexcept { return path_; }
     const std::string& name() const noexcept { return name_; }
-    void set_name(const std::string& n) { name_ = n; }
+
+    // Renaming changes the label and nothing else. key_name_ is fixed by the
+    // first name this dataset is ever given -- the one Session derives from
+    // the path, before open() runs -- and every run's unique_key is built from
+    // that rather than from name_.
+    //
+    // They used to be the same string, which was invisible until a file could
+    // be reloaded on purpose: reload() re-opens and rebuilds every key, so a
+    // file the user had renamed came back with different keys for the same
+    // runs, and every colour, dash and marker the user had set for them was
+    // suddenly attached to nothing.
+    void set_name(const std::string& n) {
+        name_ = n;
+        if (key_name_.empty()) key_name_ = n;
+    }
+    const std::string& key_name() const noexcept {
+        return key_name_.empty() ? name_ : key_name_;
+    }
 
     std::uint64_t mod_time() const noexcept { return mod_time_; }
     bool changed_on_disk() const noexcept {
@@ -283,6 +300,8 @@ private:
 
     std::string path_;
     std::string name_;
+    // What unique_key is built from. Set once, by the first set_name().
+    std::string key_name_;
     std::uint64_t mod_time_ = 0;
     // File length when the index was built. Block offsets are only meaningful
     // against a file of this length; a file that shrank underneath us -- the

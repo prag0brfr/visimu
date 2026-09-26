@@ -242,6 +242,10 @@ class PlotItem:
         self.legend = None
         self._view_range = [[0.0, 1.0], [0.0, 1.0]]
         self.vb = _ViewBox()
+        self.titles = []
+        self.grid_calls = []
+        self.log_calls = []
+        self.label_calls = []
 
     def addItem(self, item, *args, **kwargs):
         self.items.append(item)
@@ -259,6 +263,30 @@ class PlotItem:
 
     def getViewBox(self):
         return self.vb
+
+    # Recorded rather than swallowed. These four are the plot's own settings,
+    # and whether a rebuild writes them *again* with what it wrote last time
+    # is the behaviour under test: setLogMode in particular propagates to
+    # every data item and re-enables auto-range, so a redundant write is not
+    # free. A stub that let them fall through to _Any could not tell a guarded
+    # rebuild from an unguarded one.
+    def setTitle(self, title=None, **kwargs):
+        self.titles.append(title)
+
+    def showGrid(self, **kwargs):
+        self.grid_calls.append(kwargs)
+
+    def setLogMode(self, **kwargs):
+        self.log_calls.append(kwargs)
+
+    def setLabel(self, axis=None, text=None, **kwargs):
+        self.label_calls.append((axis, text))
+
+    @property
+    def axis_writes(self):
+        """How many times the four settings above have been written."""
+        return (len(self.titles) + len(self.grid_calls)
+                + len(self.log_calls) + len(self.label_calls))
 
     def __getattr__(self, name):
         if name.startswith("__"):
@@ -926,8 +954,61 @@ def install() -> None:
     core = _AutoModule("PySide6.QtCore")
     core.Signal = Signal
     core.Qt = _make_qt()
-    for name in ("QPointF", "QRectF", "QTimer", "QObject", "QThread"):
+    for name in ("QPointF", "QRectF", "QObject", "QThread"):
         setattr(core, name, type(name, (_Any,), {}))
+
+    # QTimer needs two real behaviours.
+    #
+    # singleShot must actually call back: code defers work to the next turn of
+    # the event loop when doing it now would destroy a widget Qt is still
+    # using, and a no-op would quietly test the half of that path that does
+    # nothing. Running it straight away is the closest a stub gets to "very
+    # soon".
+    #
+    # An *instance* must record that it was started without firing. The timers
+    # built this way are debouncers -- the caption commit, the resample at the
+    # end of a drag, the parameter filter -- and what they are for is that the
+    # work does NOT happen yet. Firing on start would test the opposite of the
+    # behaviour, so a test asks for it explicitly with fire().
+    class QTimer(_Any):
+        timeout = Signal()
+
+        def __init__(self, *args, **kwargs):
+            _Any.__init__(self, *args, **kwargs)
+            self.pending = False
+            self.single_shot = False
+            self.interval_ms = 0
+
+        @staticmethod
+        def singleShot(_msec, callback):
+            callback()
+
+        def setSingleShot(self, value):
+            self.single_shot = bool(value)
+
+        def setInterval(self, msec):
+            self.interval_ms = int(msec)
+
+        def start(self, msec=None):
+            if msec is not None:
+                self.interval_ms = int(msec)
+            self.pending = True
+
+        def stop(self):
+            self.pending = False
+
+        def isActive(self):
+            return self.pending
+
+        def fire(self):
+            """What the event loop would do when the interval elapses."""
+            if not self.pending:
+                return False
+            self.pending = False
+            self.timeout.emit()
+            return True
+
+    core.QTimer = QTimer
 
     gui = _AutoModule("PySide6.QtGui")
     for name in ("QBrush", "QColor", "QPainter", "QPen", "QPolygonF"):
