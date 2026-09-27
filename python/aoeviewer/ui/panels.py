@@ -2333,13 +2333,28 @@ class IsoPanel(QWidget):
 
 
 class ColorSwatch(QPushButton):
-    """A small button showing a colour, opening a colour picker when clicked."""
+    """A small button showing a colour, opening a colour picker when clicked.
+
+    Two details here are about not leaking the colour anywhere else.
+
+    The rule is written against this object's name rather than against
+    QPushButton. A stylesheet set on a widget applies to that widget *and to
+    every widget below it in the object tree*, so a bare ``QPushButton { ... }``
+    here is a rule about every button that ever ends up parented to this one.
+
+    And the picker is parented to the window rather than to the swatch, which
+    is the half that actually went wrong: a dialog whose parent is this button
+    is a child of it, so it inherited the rule and painted its own OK, Cancel,
+    "Pick Screen Color" and "Add to Custom Colors" buttons in the colour being
+    edited. On a light colour the dialog's own buttons disappeared into it.
+    """
 
     color_picked = Signal(str)
 
     def __init__(self, color: str, parent=None):
         super().__init__(parent)
         self._color = color
+        self.setObjectName("ColorSwatch")
         self.setFixedSize(28, 18)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip("Click to change colour")
@@ -2348,8 +2363,10 @@ class ColorSwatch(QPushButton):
 
     def _apply(self) -> None:
         self.setStyleSheet(
-            "QPushButton {{ background: {0}; border: 1px solid #555; border-radius: 2px; }}"
-            "QPushButton:hover {{ border: 1px solid #fff; }}".format(self._color)
+            "QPushButton#ColorSwatch {{ background: {0}; border: 1px solid #555;"
+            " border-radius: 2px; }}"
+            "QPushButton#ColorSwatch:hover {{ border: 1px solid #fff; }}".format(
+                self._color)
         )
 
     def color(self) -> str:
@@ -2360,7 +2377,8 @@ class ColorSwatch(QPushButton):
         self._apply()
 
     def _choose(self) -> None:
-        chosen = QColorDialog.getColor(QColor(self._color), self, "Curve colour")
+        chosen = QColorDialog.getColor(
+            QColor(self._color), self.window(), "Curve colour")
         if chosen.isValid():
             self.set_color(chosen.name())
             self.color_picked.emit(chosen.name())

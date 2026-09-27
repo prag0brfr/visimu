@@ -6,7 +6,7 @@
 % passages the 2.1.0 and 2.1.1 releases invalidated rewritten rather than
 % appended to.
 %
-% Build:  pdflatex aoeViewer-2.1.1-User-and-Reference-Guide.tex   (three times,
+% Build:  pdflatex aoeViewer-2.1.2-User-and-Reference-Guide.tex   (three times,
 %         so the table of contents and the cross-references settle)
 
 \documentclass[11pt,a4paper,oneside]{report}
@@ -43,13 +43,13 @@
 \definecolor{aoeshade}{HTML}{F4F6F8}
 
 \hypersetup{
-  pdftitle={aoeViewer 2.1.1 -- User and Reference Guide},
+  pdftitle={aoeViewer 2.1.2 -- User and Reference Guide},
   pdfauthor={Paulo R. A. Gilz},
   pdfsubject={The interface, the algorithms, the file format, the C ABI and the scripting API},
   colorlinks=false,
 }
 
-\newcommand{\appver}{2.1.1}
+\newcommand{\appver}{2.1.2}
 
 \pagestyle{fancy}
 \fancyhf{}
@@ -117,7 +117,7 @@ the C ABI and the scripting API\par}
 \vspace{3cm}
 {\large Paulo R. A. Gilz\par}
 \vfill
-{\small This edition replaces the 2.0.0 guide and the 2.1.1 addendum.\par}
+{\small This edition replaces the 2.0.0 guide and the 2.1.x addenda.\par}
 \end{titlepage}
 
 \tableofcontents
@@ -128,7 +128,7 @@ the C ABI and the scripting API\par}
 \markboth{About this edition}{}
 
 This is a single document. It replaces two: the \emph{2.0.0 User and Reference
-Guide} and the \emph{\appver{} user-guide addendum}, which existed only because
+Guide} and the \emph{2.1.1 user-guide addendum}, which existed only because
 the guide had not been revised. Everything those two said is here. Where the
 2.1.0 and \appver{} releases changed behaviour the 2.0.0 text described, the
 text has been rewritten rather than annotated, so nothing in this guide has to
@@ -210,6 +210,29 @@ not need a new number.
   annotations are written only when they differ; the \tab{params} filter waits
   for the typing to stop; a file of more than 200 runs opens closed in
   \tab{data}. None of this changes what is drawn --- see \S\ref{sec:redrawcache}.
+\end{description}
+
+\section{In \appver}
+
+\begin{description}
+\item[The interface has a size.] Two buttons in the toolbar make the text and the
+  spacing around it larger or smaller --- everywhere: the tab rail, the
+  panels, the bar itself, and the titles, axes and legends on the plots. The
+  setting is saved with the workspace. See \S\ref{sec:uiscale}.
+\item[The panels scroll.] Each one sits in a scroll area, so the window's minimum
+  height no longer depends on the tallest panel. On a screen shorter than
+  about 1000 usable pixels the window previously could be neither shrunk nor
+  maximised.
+\item[The colour picker no longer paints itself in the colour being edited.] Its OK,
+  Cancel and two other buttons took the swatch's colour and disappeared into
+  it on a light one.
+\item[\emph{Fit} moved to the page and tile bar,] with the rest of what acts on the
+  tiles. \key{Ctrl+0} still works from anywhere in the window.
+\item[The light/dark toggle moved to the toolbar,] out of the foot of the tab rail
+  where it took vertical space from the tabs and selected no panel.
+\item[Building the executable writes \code{sample/}.] Two 250\,MB flight files and one
+  small one, beside \code{build/} and \code{dist/}, generated once and never
+  rewritten. See \S\ref{sec:samples}.
 \end{description}
 
 \chapter{What aoeViewer is}
@@ -346,6 +369,39 @@ python tools/gen_sample.py sample.aoe --sims 6 --rows 40000
 PYTHONPATH=python python -m aoeviewer sample.aoe
 \end{aoecode}
 
+\subsection{Sample data}
+\label{sec:samples}
+
+\begin{aoenew}{New in \appver}
+Building the executable also writes \code{sample/}, beside \code{build/} and
+\code{dist/}: two flight files of about 250\,MB with twenty-five runs each, and
+one of 12\,MB for a quick look.
+\end{aoenew}
+
+The sizes are the point. A few megabytes exercises none of what this program is
+built around: the \code{.aoec} sidecar is not written below 8\,MB, decimation
+has nothing to decimate, and a six-run file has no sweep for \tab{iso} to
+filter. Two large files rather than one, so that \emph{Colour by Parameter}
+with \emph{Style by File} has something to show.
+
+Only the files that are missing are generated, and one already there is never
+rewritten --- these take minutes to integrate, and someone who has trimmed one
+down or replaced it with their own data should not find it overwritten by a
+rebuild. Each is written under a temporary name and moved into place, so an
+interrupted run leaves nothing that looks finished; without that, a
+\key{Ctrl+C} halfway through would count as ``already there'' on the next
+build and the viewer would open a truncated file.
+
+Failure here never fails the build: a sample file is a convenience, not part of
+the product, so a read-only checkout or a full disk prints a reason and the
+executable is produced anyway. \code{-{}-no-samples} skips the step.
+
+The generator is \code{tools/gen\_flight\_data.py}, which integrates a
+longitudinal rigid-body model with a pitch-rate autopilot rather than emitting
+noise --- test data made of sine waves lets a viewer look correct while being
+wrong in the ways that matter, since it has no transients that decimation must
+preserve and no per-run constants for ISO to key on.
+
 \subsection{Where the library is looked for}
 
 \code{\_core.library\_path()} searches in a fixed order, most specific first:
@@ -434,7 +490,11 @@ workspace load, save and save-as, the two exports, the auto-fit button and ---
 pushed to the right edge --- the four mouse modes. The title bar above it names
 the workspace currently open, with a leading asterisk while there are unsaved
 changes. Down the left edge runs the tab rail, a 21-pixel strip of vertically
-painted labels which selects which of the twelve panels is shown beside it. The
+painted labels which selects which of the twelve panels is shown beside it.
+It holds tabs and nothing else: up to 2.1.1 the light/dark toggle was pinned to
+its foot, where it competed with the tabs for the one dimension a short screen
+is short of, and where it was the only button in the column that selected no
+panel. The
 panel itself occupies a splitter pane that can be dragged between 230 and 600
 pixels wide. To its right, the plot area is divided into the page and tile bar
 along its top and the grid of tiles below. The status bar along the bottom
@@ -453,8 +513,8 @@ would repaint twenty-five plots.
 
 \section{The main toolbar}
 
-Nine buttons in three groups: the workspace, the two exports, and auto-fit ---
-then, pushed to the right edge, the four mouse modes. Every one of them is a
+Ten buttons in three groups: the workspace, the two exports, and the interface
+--- then, pushed to the right edge, the four mouse modes. Every one of them is a
 labelled icon, and every icon is painted at request time rather than loaded from
 a file.
 
@@ -469,7 +529,9 @@ Save workspace & \key{Ctrl+S} & Overwrites the current workspace, asking for a p
 Save workspace as\ldots & \key{Ctrl+Shift+S} & Always asks for a path, then continues in the new file and leaves the old one as it was. \\
 Image & --- & Saves the active page as a PNG, exactly as displayed. \\
 CSV & --- & Writes the active tile's curves to a CSV file at full resolution. \\
-Fit & \key{Ctrl+0} & Auto-scales every tile, honouring axis locks. Double-clicking one plot fits just that one. \\
+Smaller & \key{Ctrl+-} & Interface size: smaller text, tighter spacing, everywhere. \\
+Larger & \key{Ctrl+=} & Interface size: larger text, roomier spacing, everywhere. \\
+Light / Dark & --- & Switches the theme. Its label and icon name the theme a press would \emph{give} --- a sun while the dark theme is on --- rather than the one already on screen. \\
 Select & \key{Ctrl+1} & Mouse mode: click to activate a tile; drag annotations. \\
 Inspect & \key{Ctrl+2} & Mouse mode: click a curve to read every channel; drag to measure a slope. \\
 Pan & \key{Ctrl+3} & Mouse mode: drag to move the view. \\
@@ -480,6 +542,12 @@ Zoom & \key{Ctrl+4} & Mouse mode: wheel zooms, drag a rectangle to zoom into it.
 
 There is deliberately no \emph{Open} action: \emph{Add files} in the \tab{data}
 tab and \emph{Load workspace} here already cover it.
+
+The interface group sits behind its own rule and under its own caption ---
+\emph{Smaller}, \emph{Larger} and the theme --- because those three are the
+ones here that change nothing about the data or the view: everything to their
+left acts on the workspace or on the plots, and these act on the window
+itself.
 
 The toolbar is permanent by construction. Its context menu is suppressed, its
 \code{toggleViewAction} is disabled and hidden, and
@@ -589,11 +657,18 @@ to finish before destroying the session, because tearing the core down while a
 worker is still inside it would write into freed memory.
 
 \section{Theme}
+\label{sec:theme}
 
-At the foot of the tab rail sits a button labelled \emph{L / D} whose tooltip
-reads \emph{Switch between light and dark}. It flips the whole application,
-including the plot canvases, the legend grounds, the painted toolbar icons and
-the text captions.
+The theme button is in the toolbar's interface group (\S\ref{sec:uiscale}),
+and flips the whole application: the plot canvases, the legend grounds, the
+painted toolbar icons and the text captions.
+
+\begin{aoenew}{Changed in \appver}
+It was at the foot of the tab rail, labelled \emph{L / D}. Its label and icon
+now name the theme a press would give rather than the one already on screen ---
+a sun while the dark theme is on --- because a toggle labelled with its current
+state reads as a description, and a button is an offer.
+\end{aoenew}
 
 The stylesheet sets every colour it depends on instead of inheriting from the
 desktop, because Qt's default palette differs enough between Linux and Windows
@@ -617,6 +692,50 @@ thereafter, and at the axis size it was taking a visible corner out of every
 tile on a $3 \times 3$ page.
 \end{aoenew}
 
+\section{Interface size}
+\label{sec:uiscale}
+
+\begin{aoenew}{New in \appver}
+\emph{Smaller} and \emph{Larger} in the toolbar scale the whole interface,
+from 70\,\% to 160\,\% in steps of ten points. The setting is saved with the
+workspace, like the theme.
+\end{aoenew}
+
+One knob rather than a set of them. Text set two pixels smaller inside
+unchanged padding looks shrunken rather than roomier, so the padding, the tick
+boxes, the scrollbars and the rail move with the type or none of it should. It
+reaches:
+
+\begin{itemize}
+\item the application stylesheet --- every font size and every padding figure
+  in \S\ref{sec:theme} is a base size multiplied by the scale;
+\item the widgets that paint their own text, which measure it themselves and
+  so are not reached by a stylesheet. The tab rail is the one that shows: its
+  \emph{width} is the height of its rotated labels, so it re-measures and the
+  column grows or shrinks with them;
+\item the plots --- tile titles, axis tick numbers, legend rows, the crosshair
+  readout and the text captions are all sized in points handed to pyqtgraph,
+  and the legend's own padding moves with them.
+\end{itemize}
+
+What it does not touch is anything measured in the data: curve widths, marker
+sizes and band opacities are choices about the plot rather than about the
+window, and they have their own controls in \tab{style}, \tab{markers} and
+\tab{area}.
+
+Each button disables itself at its end of the range. A button that silently
+does nothing is worse than one that says it cannot: the scale clamps, so
+without that the last press at either end reads as the window failing to
+respond.
+
+\begin{aoenote}{Why this exists}
+The base sizes are one compromise, chosen for a 1080-high screen, and screens
+are not all that. This was reported from a 1400 $\times$ 1050 Linux session,
+where the window overflowed the screen and could not be maximised; a 4K screen
+at 100\,\% has the opposite problem. Scrollable panels (below) make the window
+fit on any screen; this makes it \emph{comfortable} on one.
+\end{aoenote}
+
 \chapter{The twelve panels}
 
 The tab rail selects one of twelve panels. Selecting a tab refreshes that panel
@@ -624,6 +743,25 @@ immediately and marks the others stale, so they are refreshed lazily when next
 shown --- which is why no panel is allowed to write application state while
 refreshing. Five of the panels act on the active tile only (\tab{params},
 \tab{style}, \tab{scale}, \tab{3d}, \tab{text}); the rest are global.
+
+\begin{aoenew}{New in \appver{} --- the panels scroll}
+Each panel sits in a scroll area, and the reason is the window's minimum size
+rather than the panel's own.
+
+A plain widget's minimum height is the sum of its children's, and \tab{style}
+is tall: four switches, two encodings with their combos and hints, two tables
+and a legend group. Added to the toolbar, the page bar and the status bar, the
+window's minimum height came out near 950 px --- fine on a 1080-high screen,
+and taller than the usable area of a 1050-high one once a desktop panel takes
+its share. The window could then neither be shrunk nor maximised, because a
+maximise that cannot satisfy the minimum is refused outright.
+
+A scroll area does not propagate its child's minimum height, so the window's
+minimum stops depending on the tallest panel. Nothing is hidden: a panel keeps
+its full height and scrolls only when the pane is shorter than it, which on any
+screen that fitted before never happens. Horizontal scrolling is off, so a
+control can never be parked off to the side where it cannot be found.
+\end{aoenew}
 
 \section{DATA --- choosing runs}
 \label{sec:data}
@@ -1340,10 +1478,25 @@ and cannot be chosen.
 To its right, \emph{Tile N} names the active tile and four arrows swap it with
 its neighbour to the left, above, below or right; each arrow is enabled only when
 that move is possible, and the active index follows the tile so the move is its
-own inverse. Finally \emph{Copy}, \emph{Cut}, \emph{Paste} and \emph{Clear} act
+own inverse. Then \emph{Copy}, \emph{Cut}, \emph{Paste} and \emph{Clear} act
 on the active tile's whole configuration. Pasting installs an independent deep
 copy, so pasting twice gives two tiles that can then diverge. This clipboard
 lives in the process only and is not saved to a workspace.
+
+Last, behind its own rule, \emph{Fit} (\key{Ctrl+0}) auto-scales every tile,
+honouring axis locks; double-clicking one plot fits just that one.
+
+\begin{aoenew}{Changed in \appver}
+\emph{Fit} was in the main toolbar, among the workspace and export actions. It
+acts on the tiles, and you pick a tile by clicking it, so it belongs within a
+few pixels of them --- the same reason the rest of this bar is here. Behind its
+own rule because it moves no tile and copies nothing: it re-frames what is
+already there.
+
+The shortcut is unchanged and still works from anywhere in the window. An
+action that is on no widget has no shortcut at all, so it is registered on the
+window rather than on a bar.
+\end{aoenew}
 
 \section{How a page is modelled}
 
@@ -3005,6 +3158,7 @@ Formula dependency depth & 32, beyond which the definition is reported as cyclic
 Redraw coalescing & 25\,ms, so a drag produces one resample at its end rather than one per pixel \\
 Caption commit delay & 400\,ms of idle typing \\
 PARAMS filter delay & 400\,ms of idle typing \\
+Interface size & 70\,\% to 160\,\% of the base type scale, in steps of 10 \\
 Shutdown wait & 30\,s for background work to finish \\
 \bottomrule
 \end{longtable}
@@ -3128,6 +3282,8 @@ was plotting against.
 \key{Ctrl+S} & Save workspace (overwrites the current file) \\
 \key{Ctrl+Shift+S} & Save workspace as --- asks, then continues in the new file \\
 \key{Ctrl+0} & Auto-fit every tile \\
+\key{Ctrl+-} / \key{Ctrl+=} & Interface size: smaller, larger \\
+\emph{Light} / \emph{Dark} in the toolbar & Switch the theme (no shortcut) \\
 \key{Ctrl+1} \ldots \key{Ctrl+4} & Mouse mode: Select, Inspect, Pan, Zoom \\
 Click a tile & make it the active tile \\
 Double-click a tile & auto-fit that tile alone \\
@@ -3174,7 +3330,7 @@ two-space indentation. The schema is at version~3.
 \begin{aoecode}
 {
   "version": 3,
-  "app_version": "2.1.1",
+  "app_version": "2.1.2",
   "files":    ["/abs/path/run_a.aoe"],
   "computed": {"LOAD_FACTOR": "NZ * 9.80665"},
   "aliases":  {"Angle of attack": "ALPHA"},
@@ -3211,6 +3367,7 @@ two-space indentation. The schema is at version~3.
   "global_x_limits": {"TIME": [0.0, 60.0]},
   "global_y_limits": {},
   "dark_mode": true,
+  "ui_scale": 1.0,
   "mouse_mode": 0
 }
 \end{aoecode}
@@ -3219,6 +3376,11 @@ Each entry of \code{"tiles"} carries the complete tile state listed in
 Chapter~\ref{ch:pages}, including its captions and both encodings. Only the
 visible tiles of a page are written; loading pads the list back up to
 twenty-five.
+
+\code{ui\_scale} is absent from every workspace written before \appver{}, and
+from one written by hand; 1.0 is the size those were laid out at, and a value
+outside the range is clamped rather than refused so that a workspace from a
+future version with a wider range still opens.
 
 \code{file\_names} and \code{sim\_names} are optional and written only when
 something was renamed (\S\ref{sec:workspaces}). \code{app\_version} records
@@ -3254,6 +3416,7 @@ window geometry, and the hidden tiles of a shrunken grid.
 \endhead
 Window size & startup & $1500 \times 920$ \\
 Theme & rail foot & dark \\
+Interface size & toolbar & 100\,\% (range 70--160\,\%, steps of 10) \\
 Mouse mode & toolbar & Select \\
 Grid & page bar & $1 \times 1$ \\
 Legend, Grid & \tab{style} & on \\

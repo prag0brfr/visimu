@@ -23,7 +23,8 @@ from PySide6.QtWidgets import (
 )
 
 from ..model import AppState
-from ..theme import Theme
+from ..theme import Theme, px
+from . import icons
 from .grid_picker import GridSizeButton
 
 
@@ -41,6 +42,7 @@ class PlotToolbar(QWidget):
     pages_changed = Signal()        # page list or layout changed: rebuild the grid
     tiles_changed = Signal()        # tile contents moved: redraw
     active_tile_changed = Signal(int)
+    fit_requested = Signal()        # re-frame every tile
 
     def __init__(self, state: AppState, theme: Theme, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -135,13 +137,40 @@ class PlotToolbar(QWidget):
             button.clicked.connect(handler)
             layout.addWidget(button)
 
+        layout.addWidget(_separator())
+
+        # --- framing ---------------------------------------------------------
+        # Fit was in the main toolbar, among the workspace and export actions.
+        # It belongs here for the same reason the tile buttons do: it acts on
+        # the tiles, and a control that acts on what you picked by clicking
+        # should be within a few pixels of it. Behind its own rule, because it
+        # moves no tile and copies nothing -- it re-frames what is already
+        # there.
+        self.fit_button = QPushButton("Fit")
+        self.fit_button.setToolTip(
+            "Auto-scale every tile, honouring axis locks  (Ctrl+0)\n"
+            "Double-click one plot to fit just that one")
+        self.fit_button.clicked.connect(self.fit_requested.emit)
+        layout.addWidget(self.fit_button)
+
         layout.addStretch(1)
+        self._apply_icons()
 
     # ------------------------------------------------------------- refresh
 
     def set_theme(self, theme: Theme) -> None:
         self._theme = theme
         self.grid_button.set_theme(theme)
+        self._apply_icons()
+
+    def _apply_icons(self) -> None:
+        """Re-paint the icons this bar owns.
+
+        They are painted at a pixel size, so neither the theme's colours nor
+        the interface scale reaches them through the stylesheet; this is
+        called from set_theme(), which the window calls for both.
+        """
+        self.fit_button.setIcon(icons.icon("fit", self._theme.text, px(14)))
 
     def refresh(self) -> None:
         self._updating = True

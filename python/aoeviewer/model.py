@@ -830,6 +830,11 @@ class AppState:
         self.clipboard_is_cut: bool = False
 
         self.dark_mode: bool = True
+        # How large the interface is drawn, as a multiple of the base type
+        # scale. A view preference like the theme, and saved with it: someone
+        # who has set the window to suit their screen should not have to set
+        # it again every time they open a workspace.
+        self.ui_scale: float = 1.0
         self.workspace_path: Optional[str] = None
         self.dirty: bool = False
         self.mouse_mode: MouseMode = MouseMode.SELECT
@@ -1436,12 +1441,13 @@ class AppState:
     def to_dict(self) -> dict:
         return {
             "version": 3,
-            "app_version": "2.1.1",
+            "app_version": "2.1.2",
             "pages": [p.to_dict() for p in self.pages],
             "active_page": self.active_page,
             "selected_sims": sorted(list(self.selected_sims)),
             "styles": self.styles.to_dict(),
             "dark_mode": self.dark_mode,
+            "ui_scale": self.ui_scale,
             "mouse_mode": int(self.mouse_mode),
             "markers": [
                 {"x_param": m.x_param, "position": m.position,
@@ -1479,6 +1485,12 @@ class AppState:
         self._plotted = None
         self.styles.load_dict(data.get("styles", {}))
         self.dark_mode = bool(data.get("dark_mode", True))
+        # Absent from every workspace written before 2.1.2, and from one
+        # written by hand; 1.0 is the size those were laid out at.
+        try:
+            self.ui_scale = float(data.get("ui_scale", 1.0))
+        except (TypeError, ValueError):
+            self.ui_scale = 1.0
         self.mouse_mode = MouseMode(int(data.get("mouse_mode", int(MouseMode.SELECT))))
         self.markers = [
             Marker(**{k: v for k, v in m.items() if k in Marker.__annotations__})

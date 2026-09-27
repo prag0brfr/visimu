@@ -2632,6 +2632,142 @@ class TestTheAxesAreWrittenOnlyWhenTheyChange(unittest.TestCase):
         self.assertGreater(len(self.plot.titles), before)
 
 
+class TestTheRailHoldsTabsAndNothingElse(unittest.TestCase):
+    """The column's height is the one thing a short screen is short of.
+
+    The light/dark toggle used to be pinned to its foot, where it competed
+    with the tabs for that space and selected no panel. It is in the toolbar
+    now, with the rest of what changes how the window looks.
+    """
+
+    def build(self, labels):
+        from aoeviewer.ui import sidebar
+
+        made = []
+        real = sidebar.VerticalTabButton
+
+        class Counted(real):
+            def __init__(self, text, theme, parent=None):
+                made.append(text)
+                real.__init__(self, text, theme, parent)
+
+        sidebar.VerticalTabButton = Counted
+        self.addCleanup(setattr, sidebar, "VerticalTabButton", real)
+        rail = sidebar.TabRail(labels, theme_module.theme_for(True))
+        return rail, made
+
+    def test_one_button_per_tab_and_no_more(self):
+        labels = ["DATA", "PARAMS", "ISO", "STYLE"]
+        rail, made = self.build(labels)
+        self.assertEqual(made, labels)
+        self.assertEqual(len(rail._buttons), len(labels))
+
+    def test_the_rail_no_longer_offers_the_theme(self):
+        from aoeviewer.ui import sidebar
+
+        # On the class, not the instance: the stub widget invents any
+        # attribute asked of an instance, so an instance check would pass
+        # against a rail that still had the button.
+        self.assertFalse(hasattr(sidebar.TabRail, "theme_toggled"))
+
+
+class TestTheColourSwatchKeepsItsColourToItself(unittest.TestCase):
+    """A stylesheet set on a widget applies to everything below it.
+
+    The swatch paints itself with one, and the picker used to be parented to
+    the swatch -- so the dialog was a child of it, inherited the rule, and
+    painted its own OK, Cancel, "Pick Screen Color" and "Add to Custom
+    Colors" buttons in the colour being edited. On a light colour the
+    dialog's own buttons disappeared into it.
+    """
+
+    def test_the_rule_is_about_this_button_and_no_other(self):
+        swatch = object.__new__(panels.ColorSwatch)
+        swatch._color = "#ffaa00"
+        swatch.setStyleSheet = lambda sheet: setattr(swatch, "sheet", sheet)
+        swatch.setObjectName("ColorSwatch")
+        swatch._apply()
+
+        self.assertIn("#ffaa00", swatch.sheet)
+        # Every selector in it names the object, so a widget that merely ends
+        # up below this one in the tree is not painted by it.
+        for rule in swatch.sheet.split("}"):
+            if "{" not in rule:
+                continue
+            selector = rule.split("{")[0].strip()
+            self.assertIn("#ColorSwatch", selector, selector)
+
+    def test_the_picker_is_parented_to_the_window(self):
+        source = self._source("ui/panels.py", "ColorSwatch", "_choose")
+        self.assertIn("self.window()", source)
+        self.assertNotIn("QColor(self._color), self,", source,
+                         "the picker must not be a child of the swatch")
+
+    @staticmethod
+    def _source(module, class_name, method_name):
+        import ast
+
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        path = os.path.join(root, "python", "aoeviewer", *module.split("/"))
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+        tree = ast.parse(text, filename=path)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name == class_name:
+                for method in node.body:
+                    if (isinstance(method, ast.FunctionDef)
+                            and method.name == method_name):
+                        return ast.get_source_segment(text, method) or ""
+        raise AssertionError("{0}.{1}() not found".format(class_name, method_name))
+
+
+class TestTheUiScaleReachesThePlots(unittest.TestCase):
+    """A tile sizes its title, axes and legend in points handed to pyqtgraph.
+
+    So the scale has to reach them, and the cache that stops a rebuild
+    rewriting the plot's settings has to notice when it moves -- otherwise the
+    one thing that does not follow the knob is the thing the knob is most
+    visible on.
+    """
+
+    def setUp(self):
+        from aoeviewer import theme
+
+        self.theme = theme
+        self.addCleanup(theme.set_ui_scale, 1.0)
+        theme.set_ui_scale(1.0)
+
+        self.session = _DrawSession()
+        self.tile = make_drawable_tile(self.session)
+        state = self.tile._state
+        state.selected_sims.update({(0, 0), (0, 1)})
+        state.tile.x_param, state.tile.y_params = "TIME", ["ALT"]
+        self.plot = self.tile.getPlotItem()
+
+    def test_the_title_is_written_again_when_the_scale_moves(self):
+        self.tile.rebuild()
+        before = len(self.plot.titles)
+        # Nothing about the tile changed, so without the scale in the cache
+        # key this rebuild writes nothing and the title keeps its old size.
+        self.theme.set_ui_scale(1.4)
+        self.tile.rebuild()
+        self.assertGreater(len(self.plot.titles), before)
+
+    def test_the_title_size_follows_the_scale(self):
+        self.theme.set_ui_scale(1.4)
+        self.tile.rebuild()
+        expected = "{0}pt".format(self.theme.pt(pt.PLOT_TITLE_PT))
+        self.assertIn(expected, str(self.plot.title_sizes[-1]))
+
+    def test_a_rebuild_at_an_unchanged_scale_still_writes_nothing(self):
+        self.theme.set_ui_scale(1.2)
+        self.tile.rebuild()
+        before = self.plot.axis_writes
+        for _ in range(3):
+            self.tile.rebuild()
+        self.assertEqual(self.plot.axis_writes, before)
+
+
 class TestOverlaysAreRedrawnOnlyWhenTheyChange(unittest.TestCase):
     """Markers and bands, and the curves they are drawn against.
 

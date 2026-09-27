@@ -243,6 +243,7 @@ class PlotItem:
         self._view_range = [[0.0, 1.0], [0.0, 1.0]]
         self.vb = _ViewBox()
         self.titles = []
+        self.title_sizes = []
         self.grid_calls = []
         self.log_calls = []
         self.label_calls = []
@@ -272,6 +273,9 @@ class PlotItem:
     # rebuild from an unguarded one.
     def setTitle(self, title=None, **kwargs):
         self.titles.append(title)
+        # The size is a point string the tile builds from the UI scale, so it
+        # is the one place a test can see the scale reach pyqtgraph.
+        self.title_sizes.append(kwargs.get("size"))
 
     def showGrid(self, **kwargs):
         self.grid_calls.append(kwargs)
@@ -1016,6 +1020,23 @@ def install() -> None:
     gui.QFont = QFont
 
     widgets = _AutoModule("PySide6.QtWidgets")
+
+    # Qt's scoped enums live on the class, and the auto-module's placeholder
+    # only answers attribute lookups on an *instance* -- so QSizePolicy.Policy
+    # raised where the real one does not. Named here because the tab rail sets
+    # its buttons Fixed in both directions, and the rail is worth building in
+    # a test: what is in that column is what a short screen is short of.
+    class _Policy:
+        Fixed = "fixed"
+        Expanding = "expanding"
+        Preferred = "preferred"
+        Minimum = "minimum"
+        Ignored = "ignored"
+
+    class QSizePolicy(_Any):
+        Policy = _Policy
+
+    widgets.QSizePolicy = QSizePolicy
     widgets.QWidget = QWidget
     widgets.QComboBox = QComboBox
     widgets.QTableWidget = QTableWidget

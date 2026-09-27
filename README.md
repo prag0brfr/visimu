@@ -2,15 +2,24 @@
 
 A fast viewer for AOE simulation result files.
 
-**Version 2.1.1** fixes what 2.1.0 got wrong and tightens the legend: names
+**Version 2.1.2** makes the window fit any screen and the interface any taste:
+two toolbar buttons scale the text and the spacing everywhere, each panel
+scrolls so the window's minimum height no longer follows the tallest one, the
+light/dark toggle moved out of the tab rail and into the toolbar, *Fit* moved
+down to the page and tile bar with the rest of what acts on tiles, the colour
+picker stops painting its own buttons in the colour being edited, and building
+the executable writes `sample/` beside `build/` and `dist/`.
+
+**Version 2.1.1** fixed what 2.1.0 got wrong and tightened the legend: names
 given to files and runs are saved in the workspace, `Style by ISO` reaches the
 legend, the checkbox beside an ISO parameter ticks all of its values, an
-unticked parameter leaves the top of the PARAMS list, and legend rows are set
+unticked parameter leaves the top of the PARAMS list, legend rows are set
 smaller and tighter, files are reloaded on request instead of on a timer, and
-`Colour by Parameter` is the default. The full manual is
-`doc/aoeViewer-2.1.1-User-and-Reference-Guide.pdf`, built from the LaTeX source
-beside it; it replaces both the 2.0.0 guide and the 2.1.1 addendum, and
-Chapter 1 lists everything that changed.
+`Colour by Parameter` is the default.
+
+The full manual is `doc/aoeViewer-2.1.2-User-and-Reference-Guide.pdf`, built
+from the LaTeX source beside it; it replaces both the 2.0.0 guide and the 2.1.x
+addenda, and Chapter 1 lists everything that changed.
 
 **Version 2.1.0** added independent *Colour by* and *Style by* encodings, scrollable
 Colour/Line tables, two-line plot titles that keep every selected parameter

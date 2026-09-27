@@ -100,6 +100,52 @@ PLOT_LABEL_PT = 6.5     # crosshair readout, slope figure, captions
 RAIL_FONT_PT = 6.5
 
 
+# --------------------------------------------------------------- UI scale
+#
+# Every figure above is a *base* size, and everything that draws multiplies it
+# by this. One knob rather than a set of them: text set two pixels smaller
+# inside unchanged padding looks shrunken rather than roomier, so the padding,
+# the tick boxes, the scrollbars and the rail move with the type or none of it
+# should.
+#
+# It exists because the sizes above are one compromise, chosen for a 1080-high
+# screen, and screens are not all that. A 1050-high Linux laptop with a desktop
+# panel has less usable height than the panels wanted; a 4K screen at 100 %
+# has more than they need.
+UI_SCALE_MIN = 0.70
+UI_SCALE_MAX = 1.60
+UI_SCALE_STEP = 0.10
+
+_ui_scale = 1.0
+
+
+def ui_scale() -> float:
+    """The current multiplier. 1.0 is the base size scale above."""
+    return _ui_scale
+
+
+def set_ui_scale(value: float) -> float:
+    """Set the multiplier, clamped. Returns what it actually became.
+
+    Clamped rather than refused: the buttons that drive this disable
+    themselves at the ends, and a workspace written by a future version with a
+    wider range must still open.
+    """
+    global _ui_scale
+    _ui_scale = max(UI_SCALE_MIN, min(UI_SCALE_MAX, round(float(value), 3)))
+    return _ui_scale
+
+
+def px(base: float) -> int:
+    """A pixel figure at the current scale, never rounded away to nothing."""
+    return max(1, int(round(base * _ui_scale)))
+
+
+def pt(base: float) -> float:
+    """A point size at the current scale, for Qt fonts and pyqtgraph strings."""
+    return round(base * _ui_scale, 2)
+
+
 def plot_font(size_pt: float, bold: bool = False):
     """A QFont at one of the sizes above.
 
@@ -109,7 +155,7 @@ def plot_font(size_pt: float, bold: bool = False):
     from PySide6.QtGui import QFont
 
     font = QFont()
-    font.setPointSizeF(float(size_pt))
+    font.setPointSizeF(pt(size_pt))
     font.setBold(bold)
     return font
 
@@ -128,14 +174,17 @@ def stylesheet(theme: Theme) -> str:
         color: {text};
         font-size: {font_px}px;
     }}
-    QMainWindow::separator {{ background: {border}; width: 3px; height: 3px; }}
+    QMainWindow::separator {{ background: {border}; width: {sep}px; height: {sep}px; }}
 
-    QFrame#Panel, QWidget#Panel {{ background: {panel}; }}
+    QFrame#Panel, QWidget#Panel, QScrollArea#Panel {{ background: {panel}; }}
+    /* The panels scroll, so their bar sits inside the panel rather than
+       against the window, and needs the panel's ground to disappear into. */
+    QScrollArea#Panel > QWidget > QWidget {{ background: {panel}; }}
     QLabel#SectionTitle {{
         color: {text_dim};
         font-size: {small_px}px;
         font-weight: 600;
-        padding: 5px 4px 1px 4px;
+        padding: {pad_b}px {pad_s}px {pad_t}px {pad_s}px;
         text-transform: uppercase;
     }}
     /* Hints are read once and then skipped over for the rest of the session,
@@ -147,7 +196,7 @@ def stylesheet(theme: Theme) -> str:
         background: {surface};
         border: 1px solid {border};
         border-radius: 3px;
-        padding: 4px 9px;
+        padding: {pad_v}px {pad_h}px;
     }}
     QPushButton:hover {{ border-color: {accent}; }}
     QPushButton:pressed {{ background: {selection}; }}
@@ -158,7 +207,7 @@ def stylesheet(theme: Theme) -> str:
         background: transparent;
         border: 1px solid transparent;
         border-radius: 3px;
-        padding: 3px;
+        padding: {pad_s}px;
     }}
     QToolButton:hover {{ background: {surface}; border-color: {border}; }}
     QToolButton:checked {{ background: {accent}; color: {accent_text}; }}
@@ -171,12 +220,12 @@ def stylesheet(theme: Theme) -> str:
         background: {surface};
         border: 1px solid {border};
         border-radius: 3px;
-        padding: 3px 5px;
+        padding: {pad_s}px {pad_b}px;
         selection-background-color: {accent};
         selection-color: {accent_text};
     }}
     QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus {{ border-color: {accent}; }}
-    QComboBox::drop-down {{ border: none; width: 18px; }}
+    QComboBox::drop-down {{ border: none; width: {drop}px; }}
     QComboBox QAbstractItemView {{
         background: {surface};
         border: 1px solid {border};
@@ -189,7 +238,7 @@ def stylesheet(theme: Theme) -> str:
         border: 1px solid {border};
         alternate-background-color: {panel};
     }}
-    QTreeWidget::item, QListWidget::item {{ padding: 2px 2px; }}
+    QTreeWidget::item, QListWidget::item {{ padding: {pad_t}px {pad_t}px; }}
     QTreeWidget::item:selected, QListWidget::item:selected {{
         background: {selection};
         color: {text};
@@ -198,7 +247,7 @@ def stylesheet(theme: Theme) -> str:
         background: {panel};
         border: none;
         border-bottom: 1px solid {border};
-        padding: 3px;
+        padding: {pad_s}px;
         font-size: {small_px}px;
         color: {text_dim};
     }}
@@ -216,19 +265,19 @@ def stylesheet(theme: Theme) -> str:
     QTabBar::tab {{
         background: {panel};
         border: 1px solid {border};
-        padding: 4px 9px;
-        margin-right: 2px;
+        padding: {pad_v}px {pad_h}px;
+        margin-right: {pad_t}px;
     }}
     QTabBar::tab:selected {{ background: {surface}; border-bottom-color: {surface}; }}
 
-    QScrollBar:vertical {{ background: {panel}; width: 11px; margin: 0; }}
+    QScrollBar:vertical {{ background: {panel}; width: {bar}px; margin: 0; }}
     QScrollBar::handle:vertical {{
-        background: {border}; border-radius: 5px; min-height: 24px;
+        background: {border}; border-radius: 5px; min-height: {barmin}px;
     }}
     QScrollBar::handle:vertical:hover {{ background: {accent}; }}
-    QScrollBar:horizontal {{ background: {panel}; height: 11px; margin: 0; }}
+    QScrollBar:horizontal {{ background: {panel}; height: {bar}px; margin: 0; }}
     QScrollBar::handle:horizontal {{
-        background: {border}; border-radius: 5px; min-width: 24px;
+        background: {border}; border-radius: 5px; min-width: {barmin}px;
     }}
     QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
     QScrollBar::add-page, QScrollBar::sub-page {{ background: none; }}
@@ -261,16 +310,16 @@ def stylesheet(theme: Theme) -> str:
        The border is {text_dim} rather than {border}: an outline has to be
        findable against the surface behind it before it can be read as empty or
        filled, and the panel border colour is deliberately quiet. */
-    QCheckBox, QRadioButton {{ spacing: 5px; color: {text}; }}
+    QCheckBox, QRadioButton {{ spacing: {pad_b}px; color: {text}; }}
     QCheckBox::indicator, QRadioButton::indicator,
     QTreeView::indicator, QListView::indicator, QTableView::indicator {{
-        width: 12px;
-        height: 12px;
+        width: {tick}px;
+        height: {tick}px;
         border: 1px solid {text_dim};
         border-radius: 3px;
         background: {surface};
     }}
-    QRadioButton::indicator {{ border-radius: 7px; }}
+    QRadioButton::indicator {{ border-radius: {tickr}px; }}
     QCheckBox::indicator:hover, QRadioButton::indicator:hover,
     QTreeView::indicator:hover, QListView::indicator:hover,
     QTableView::indicator:hover {{
@@ -305,8 +354,8 @@ def stylesheet(theme: Theme) -> str:
     QGroupBox {{
         border: 1px solid {border};
         border-radius: 3px;
-        margin-top: 9px;
-        padding-top: 6px;
+        margin-top: {pad_h}px;
+        padding-top: {pad_g}px;
     }}
     QGroupBox::title {{
         subcontrol-origin: margin;
@@ -314,7 +363,21 @@ def stylesheet(theme: Theme) -> str:
         font-size: {small_px}px;
         color: {text_dim};
     }}
-    """.format(font_px=FONT_PX, small_px=FONT_SMALL_PX, **theme.__dict__)
+    """.format(
+        font_px=px(FONT_PX), small_px=px(FONT_SMALL_PX),
+        sep=px(3),        # the splitter grip between the panes
+        pad_t=px(2),      # the tightest padding there is: list rows
+        pad_s=px(3),      # tool buttons, header sections, field insets
+        pad_v=px(4),      # the vertical half of a button's padding
+        pad_b=px(5),      # the horizontal half of a field's, and tick spacing
+        pad_g=px(6),      # a group box's inner top
+        pad_h=px(9),      # the horizontal half of a button's padding
+        bar=px(11),       # scrollbar thickness
+        drop=px(18),      # a combo's arrow well
+        barmin=px(24),    # the shortest a scrollbar handle may get
+        tick=px(12),      # check and radio indicators
+        tickr=px(7),      # which makes a radio indicator round
+        **theme.__dict__)
 
 
 def apply_pyqtgraph_theme(theme: Theme) -> None:

@@ -17,6 +17,7 @@ the geometry below reads in percentages and is resolution-independent.
 
 from __future__ import annotations
 
+import math
 from typing import Callable, Dict
 
 from PySide6.QtCore import QPointF, QRectF, Qt
@@ -230,6 +231,86 @@ def _draw_cube(painter: QPainter, color: QColor) -> None:
     painter.drawLine(QPointF(88, 66), QPointF(50, 88))
 
 
+# ------------------------------------------------------------- interface size
+
+
+def _draw_letter_a(painter: QPainter, color: QColor, scale: float) -> None:
+    """The letter A, drawn rather than typed.
+
+    Every icon in this file is a painted path: the bundle ships no font of its
+    own and no asset files, and a glyph taken from the widget font would be
+    the one icon that changed shape with the platform.
+
+    `scale` shrinks it about its own baseline, so the pair reads as one letter
+    at two sizes rather than as two letters.
+    """
+    base_y = 78.0
+    apex = QPointF(34.0, base_y - 60.0 * scale)
+    left = QPointF(34.0 - 24.0 * scale, base_y)
+    right = QPointF(34.0 + 24.0 * scale, base_y)
+    painter.setPen(_pen(color, 9.0 * max(0.65, scale)))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawLine(left, apex)
+    painter.drawLine(apex, right)
+    # The crossbar sits a third of the way up, where a typeface puts it.
+    bar_y = base_y - 20.0 * scale
+    painter.drawLine(QPointF(34.0 - 14.0 * scale, bar_y),
+                     QPointF(34.0 + 14.0 * scale, bar_y))
+
+
+def _draw_sign(painter: QPainter, color: QColor, plus: bool) -> None:
+    """A + or a - in the top right, where a modifier belongs."""
+    painter.setPen(_pen(color, 9.0))
+    cx, cy, arm = 80.0, 30.0, 15.0
+    painter.drawLine(QPointF(cx - arm, cy), QPointF(cx + arm, cy))
+    if plus:
+        painter.drawLine(QPointF(cx, cy - arm), QPointF(cx, cy + arm))
+
+
+def _draw_text_larger(painter: QPainter, color: QColor) -> None:
+    _draw_letter_a(painter, color, 1.0)
+    _draw_sign(painter, color, True)
+
+
+def _draw_text_smaller(painter: QPainter, color: QColor) -> None:
+    _draw_letter_a(painter, color, 0.66)
+    _draw_sign(painter, color, False)
+
+
+# ------------------------------------------------------------------- theme
+
+
+def _draw_sun(painter: QPainter, color: QColor) -> None:
+    """Offered while the dark theme is on, because it is what a press gives."""
+    painter.setPen(_pen(color, 8.0))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawEllipse(QPointF(50, 50), 18.0, 18.0)
+    painter.setPen(_pen(color, 8.0))
+    for index in range(8):
+        angle = math.pi * index / 4.0
+        cos_a, sin_a = math.cos(angle), math.sin(angle)
+        painter.drawLine(
+            QPointF(50 + 28 * cos_a, 50 + 28 * sin_a),
+            QPointF(50 + 38 * cos_a, 50 + 38 * sin_a),
+        )
+
+
+def _draw_moon(painter: QPainter, color: QColor) -> None:
+    """And a crescent while the light theme is on.
+
+    Drawn as one filled disc with a second subtracted from it, rather than as
+    an arc: an outlined crescent closes into a lens shape at icon sizes and
+    stops reading as a moon.
+    """
+    full = QPainterPath()
+    full.addEllipse(QPointF(52, 50), 32.0, 32.0)
+    bite = QPainterPath()
+    bite.addEllipse(QPointF(68, 40), 30.0, 30.0)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QBrush(color))
+    painter.drawPath(full.subtracted(bite))
+
+
 _PAINTERS: Dict[str, Callable[[QPainter, QColor], None]] = {
     "select": _draw_select,
     "crosshair": _draw_crosshair,
@@ -243,6 +324,10 @@ _PAINTERS: Dict[str, Callable[[QPainter, QColor], None]] = {
     "fit": _draw_fit,
     "slope": _draw_slope,
     "cube": _draw_cube,
+    "text-larger": _draw_text_larger,
+    "text-smaller": _draw_text_smaller,
+    "sun": _draw_sun,
+    "moon": _draw_moon,
 }
 
 _CACHE: Dict[tuple, QIcon] = {}

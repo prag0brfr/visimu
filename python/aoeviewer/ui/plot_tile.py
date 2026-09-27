@@ -47,6 +47,9 @@ from ..theme import (
     PLOT_LABEL_PT,
     PLOT_LEGEND_PT,
     PLOT_TITLE_PT,
+    px,
+    pt,
+    ui_scale,
     Theme,
     plot_font,
 )
@@ -181,7 +184,15 @@ def paint_label_ground(painter, rect: QRectF, colour: str) -> None:
 # pyqtgraph takes axis label styling as CSS-ish keyword arguments. Named here so
 # every setLabel call is styled the same way; a label left unstyled falls back to
 # the widget font, which is sized for the panels and looms over a small tile.
-_AXIS_LABEL_STYLE = {"font-size": "{0}pt".format(PLOT_AXIS_PT)}
+def _axis_label_style() -> dict:
+    """pyqtgraph takes axis label styling as CSS-ish keyword arguments.
+
+    A function rather than the constant it used to be: the size follows the UI
+    scale, and a dictionary built at import time is fixed at whatever the
+    scale was when the module loaded -- which is before any workspace has been
+    read.
+    """
+    return {"font-size": "{0}pt".format(pt(PLOT_AXIS_PT))}
 
 _PEN_STYLES = {
     "solid": Qt.PenStyle.SolidLine,
@@ -236,17 +247,11 @@ class DraggableLegend(pg.LegendItem):
         # pyqtgraph lays the rows out flush with the item's edge. With nothing
         # painted behind them that went unnoticed; with a ground and a border it
         # is the difference between a card and a box drawn round some text.
-        try:
-            self.layout.setContentsMargins(LEGEND_PAD, LEGEND_PAD,
-                                           LEGEND_PAD, LEGEND_PAD)
-            self.layout.setHorizontalSpacing(LEGEND_H_SPACING)
-            self.layout.setVerticalSpacing(LEGEND_V_SPACING)
-        except (AttributeError, RuntimeError, TypeError):
-            # Guarded like everything else touching pyqtgraph internals here:
-            # the layout is reachable under this name across the versions this
-            # runs against, but a legend that is merely roomier is a far better
-            # outcome than one that fails to build.
-            pass
+        # Guarded inside set_metrics(), like everything else touching
+        # pyqtgraph internals here: the layout is reachable under this name
+        # across the versions this runs against, but a legend that is merely
+        # roomier is a far better outcome than one that fails to build.
+        self.set_metrics()
 
     def set_ground(self, brush=None, pen=None, labelTextColor=None) -> None:
         """Fill, frame and write on the panel behind the entries.
@@ -269,6 +274,20 @@ class DraggableLegend(pg.LegendItem):
         try:
             self.update()
         except (AttributeError, RuntimeError):
+            pass
+
+    def set_metrics(self) -> None:
+        """Re-apply the sizes that follow the UI scale."""
+        try:
+            self.setLabelTextSize("{0}pt".format(pt(PLOT_LEGEND_PT)))
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+        try:
+            pad = px(LEGEND_PAD)
+            self.layout.setContentsMargins(pad, pad, pad, pad)
+            self.layout.setHorizontalSpacing(px(LEGEND_H_SPACING))
+            self.layout.setVerticalSpacing(LEGEND_V_SPACING)
+        except (AttributeError, RuntimeError, TypeError):
             pass
 
     def mouseDragEvent(self, event):
@@ -978,7 +997,7 @@ class PlotTile(pg.PlotWidget):
             self._legend.clear()
             self._legend.setVisible(False)
         plot.setTitle(message, color=self._theme.text_dim,
-                      size="{0}pt".format(PLOT_TITLE_PT))
+                      size="{0}pt".format(pt(PLOT_TITLE_PT)))
         # The title on screen is now this message, not the one _apply_axes()
         # last wrote, so what it remembers writing no longer describes the
         # plot. Forgetting it is what makes the next rebuild put the real
@@ -1111,7 +1130,7 @@ class PlotTile(pg.PlotWidget):
         """
         title = tile_title(tile).replace("\n", "<br>")
         signature = (tile.show_grid, tile.log_y, tile.plot3d, title,
-                     self._theme.plot_foreground)
+                     self._theme.plot_foreground, ui_scale())
         if signature == self._axes_applied:
             return
         self._axes_applied = signature
@@ -1129,10 +1148,10 @@ class PlotTile(pg.PlotWidget):
         # so a caption beside the axis repeated it and spent a strip of a tile
         # that is often one ninth of a page. The unit reaches the reader
         # through the tick values and the INSPECT tables instead.
-        plot.setLabel("bottom", "", **_AXIS_LABEL_STYLE)
-        plot.setLabel("left", "", **_AXIS_LABEL_STYLE)
+        plot.setLabel("bottom", "", **_axis_label_style())
+        plot.setLabel("left", "", **_axis_label_style())
         plot.setTitle(title, color=self._theme.plot_foreground,
-                      size="{0}pt".format(PLOT_TITLE_PT))
+                      size="{0}pt".format(pt(PLOT_TITLE_PT)))
 
     # ---------------------------------------------------------- ISO lookup
 
@@ -1257,8 +1276,13 @@ class PlotTile(pg.PlotWidget):
         while giving the drag somewhere to report to.
         """
         if isinstance(self._legend, DraggableLegend):
-            # Already built, but the theme may have changed under it since.
+            # Already built, but the theme -- or the UI scale -- may have
+            # changed under it since. The row text carries its own size, set
+            # once at construction, so it has to be written again or the
+            # legend stays at the size it was born at while everything around
+            # it moves.
             self._legend.set_ground(**legend_ground(self._theme))
+            self._legend.set_metrics()
             return
         if plot.legend is not None:
             scene = plot.legend.scene()
@@ -1267,7 +1291,7 @@ class PlotTile(pg.PlotWidget):
             plot.legend = None
 
         legend = DraggableLegend(self._on_legend_moved, offset=(10, 10),
-                                 labelTextSize="{0}pt".format(PLOT_LEGEND_PT),
+                                 labelTextSize="{0}pt".format(pt(PLOT_LEGEND_PT)),
                                  **legend_ground(self._theme))
         legend.setParentItem(plot.getViewBox())
         legend.setZValue(LEGEND_Z)

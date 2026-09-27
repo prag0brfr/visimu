@@ -18,6 +18,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "python"))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "packaging"))
 
 import numpy as np
 
@@ -2203,3 +2204,223 @@ class TestCache(unittest.TestCase):
 
     def test_cache_enabled_is_reported(self):
         self.assertIsInstance(self._open().cache_enabled, bool)
+
+
+class TestUiScale(unittest.TestCase):
+    """One knob for the size of everything the window draws.
+
+    The base type scale is a compromise chosen for a 1080-high screen, and
+    screens are not all that. What must not change is that the knob moves
+    *everything*: text set smaller inside unchanged padding looks shrunken
+    rather than roomier.
+    """
+
+    def setUp(self):
+        from aoeviewer import theme
+
+        self.theme = theme
+        self.addCleanup(theme.set_ui_scale, 1.0)
+        theme.set_ui_scale(1.0)
+
+    def test_it_starts_at_one(self):
+        self.assertEqual(self.theme.ui_scale(), 1.0)
+        self.assertEqual(self.theme.px(10), 10)
+        self.assertEqual(self.theme.pt(7.5), 7.5)
+
+    def test_it_scales_pixels_and_points(self):
+        self.theme.set_ui_scale(1.4)
+        self.assertEqual(self.theme.px(10), 14)
+        self.assertEqual(self.theme.pt(7.5), 10.5)
+
+    def test_a_pixel_figure_never_rounds_away_to_nothing(self):
+        # A 1 px padding at 0.7 rounds to 0.7 -> 1, not to 0: a border or a
+        # gap that disappears is a layout that looks broken rather than tight.
+        self.theme.set_ui_scale(self.theme.UI_SCALE_MIN)
+        self.assertGreaterEqual(self.theme.px(1), 1)
+        self.assertGreaterEqual(self.theme.px(2), 1)
+
+    def test_it_clamps_rather_than_refuses(self):
+        # The buttons disable themselves at the ends, so clamping is only ever
+        # reached by a workspace from another version -- which must still open.
+        self.assertEqual(self.theme.set_ui_scale(99.0), self.theme.UI_SCALE_MAX)
+        self.assertEqual(self.theme.set_ui_scale(0.01), self.theme.UI_SCALE_MIN)
+
+    def test_the_stylesheet_moves_with_it(self):
+        dark = self.theme.theme_for(True)
+        base = self.theme.stylesheet(dark)
+        self.assertIn("font-size: 10px", base)
+
+        self.theme.set_ui_scale(1.4)
+        bigger = self.theme.stylesheet(dark)
+        self.assertIn("font-size: 14px", bigger)
+        self.assertNotIn("font-size: 10px", bigger)
+
+    def test_the_padding_moves_with_the_text(self):
+        dark = self.theme.theme_for(True)
+        base = self.theme.stylesheet(dark)
+        self.theme.set_ui_scale(1.5)
+        bigger = self.theme.stylesheet(dark)
+        # A button's padding at 1.0 is 4px 9px; at 1.5 it must not still be.
+        self.assertIn("padding: 4px 9px", base)
+        self.assertNotIn("padding: 4px 9px", bigger)
+        self.assertIn("padding: 6px 14px", bigger)
+
+    def test_plot_point_sizes_move_with_it(self):
+        # What plot_font() and the pyqtgraph size strings are both built from.
+        # The font itself needs Qt, so the tile side of this is checked in
+        # test_redraw, against the stubs.
+        self.theme.set_ui_scale(1.2)
+        self.assertAlmostEqual(self.theme.pt(self.theme.PLOT_TITLE_PT), 9.0)
+        self.assertAlmostEqual(self.theme.pt(self.theme.PLOT_LEGEND_PT), 7.2)
+        self.assertAlmostEqual(self.theme.pt(self.theme.RAIL_FONT_PT), 7.8)
+
+    def test_the_scale_is_saved_in_the_workspace(self):
+        from aoeviewer.model import AppState, load_workspace, save_workspace
+
+        state = AppState()
+        state.ui_scale = 1.3
+        handle, path = tempfile.mkstemp(suffix=".aoews")
+        os.close(handle)
+        try:
+            save_workspace(path, state, [], {}, {})
+            data = load_workspace(path)
+            self.assertAlmostEqual(data["ui_scale"], 1.3)
+            restored = AppState()
+            restored.load_dict(data)
+            self.assertAlmostEqual(restored.ui_scale, 1.3)
+        finally:
+            os.remove(path)
+
+    def test_a_workspace_without_it_opens_at_one(self):
+        from aoeviewer.model import AppState
+
+        state = AppState()
+        state.load_dict({"dark_mode": True})
+        self.assertEqual(state.ui_scale, 1.0)
+
+        state.load_dict({"ui_scale": "not a number"})
+        self.assertEqual(state.ui_scale, 1.0)
+
+
+class TestBuildSamples(unittest.TestCase):
+    """The build writes sample/ beside build/ and dist/.
+
+    A few megabytes exercises none of what this program is built around: the
+    sidecar is not written below 8 MB, decimation has nothing to decimate, and
+    a six-run file has no sweep to filter. So the real ones are large, which is
+    also why they are generated once and never rewritten.
+    """
+
+    def setUp(self):
+        import shutil
+
+        import build_exe
+
+        self.build_exe = build_exe
+        self.shutil = shutil
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        os.makedirs(os.path.join(self.tmp, "tools"), exist_ok=True)
+        shutil.copy(os.path.join(root, "tools", "gen_flight_data.py"),
+                    os.path.join(self.tmp, "tools"))
+
+        self._project = build_exe.PROJECT
+        self._samples = build_exe.SAMPLES
+        self.addCleanup(setattr, build_exe, "PROJECT", self._project)
+        self.addCleanup(setattr, build_exe, "SAMPLES", self._samples)
+        build_exe.PROJECT = self.tmp
+        # The same code path, at a size a test can afford.
+        build_exe.SAMPLES = (
+            ("tiny_a.aoe", {"runs": 3, "size_mb": 0.3, "seed": 7}),
+            ("tiny_b.aoe", {"runs": 3, "size_mb": 0.3, "seed": 9}),
+        )
+        self.folder = os.path.join(self.tmp, "sample")
+
+    def names(self):
+        return sorted(os.listdir(self.folder)) if os.path.isdir(self.folder) else []
+
+    def test_the_real_samples_are_big_enough_to_be_worth_having(self):
+        # Guards the sizes rather than the mechanism: below the 8 MB sidecar
+        # threshold these would exercise none of the machinery they exist for.
+        sizes = [spec["size_mb"] for _name, spec in self._samples]
+        self.assertGreaterEqual(max(sizes), 100.0)
+        self.assertGreaterEqual(sum(1 for s in sizes if s >= 8.0), 2,
+                                "at least two samples must cross the sidecar "
+                                "threshold, or the pair has nothing to show")
+
+    def test_it_writes_what_is_missing(self):
+        self.build_exe.ensure_samples(quiet=True)
+        self.assertEqual(self.names(), ["tiny_a.aoe", "tiny_b.aoe"])
+        for name in self.names():
+            self.assertGreater(os.path.getsize(os.path.join(self.folder, name)), 0)
+
+    def test_the_files_are_readable_by_the_core(self):
+        self.build_exe.ensure_samples(quiet=True)
+        session = Session()
+        try:
+            handle = session.add_file(os.path.join(self.folder, "tiny_a.aoe"))
+            self.assertEqual(handle.simulation_count, 3)
+            self.assertIn("TIME", session.parameters)
+        finally:
+            session.close()
+
+    def test_it_never_rewrites_a_file_that_is_there(self):
+        self.build_exe.ensure_samples(quiet=True)
+        marker = os.path.join(self.folder, "tiny_a.aoe")
+        with open(marker, "w", encoding="ascii") as handle:
+            handle.write("edited by hand\n")
+
+        self.build_exe.ensure_samples(quiet=True)
+        with open(marker, encoding="ascii") as handle:
+            self.assertEqual(handle.read(), "edited by hand\n")
+
+    def test_only_the_missing_one_is_written(self):
+        self.build_exe.ensure_samples(quiet=True)
+        os.remove(os.path.join(self.folder, "tiny_b.aoe"))
+        kept = os.path.getmtime(os.path.join(self.folder, "tiny_a.aoe"))
+
+        self.build_exe.ensure_samples(quiet=True)
+        self.assertEqual(self.names(), ["tiny_a.aoe", "tiny_b.aoe"])
+        self.assertEqual(os.path.getmtime(os.path.join(self.folder, "tiny_a.aoe")),
+                         kept)
+
+    def test_an_interrupted_run_leaves_nothing_that_looks_finished(self):
+        # Ctrl+C halfway through must not leave a truncated file that the next
+        # build counts as "already there" and the viewer then opens.
+        import gen_flight_data
+
+        real = gen_flight_data.write_file
+        calls = []
+
+        def explode(path, *args, **kwargs):
+            calls.append(path)
+            if len(calls) == 2:
+                with open(path, "w", encoding="ascii") as handle:
+                    handle.write("half")
+                raise KeyboardInterrupt
+            return real(path, *args, **kwargs)
+
+        gen_flight_data.write_file = explode
+        self.addCleanup(setattr, gen_flight_data, "write_file", real)
+        try:
+            self.build_exe.ensure_samples(quiet=True)
+        except KeyboardInterrupt:
+            self.fail("the build must not die with the generator")
+
+        self.assertEqual(self.names(), ["tiny_a.aoe"])
+
+    def test_a_generator_that_cannot_be_imported_does_not_fail_the_build(self):
+        os.remove(os.path.join(self.tmp, "tools", "gen_flight_data.py"))
+        import gen_flight_data
+
+        self.addCleanup(sys.modules.__setitem__, "gen_flight_data", gen_flight_data)
+        del sys.modules["gen_flight_data"]
+        saved = list(sys.path)
+        sys.path[:] = [p for p in sys.path if not p.endswith("tools")]
+        self.addCleanup(sys.path.__setitem__, slice(None), saved)
+
+        # A sample file is a convenience, not part of the product.
+        self.build_exe.ensure_samples(quiet=True)
+        self.assertEqual(self.names(), [])

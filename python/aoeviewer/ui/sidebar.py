@@ -6,6 +6,10 @@ Qt has no vertical-text tab widget, and QTabBar's West position rotates the
 buttons paint their own rotated text:
 a ~26 px column with the label reading bottom-to-top, which costs almost no
 horizontal space no matter how many tabs there are.
+
+It holds tabs and nothing else. Anything that is not a panel selector belongs
+in the toolbar: the column's height is the one thing a short screen is short
+of, and a button that selects no panel is a button in the wrong place.
 """
 
 from __future__ import annotations
@@ -16,7 +20,7 @@ from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QAbstractButton, QSizePolicy, QVBoxLayout, QWidget
 
-from ..theme import RAIL_FONT_PT, Theme
+from ..theme import RAIL_FONT_PT, Theme, px, pt
 
 # The rail is pure chrome down the left edge, so it gives up space first: it
 # has to be wide enough to read a rotated word in and no wider. TEXT_PADDING is
@@ -38,15 +42,24 @@ class VerticalTabButton(QAbstractButton):
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.setToolTip(text.title())
 
-        # Set outright rather than derived from self.font(). The application
-        # stylesheet sizes text in pixels, which makes pointSizeF() report -1,
-        # so "a little smaller than the body text" silently became "whatever
-        # the clamp says" -- see the type scale in aoeviewer.theme.
+        self.refresh_metrics()
+
+    def refresh_metrics(self) -> None:
+        """Re-read the font from the UI scale and re-measure.
+
+        The size is set outright rather than derived from self.font(): the
+        application stylesheet sizes text in pixels, which makes pointSizeF()
+        report -1, so "a little smaller than the body text" silently became
+        "whatever the clamp says". Called again whenever the scale moves,
+        because the rail's width is the height of its text and a rail that did
+        not follow would clip every label.
+        """
         font = QFont(self.font())
-        font.setPointSizeF(RAIL_FONT_PT)
+        font.setPointSizeF(pt(RAIL_FONT_PT))
         font.setBold(True)
         font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.6)
         self.setFont(font)
+        self.updateGeometry()
 
     def set_theme(self, theme: Theme) -> None:
         self._theme = theme
@@ -56,8 +69,9 @@ class VerticalTabButton(QAbstractButton):
         metrics = self.fontMetrics()
         # The button's height is the text's *width*, because the text is turned
         # on its side.
-        height = max(MIN_BUTTON_HEIGHT, metrics.horizontalAdvance(self.text()) + TEXT_PADDING)
-        return QSize(RAIL_WIDTH, height)
+        height = max(px(MIN_BUTTON_HEIGHT),
+                     metrics.horizontalAdvance(self.text()) + px(TEXT_PADDING))
+        return QSize(px(RAIL_WIDTH), height)
 
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
@@ -110,7 +124,6 @@ class TabRail(QWidget):
     """The column of vertical tab buttons. Emits the index that was clicked."""
 
     tab_selected = Signal(int)
-    theme_toggled = Signal()
 
     def __init__(self, labels: List[str], theme: Theme, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -118,7 +131,7 @@ class TabRail(QWidget):
         self._buttons: List[VerticalTabButton] = []
 
         self.setObjectName("Panel")
-        self.setFixedWidth(RAIL_WIDTH)
+        self.setFixedWidth(px(RAIL_WIDTH))
         self.setAutoFillBackground(True)
 
         layout = QVBoxLayout(self)
@@ -131,14 +144,13 @@ class TabRail(QWidget):
             layout.addWidget(button)
             self._buttons.append(button)
 
+        # Nothing below the tabs. The light/dark toggle used to be pinned to
+        # the foot of this column, where it was one more thing competing for
+        # the vertical space the tabs themselves need on a short screen -- and
+        # it is not a tab: it selects no panel. It is in the toolbar now,
+        # beside the interface-size buttons, with the rest of what changes how
+        # the window looks rather than what it shows.
         layout.addStretch(1)
-
-        # Light/dark toggle pinned to the bottom.
-        self._theme_button = VerticalTabButton("L / D", theme, self)
-        self._theme_button.setCheckable(False)
-        self._theme_button.setToolTip("Switch between light and dark")
-        self._theme_button.clicked.connect(self.theme_toggled.emit)
-        layout.addWidget(self._theme_button)
 
         if self._buttons:
             self._buttons[0].setChecked(True)
@@ -161,5 +173,17 @@ class TabRail(QWidget):
         self._theme = theme
         for button in self._buttons:
             button.set_theme(theme)
-        self._theme_button.set_theme(theme)
+        self.update()
+
+    def refresh_metrics(self) -> None:
+        """Follow a change in the UI scale.
+
+        The rail is as wide as its rotated text is tall, so its own width and
+        every button's have to be re-measured together; doing one without the
+        other either clips the labels or leaves a blank column beside them.
+        """
+        self.setFixedWidth(px(RAIL_WIDTH))
+        for button in self._buttons:
+            button.refresh_metrics()
+        self.updateGeometry()
         self.update()

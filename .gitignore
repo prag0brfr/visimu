@@ -1,5 +1,7 @@
 build/
 dist/
+# Generated once by packaging/build_exe.py, and big.
+sample/
 *.o
 *.so
 *.dll

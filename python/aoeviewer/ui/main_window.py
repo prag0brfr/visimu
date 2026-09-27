@@ -11,12 +11,14 @@ from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
+    QFrame,
     QProgressBar,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSplitter,
     QStackedWidget,
@@ -35,7 +37,17 @@ from ..model import (
     save_workspace,
 )
 from ..session import CoreError, Session
-from ..theme import apply_pyqtgraph_theme, stylesheet, theme_for
+from ..theme import (
+    UI_SCALE_MAX,
+    UI_SCALE_MIN,
+    UI_SCALE_STEP,
+    apply_pyqtgraph_theme,
+    px,
+    set_ui_scale,
+    stylesheet,
+    theme_for,
+    ui_scale,
+)
 from . import icons
 from .panels import (
     AliasPanel,
@@ -170,10 +182,46 @@ class MainWindow(QMainWindow):
         add("CSV", self.export_csv, "table",
             tip="Write the active tile's curves to a CSV file, at full resolution")
 
-        self.toolbar.addSeparator()
+        # Fit is not here. It acts on the tiles, so it sits in the page and
+        # tile bar with the rest of what does -- but the shortcut has to stay
+        # reachable from anywhere in the window, so the action lives on, added
+        # to the window rather than to a bar. An action that is on no widget
+        # has no shortcut at all.
+        self.fit_action = QAction("Fit", self)
+        self.fit_action.setShortcut(QKeySequence("Ctrl+0"))
+        self.fit_action.setToolTip(
+            "Auto-scale every tile — double-click one plot to fit just that one"
+            "  (Ctrl+0)")
+        self.fit_action.triggered.connect(self.autoscale_all)
+        self.addAction(self.fit_action)
 
-        add("Fit", self.autoscale_all, "fit", "Ctrl+0",
-            "Auto-scale every tile — double-click one plot to fit just that one")
+        # Interface. Its own group behind its own rule, and labelled, because
+        # these are the ones here that change nothing about the data or the
+        # view: what is left of the rule acts on the workspace or exports it,
+        # and these act on the window itself.
+        self.toolbar.addSeparator()
+        size_caption = QLabel(" Interface ")
+        size_caption.setObjectName("Hint")
+        size_caption.setToolTip(
+            "The size of the text and the spacing around it, everywhere:\n"
+            "the tab rail, the panels, this bar, and the titles, axes and\n"
+            "legends on the plots")
+        self.toolbar.addWidget(size_caption)
+        self.shrink_action = add(
+            "Smaller", lambda: self.step_ui_scale(-1), "text-smaller",
+            "Ctrl+-", "Smaller text and tighter spacing everywhere")
+        self.grow_action = add(
+            "Larger", lambda: self.step_ui_scale(+1), "text-larger",
+            "Ctrl+=", "Larger text and roomier spacing everywhere")
+        self._update_scale_actions()
+
+        # The theme belongs with these rather than at the foot of the tab
+        # rail, where it used to be: it selects no panel, and the rail's
+        # height is the one thing a short screen is short of. Its icon shows
+        # what a press *gives* -- a sun while the dark theme is on -- which is
+        # the convention everywhere else this control appears.
+        self.theme_action = add("Theme", self.toggle_theme, tip="")
+        self._update_theme_action()
 
         # Everything after this is pushed to the right edge, so the mouse modes
         # read as their own group instead of trailing the file actions.
@@ -214,13 +262,69 @@ class MainWindow(QMainWindow):
 
         self._apply_toolbar_icons()
 
+    def step_ui_scale(self, direction: int) -> None:
+        """One step larger or smaller, and repaint everything that measures.
+
+        The scale reaches the interface through three routes and all of them
+        have to be taken: the stylesheet, which carries the font sizes and
+        every padding; the painted widgets, which measure their own text --
+        the tab rail's width is the height of its rotated labels; and the
+        plots, whose titles, axes and legends are sized in points handed to
+        pyqtgraph. apply_theme() already walks all three, so this sets the
+        number and asks for a re-theme.
+        """
+        before = ui_scale()
+        after = set_ui_scale(before + direction * UI_SCALE_STEP)
+        if after == before:
+            return
+        self.state.ui_scale = after
+        self.state.dirty = True
+        self.apply_theme()
+        self._update_scale_actions()
+        self.status_label.setText(
+            "Interface size {0:.0f}%".format(after * 100.0))
+
+    def _update_scale_actions(self) -> None:
+        """Disable whichever end has been reached.
+
+        A button that silently does nothing is worse than one that says it
+        cannot: the scale clamps, so without this the last press at either end
+        looks like the window failing to respond.
+        """
+        shrink = getattr(self, "shrink_action", None)
+        grow = getattr(self, "grow_action", None)
+        if shrink is None or grow is None:
+            return
+        current = ui_scale()
+        shrink.setEnabled(current > UI_SCALE_MIN + 1e-6)
+        grow.setEnabled(current < UI_SCALE_MAX - 1e-6)
+
+    def _update_theme_action(self) -> None:
+        """Say what the button gives, not what is already on screen.
+
+        A toggle labelled with its current state reads as a description; one
+        labelled with its result reads as an offer, which is what a button is.
+        """
+        action = getattr(self, "theme_action", None)
+        if action is None:
+            return
+        dark = self.state.dark_mode
+        action.setText("Light" if dark else "Dark")
+        action.setToolTip(
+            "Switch to the {0} theme".format("light" if dark else "dark"))
+        theme = theme_for(dark)
+        action.setIcon(icons.icon("sun" if dark else "moon", theme.text, px(20)))
+
     def _apply_toolbar_icons(self) -> None:
         theme = theme_for(self.state.dark_mode)
         icons.clear_cache()
         for action, name in getattr(self, "_toolbar_actions", []):
-            action.setIcon(icons.icon(name, theme.text, 20))
+            action.setIcon(icons.icon(name, theme.text, px(20)))
         for mode, name in getattr(self, "_mode_icon_names", {}).items():
-            self.mode_actions[mode].setIcon(icons.icon(name, theme.text, 20))
+            self.mode_actions[mode].setIcon(icons.icon(name, theme.text, px(20)))
+        # Not in _toolbar_actions: which icon it wants depends on the theme
+        # rather than only on its colour.
+        self._update_theme_action()
 
     def createPopupMenu(self):
         """No toolbar/dock context menu.
@@ -268,7 +372,6 @@ class MainWindow(QMainWindow):
         # width no matter how many there are.
         self.rail = TabRail([name for name, _w in self._panels], theme)
         self.rail.tab_selected.connect(self._on_tab_selected)
-        self.rail.theme_toggled.connect(self.toggle_theme)
 
         self.panel_stack = QStackedWidget()
         # 230, not 300. The window's minimum width is the sum of its parts, and
@@ -280,8 +383,42 @@ class MainWindow(QMainWindow):
         # the width they used to.
         self.panel_stack.setMinimumWidth(230)
         self.panel_stack.setMaximumWidth(600)
+        # Each panel goes in through a scroll area, and the reason is the same
+        # failure the width comment above describes, in the other direction.
+        #
+        # A plain widget's minimum height is the sum of its children's, and
+        # STYLE is a tall panel: four switches, two encodings with their combos
+        # and hints, two scrolling tables, and a legend group. Added to the
+        # toolbar, the page bar and the status bar, the window's minimum height
+        # came out around 950 px -- fine on a 1080-high screen, and taller than
+        # the usable area of a 1050-high one once a desktop panel takes its
+        # share. The window could then neither be shrunk nor maximised, because
+        # a maximise that cannot satisfy the minimum is refused.
+        #
+        # A scroll area does not propagate its child's minimum height, so the
+        # window's minimum stops depending on the tallest panel. Nothing is
+        # hidden: the panel keeps its full height and scrolls when the pane is
+        # shorter than it, which on any screen that fitted before never
+        # happens.
+        self._panel_scrollers = []
         for _name, widget in self._panels:
-            self.panel_stack.addWidget(widget)
+            scroller = QScrollArea()
+            scroller.setObjectName("Panel")
+            # The viewport is a plain child widget, so the panel background
+            # rule keyed on the name has to reach it too or the pane shows the
+            # window colour behind a panel that does not fill it.
+            scroller.viewport().setObjectName("Panel")
+            scroller.setWidget(widget)
+            # The panel fills the pane's width rather than keeping its own
+            # size hint, so nothing reflows when the splitter moves.
+            scroller.setWidgetResizable(True)
+            scroller.setFrameShape(QFrame.Shape.NoFrame)
+            scroller.setHorizontalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            scroller.setVerticalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            self.panel_stack.addWidget(scroller)
+            self._panel_scrollers.append(scroller)
 
         self.data_panel.add_files_requested.connect(self.open_files)
         self.data_panel.reload_requested.connect(self.reload_files)
@@ -321,6 +458,7 @@ class MainWindow(QMainWindow):
         self.plot_toolbar.pages_changed.connect(self._on_pages_changed)
         self.plot_toolbar.tiles_changed.connect(self._on_tiles_rearranged)
         self.plot_toolbar.active_tile_changed.connect(self._on_tile_activated)
+        self.plot_toolbar.fit_requested.connect(self.autoscale_all)
 
         plot_area = QWidget()
         plot_layout = QVBoxLayout(plot_area)
@@ -394,15 +532,27 @@ class MainWindow(QMainWindow):
         """
         if widget is None or not hasattr(widget, "refresh"):
             return
-        if widget is self.panel_stack.currentWidget():
+        if widget is self._current_panel():
             self._stale_panels.discard(widget)
             self._refresh_now(widget)
         else:
             self._stale_panels.add(widget)
 
+    def _current_panel(self):
+        """The panel on screen.
+
+        Not panel_stack.currentWidget(), which is the scroll area the panel
+        sits in. One indirection, in one place, so that everything asking
+        "which panel is showing" keeps getting a panel back.
+        """
+        index = self.panel_stack.currentIndex()
+        if 0 <= index < len(self._panels):
+            return self._panels[index][1]
+        return None
+
     def _invalidate_panels(self) -> None:
         """Mark every panel stale, refreshing only the one on screen."""
-        current = self.panel_stack.currentWidget()
+        current = self._current_panel()
         self._stale_panels = {panel for _name, panel in self._panels if panel is not current}
         self._refresh_now(current)
 
@@ -519,8 +669,16 @@ class MainWindow(QMainWindow):
         theme = theme_for(self.state.dark_mode)
         apply_pyqtgraph_theme(theme)
         self.setStyleSheet(stylesheet(theme))
+        if hasattr(self, "toolbar"):
+            # The bar's icons are painted at a fixed pixel size, so they are
+            # the one part of it the stylesheet cannot reach.
+            self.toolbar.setIconSize(QSize(px(18), px(18)))
         if hasattr(self, "rail"):
             self.rail.set_theme(theme)
+            # Painted widgets measure their own text, so the stylesheet's new
+            # sizes do not reach them: the rail has to re-read the scale and
+            # re-measure, or it keeps the width its old labels needed.
+            self.rail.refresh_metrics()
         if hasattr(self, "plot_toolbar"):
             self.plot_toolbar.set_theme(theme)
         if hasattr(self, "grid"):
@@ -530,6 +688,9 @@ class MainWindow(QMainWindow):
 
     def toggle_theme(self) -> None:
         self.state.dark_mode = not self.state.dark_mode
+        # Saved with the workspace, so changing it is an unsaved change --
+        # same as the interface size, and the title's asterisk should say so.
+        self.state.dirty = True
         self.apply_theme()
 
     # -------------------------------------------------------------- files
@@ -1057,7 +1218,7 @@ class MainWindow(QMainWindow):
         # zoom. They live in the Inspect tab now; previously this checked for a
         # panel that is no longer the one showing them, which is why the
         # figures sat still while the plot moved.
-        if self.panel_stack.currentWidget() is self.inspect_panel:
+        if self._current_panel() is self.inspect_panel:
             self.inspect_panel.refresh_stats()
 
     def _on_iso_filter(self) -> None:
@@ -1408,6 +1569,11 @@ class MainWindow(QMainWindow):
             self.state = AppState()
             self.state.load_dict(data)
             self.state.workspace_path = path
+
+            # Before _rebind_state(), which re-themes: the scale has to be in
+            # place by the time anything measures itself against it.
+            set_ui_scale(self.state.ui_scale)
+            self._update_scale_actions()
 
             self._rebind_state()
             self.refresh_all()

@@ -128,6 +128,79 @@ def check_prerequisites() -> None:
         raise SystemExit(1)
 
 
+# What a fresh checkout gets to try the viewer on. The sizes are the point:
+# a few megabytes exercises none of what this program is built around -- the
+# sidecar is not written below 8 MB, decimation has nothing to decimate, and a
+# six-run file has no sweep to filter. Two files rather than one so that
+# "Colour by Parameter, Style by File" has something to show, and one small
+# one so that a smoke test does not have to wait for a parse.
+SAMPLES = (
+    ("flight_a.aoe", {"runs": 25, "size_mb": 250.0, "seed": 7}),
+    ("flight_b.aoe", {"runs": 25, "size_mb": 250.0, "seed": 108}),
+    ("quick.aoe", {"runs": 6, "size_mb": 12.0, "seed": 11}),
+)
+
+
+def ensure_samples(quiet: bool = False) -> None:
+    """Generate sample/ beside build/ and dist/, for files that are not there.
+
+    Only what is missing, and never a file that already exists: these take
+    minutes to integrate, and someone who has trimmed one down or replaced it
+    with their own data should not find it overwritten by a rebuild.
+
+    Failure here does not fail the build. A sample file is a convenience, not
+    part of the product -- a read-only checkout or a full disk should not stop
+    an executable being produced -- so the reason is printed and the build
+    carries on.
+    """
+    folder = os.path.join(PROJECT, "sample")
+    missing = [(name, spec) for name, spec in SAMPLES
+               if not os.path.exists(os.path.join(folder, name))]
+    if not missing:
+        if not quiet:
+            print("Samples: already in {0}".format(folder))
+        return
+
+    sys.path.insert(0, os.path.join(PROJECT, "tools"))
+    try:
+        from gen_flight_data import write_file
+    except ImportError as exc:
+        print("Samples: skipped ({0})".format(exc))
+        return
+
+    try:
+        os.makedirs(folder, exist_ok=True)
+    except OSError as exc:
+        print("Samples: skipped ({0})".format(exc))
+        return
+
+    total_mb = sum(spec["size_mb"] for _name, spec in missing)
+    print("\nGenerating {0} sample file(s), about {1:.0f} MB, into {2}"
+          .format(len(missing), total_mb, folder))
+    print("This happens once; files already there are left alone.")
+
+    for name, spec in missing:
+        path = os.path.join(folder, name)
+        # Written to a temporary name and moved into place, so an interrupted
+        # run leaves nothing that looks finished. Without that, a Ctrl+C
+        # halfway through counts as "already exists" on the next build and the
+        # viewer opens a truncated file.
+        partial = path + ".partial"
+        try:
+            write_file(partial, spec["runs"],
+                       int(spec["size_mb"] * 1024 * 1024),
+                       0.02, spec["seed"], quiet=quiet)
+            os.replace(partial, path)
+        except (OSError, KeyboardInterrupt) as exc:
+            try:
+                os.remove(partial)
+            except OSError:
+                pass
+            print("Samples: stopped at {0} ({1})".format(name, exc))
+            return
+    print("Samples: done.")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -146,6 +219,9 @@ def main() -> int:
     )
     parser.add_argument("--no-selftest", action="store_true",
                         help="skip launching the result to check it starts")
+    parser.add_argument("--no-samples", action="store_true",
+                        help="do not generate sample/ (they are generated once, "
+                             "and only the files that are missing)")
     args = parser.parse_args()
 
     check_prerequisites()
@@ -203,6 +279,12 @@ def main() -> int:
             for name in files:
                 total += os.path.getsize(os.path.join(root, name))
         print("  Size:   {0:.0f} MB".format(total / (1024 * 1024)))
+
+    # After the build, not before: the executable is what someone is waiting
+    # for, and integrating half a gigabyte of flight data in front of it would
+    # make every rebuild feel like the first one.
+    if not args.no_samples:
+        ensure_samples()
 
     # Explorer caches icons per path; a rebuilt executable at a path that once
     # had no icon keeps showing the generic one until the cache is refreshed.

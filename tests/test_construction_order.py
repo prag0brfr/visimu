@@ -384,6 +384,115 @@ class TestDrawPathWiring(unittest.TestCase):
             "Parameter leads the Colour by row")
         self.assertLess(colour.index('"Parameter"'), colour.index('"Simulation"'))
 
+    def test_every_panel_goes_in_through_a_scroll_area(self):
+        """The window's minimum height must not be the tallest panel's.
+
+        A plain widget's minimum height is the sum of its children's, and
+        STYLE is tall: four switches, two encodings with their combos and
+        hints, two tables and a legend group. Added to the toolbar, the page
+        bar and the status bar that came out near 950 px -- fine on a
+        1080-high screen and taller than the usable area of a 1050-high one,
+        where the window could then neither be shrunk nor maximised, because a
+        maximise that cannot satisfy the minimum is refused.
+        """
+        body = self._source("ui/main_window.py", "MainWindow", "_build_central")
+        self.assertIn("QScrollArea", body)
+        self.assertIn("setWidgetResizable(True)", body)
+        # Horizontal scrolling would mean a panel could hide a control off to
+        # the side, which is a worse answer than letting it compress.
+        self.assertIn("ScrollBarAlwaysOff", body)
+
+    def test_the_panel_on_screen_is_asked_for_by_name(self):
+        """currentWidget() is the scroll area now, not the panel.
+
+        Three places compared it against a panel and would quietly stop
+        matching: the lazy-refresh test, the stale-panel sweep, and the
+        Inspect tab's live statistics.
+        """
+        source = self._read("ui/main_window.py")
+        self.assertIn("def _current_panel", source)
+        self.assertNotIn("panel_stack.currentWidget() is", source)
+        self.assertNotIn("is self.panel_stack.currentWidget()", source)
+
+    def test_the_ui_scale_reaches_what_measures_itself(self):
+        """The stylesheet carries the font sizes and the padding, but not
+        everything: widgets that paint their own text measure it themselves,
+        and the tab rail's *width* is the height of its rotated labels. A rail
+        that did not re-measure would clip every one of them."""
+        body = self._source("ui/main_window.py", "MainWindow", "apply_theme")
+        self.assertIn("stylesheet(theme)", body)
+        self.assertIn("rail.refresh_metrics()", body)
+        self.assertIn("setIconSize", body)
+
+        step = self._source("ui/main_window.py", "MainWindow", "step_ui_scale")
+        self.assertIn("set_ui_scale", step)
+        self.assertIn("apply_theme", step)
+        # Saved with the workspace, like the theme is.
+        self.assertIn("self.state.ui_scale", step)
+
+    def test_fit_lives_with_the_tile_controls(self):
+        """It acts on the tiles, and you pick a tile by clicking it.
+
+        The shortcut is the part that has to survive the move: an action on no
+        widget has no shortcut at all, so it is added to the window rather
+        than to a bar.
+        """
+        bar = self._source("ui/main_window.py", "MainWindow", "_build_toolbar")
+        self.assertNotIn('add("Fit"', bar,
+                         "Fit must not be in the main toolbar any more")
+        self.assertIn("self.addAction(self.fit_action)", bar)
+        self.assertIn("Ctrl+0", bar)
+
+        central = self._source("ui/main_window.py", "MainWindow", "_build_central")
+        self.assertIn("fit_requested", central)
+
+        toolbar = self._read("ui/plot_toolbar.py")
+        self.assertIn("fit_requested", toolbar)
+        # It re-frames rather than rearranging, so it gets its own rule after
+        # the copy/cut/paste group.
+        _before, _sep, after = toolbar.partition('"Clear", self._clear_tile')
+        self.assertTrue(_sep, "the tile clipboard group has moved")
+        self.assertIn("_separator()", after)
+        self.assertIn("fit_button", after)
+
+    def test_the_theme_toggle_lives_in_the_toolbar(self):
+        """With the rest of what changes how the window looks.
+
+        It sat at the foot of the tab rail, where it took vertical space from
+        the tabs on the screen least able to spare it -- and it is not a tab:
+        it selects no panel.
+        """
+        bar = self._source("ui/main_window.py", "MainWindow", "_build_toolbar")
+        self.assertIn("self.theme_action", bar)
+        # In the group behind the separator, with the interface-size buttons:
+        # everything before that rule acts on the workspace or the plots.
+        _before, _sep, after = bar.partition('QLabel(" Interface ")')
+        self.assertTrue(_sep, "the interface group has moved")
+        self.assertIn("theme_action", after)
+
+        central = self._source("ui/main_window.py", "MainWindow", "_build_central")
+        self.assertNotIn("theme_toggled", central)
+        self.assertNotIn("theme_toggled", self._read("ui/sidebar.py"))
+
+    def test_the_theme_button_offers_the_theme_it_would_give(self):
+        """A toggle labelled with its current state reads as a description;
+        one labelled with its result reads as an offer, which is what a button
+        is. So the icon and the wording flip with the state, and they are
+        re-applied wherever the theme is."""
+        body = self._source("ui/main_window.py", "MainWindow",
+                            "_update_theme_action")
+        self.assertIn("sun", body)
+        self.assertIn("moon", body)
+        self.assertIn("setText", body)
+
+        icons_source = self._read("ui/icons.py")
+        self.assertIn('"sun":', icons_source)
+        self.assertIn('"moon":', icons_source)
+
+        applied = self._source("ui/main_window.py", "MainWindow",
+                               "_apply_toolbar_icons")
+        self.assertIn("_update_theme_action", applied)
+
     def test_axes_are_chosen_from_what_can_actually_be_plotted(self):
         """Not from `parameters`, which outlives the files.
 
