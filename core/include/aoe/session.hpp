@@ -43,6 +43,16 @@ public:
     // Files whose modification time changed since they were read.
     std::vector<int> stale_files() const;
 
+    // Opens an empty dataset for a file this core has no parser for, to be
+    // filled through Dataset's array route. `replace` names an existing file to
+    // rebuild in place -- which is what a reload of such a file is -- or -1 for
+    // a new one. Returns the file index, or -1.
+    int begin_arrays_file(const std::string& path, const std::vector<std::string>& headers,
+                          const std::vector<std::string>& units, int replace);
+
+    // Closes the array route on `index` and refreshes the parameter union.
+    void end_arrays_file(int index);
+
     // Re-reads a file in place, keeping its index and display name. Cached
     // formula results for that file are dropped.
     bool reload_file(int index);

@@ -68,12 +68,15 @@ from .plot_toolbar import PlotToolbar
 from .sidebar import TabRail
 from .tasks import TaskRunner
 
+from .. import hdf5
 from ..logging_setup import get_logger
 
 _log = get_logger("window")
 
 FILE_FILTER = (
+    "Result files (*.aoe *.dat *.txt *.res *.out *.h5 *.hdf5 *.he5 *.hdf);;"
     "AOE result files (*.aoe *.dat *.txt *.res *.out);;"
+    "HDF5 result files (*.h5 *.hdf5 *.he5 *.hdf);;"
     "All files (*)"
 )
 
@@ -763,6 +766,10 @@ class MainWindow(QMainWindow):
         the harmless direction.
         """
         if not self.session.cache_enabled:
+            return False
+        # A file read outside the core has no parse to rewrite, so no sidecar
+        # is ever written for one and none should be announced.
+        if hdf5.looks_like_hdf5(path):
             return False
         try:
             if os.path.getsize(path) < self.CACHE_THRESHOLD_BYTES:

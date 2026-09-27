@@ -215,6 +215,20 @@ if sys.platform == "win32":
         print("WARNING: no version resource ({0})".format(exc))
         VERSION_FILE = None
 
+# h5py is optional: it is only needed to open HDF5 result files, and it is not
+# part of the base install. Naming it unconditionally would make every build
+# fail on a machine that does not have it, so it is added only when it is there
+# -- a frozen build made without it simply cannot open those files, and says so.
+try:
+    import h5py as _h5py  # noqa: F401
+
+    HDF5_HIDDEN = ["h5py", "h5py.defs", "h5py.utils", "h5py._proxy",
+                   "h5py.h5ac", "aoeviewer.hdf5"]
+    print("spec: h5py found, HDF5 support will be included")
+except Exception:  # pragma: no cover - build-time only
+    HDF5_HIDDEN = []
+    print("spec: h5py not installed, the build will not read HDF5 files")
+
 a = Analysis(
     [os.path.join(PROJECT, "python", "aoeviewer", "__main__.py")],
     pathex=[os.path.join(PROJECT, "python")],
@@ -226,6 +240,7 @@ a = Analysis(
         ["aoeviewer", "pyqtgraph", "PySide6.QtWidgets",
          "PySide6.QtCore", "PySide6.QtGui"]
         + NUMPY_HIDDEN
+        + HDF5_HIDDEN
     ),
     hookspath=[],
     hooksconfig={},

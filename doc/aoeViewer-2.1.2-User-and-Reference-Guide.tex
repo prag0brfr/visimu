@@ -1946,6 +1946,100 @@ dialog's filter, which accepts \code{*.aoe}, \code{*.dat}, \code{*.txt},
 customary names; the two real dialects are the packed and indexed header forms,
 and they are distinguished by content rather than by filename.
 
+\section{Files that are not AOE: HDF5}
+\label{sec:hdf5}
+
+A result file stored as HDF5 opens like any other. The channels, the runs and
+the samples are read; everything after that --- decimation, ISO filtering,
+computed parameters, styles, workspaces --- is the same code on the same data,
+because by the time it runs there is nothing to distinguish the two.
+
+This route needs \code{h5py}, which is not part of the base install. Without it
+the file dialog still offers HDF5 files and opening one reports that the package
+is missing, which is the honest failure: nothing else in the program is
+affected.
+
+\subsection*{Why there is no single HDF5 reader}
+
+HDF5 is a container, not a layout. It says how to store named arrays in a tree
+and nothing whatever about which array is a channel and which is a run, so two
+exporters writing the same simulation produce trees that share only the file
+signature. The axis they disagree about most is where a run's identity is
+written:
+
+\begin{aoecode}
+/RUN_1/ALTITUDE            a group per run, a dataset per channel
+/ALTITUDE/ALTITUDE_1_2_0   a group per channel, a dataset per run, the
+                           run spelled into the dataset name
+/CASE_2/aero/ALTITUDE      the run further up the tree
+/ALTITUDE                  a single run, nothing to disambiguate
+\end{aoecode}
+
+Only one-dimensional numeric datasets are candidates, and only those of the
+length most of them share, so a short metadata vector sitting beside the
+channels is passed over rather than becoming a channel two samples long.
+
+\subsection*{How the layout is chosen}
+
+Every convention above is tried. Those that do not partition the file
+consistently --- two datasets claiming to be the same channel of the same run,
+or a run missing a channel another run has --- are discarded outright. What
+survives is ranked on evidence taken from the tree itself:
+
+\begin{itemize}
+  \item whether each channel's key is the name of the group its dataset sits in.
+        \code{/ALFA/ALFA\_1\_2\_0} read with the run in the leaf gives the
+        channel \code{ALFA} inside the group \code{ALFA}; read as a single run
+        it gives a channel called \code{ALFA\_1\_2\_0} inside a group called
+        \code{ALFA}, which no exporter writes on purpose.
+  \item whether the run keys are the same beneath every group. A run identity is
+        orthogonal to the tree: each channel has one dataset per run. A key
+        appearing beneath only one group is part of that group's name.
+  \item having found more than one run at all, as a tie-break only, since a file
+        really can hold one.
+\end{itemize}
+
+\begin{aoenote}
+The chosen convention is written to the log at INFO level, together with the
+runners-up and their scores. If a file ever opens with its runs and channels
+the wrong way round, that line is the first place to look.
+\end{aoenote}
+
+Units come from a \code{units} or \code{unit} attribute on each dataset where
+one exists, and are left empty otherwise --- the same position as the packed
+\code{.aoe} dialect, where the file declares none.
+
+\subsection*{What is not read}
+
+Attributes carrying anything other than a unit --- masses, inertias,
+configuration strings --- are ignored. They are not channels, and there is no
+place in the interface where a per-run property belongs today.
+
+\subsection*{How it reaches the core}
+
+The core has no HDF5 parser and gains no new compiled dependency. The file is
+read in Python and its columns handed down through four calls on the C ABI
+(\code{aoe\_begin\_arrays}, \code{aoe\_add\_arrays\_sim},
+\code{aoe\_set\_arrays\_column}, \code{aoe\_end\_arrays}); what the core ends up
+holding is the same header table, run list and per-run columns that parsing an
+\code{.aoe} file would have produced.
+
+That choice has two consequences worth knowing.
+
+\begin{aoelimit}
+\textbf{No sidecar.} A \code{.aoec} is a rewrite of a parse of the source, and
+there is no parse here. None is written for an HDF5 file and none is looked
+for.
+
+\textbf{No lazy loading.} A parsed file loads a column the first time a curve
+needs it; a pushed one arrives complete, so its samples are all resident from
+the moment it opens.
+\end{aoelimit}
+
+Reload (\textsc{data} panel) works and goes back through the reader rather than
+through the core, keeping the file's index and with it every style keyed on its
+runs.
+
 \chapter{How the data is read}
 \label{ch:reading}
 
@@ -3451,6 +3545,13 @@ workspaces are unaffected --- every tile records its own mode.
 
 The following are real shortcomings of this version, gathered here so they are
 easy to find.
+
+\textbf{An HDF5 file is read whole, and needs h5py.} The samples are handed to
+the core rather than parsed by it, so there is no lazy per-column loading and no
+\code{.aoec} sidecar for such a file; see section~\ref{sec:hdf5}. The layout is
+inferred from the tree, which is evidence rather than proof --- a file following
+none of the known conventions opens with its runs and channels arranged wrongly
+or does not open at all, and the log says which convention was chosen.
 
 Entries that appeared here in earlier editions and have since been fixed are not
 repeated: ISO filters and aliases missing from the workspace, the undocumented

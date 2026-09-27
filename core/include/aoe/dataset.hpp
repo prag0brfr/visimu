@@ -130,7 +130,41 @@ public:
 
     // Re-runs open() on the same path, preserving nothing. Returns false if the
     // file has become unreadable.
+    //
+    // A dataset built through the array route below has no parser here to
+    // re-run, so this refuses and the caller -- which is the front end that
+    // supplied the arrays -- rebuilds it the way it built it the first time.
     bool reload();
+
+    // ------------------------------------------- construction from arrays
+    //
+    // Some formats are containers rather than layouts: HDF5 carries no
+    // convention for where a run ends and a channel begins, and every exporter
+    // invents its own. Writing a native reader for one of them would mean a new
+    // compiled dependency on a machine where adding one is expensive, to parse
+    // a convention that the next file may not follow.
+    //
+    // So they are read where a reader is a page of code instead: in Python,
+    // which hands the samples over through these four calls. Everything above
+    // this class -- decimation, ISO scanning, formulas, the plot path -- then
+    // works on the result exactly as it does on a parsed file, because what it
+    // sees is the same headers, runs and columns.
+    //
+    // The trade-off is deliberate and worth knowing: arrays arrive complete, so
+    // a pushed file has no lazy per-column loading and its samples are resident
+    // from the moment it opens.
+    //
+    // Order: begin_arrays, then add_arrays_sim per run, then set_arrays_column
+    // per (run, column), then end_arrays.
+    bool begin_arrays(const std::string& path, const std::vector<std::string>& headers,
+                      const std::vector<std::string>& units);
+    int add_arrays_sim(const std::string& id);
+    bool set_arrays_column(std::size_t sim_index, int column, const float* data,
+                           std::size_t count);
+    void end_arrays();
+
+    // True when this dataset was pushed rather than parsed.
+    bool arrays_backed() const noexcept { return arrays_backed_; }
 
     bool is_open() const noexcept { return !headers_.empty(); }
     const std::string& path() const noexcept { return path_; }
@@ -324,6 +358,10 @@ private:
     // Values found on the first data line. When this equals column_count() the
     // file is one-record-per-line and byte ranges can be split at any newline.
     std::size_t values_per_line_ = 0;
+
+    // Set when the samples were handed to us rather than parsed from path_.
+    // Guards the routes that assume a parser: reloading and writing a sidecar.
+    bool arrays_backed_ = false;
 };
 
 }  // namespace aoe

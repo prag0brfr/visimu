@@ -975,6 +975,74 @@ a plot's y-range, whereas a `NaN` simply breaks the line where the data is bad.
 
 ---
 
+## HDF5 files
+
+Result files stored as HDF5 open like any other: choose one in the file dialog,
+or pass it on the command line. What is read is exactly what is read from an
+`.aoe` file — the channels, the runs, and one array per channel per run. Nothing
+downstream can tell the difference: decimation, ISO filters, computed
+parameters, styles and workspaces all work the same.
+
+This needs **h5py**, which is not part of the base install. Without it, opening
+such a file reports `reading HDF5 files needs the h5py package, which is not
+installed` and the rest of the program carries on as before.
+
+### Which datasets are which
+
+HDF5 is a container, not a layout. Two exporters writing the same simulation
+produce trees with nothing in common but the file signature, and the thing they
+disagree about most is where the identity of a *run* is written. These are the
+conventions the reader knows:
+
+```
+/RUN_1/ALTITUDE               a group per run, a dataset per channel
+/ALTITUDE/ALTITUDE_1_2_0      a group per channel, a dataset per run, with the
+                              run spelled into the dataset name
+/CASE_2/aero/ALTITUDE         the run further up the tree
+/ALTITUDE                     a single run, nothing to disambiguate
+```
+
+Only 1-D numeric datasets are considered, and only those of the length shared by
+most of them — a short metadata vector alongside the channels is ignored rather
+than turned into a channel two samples long.
+
+The reader enumerates every convention, discards the ones that do not partition
+the file consistently, and ranks what is left on evidence from the tree itself:
+whether each channel's name matches the group it sits in, and whether the run
+keys are the same under every group. Both signals say the same thing — that the
+run axis is orthogonal to the tree — and together they separate the two readings
+that matter, since a group-per-channel file read the other way round yields one
+run with twice as many channels, all named `ALTITUDE_1_2_0`.
+
+Which convention was chosen is written to the log at INFO, along with what else
+was considered and how it scored. If a file comes out with its runs and channels
+transposed, that line is where to look first.
+
+Units are taken from a `units` or `unit` attribute on each dataset when one is
+there, and left empty otherwise, exactly as for the packed `.aoe` dialect.
+
+### What is not read
+
+Attributes holding anything other than a unit — masses, inertias, configuration
+— are ignored. They are not channels, and there is nowhere in the interface that
+a per-run property belongs today.
+
+### Two differences worth knowing
+
+**No sidecar.** A `.aoec` describes a parse of a source file, and there is no
+parse here: the samples are handed to the core rather than read by it. No
+sidecar is written for an HDF5 file and none is looked for.
+
+**No lazy loading.** A parsed file loads a column the first time a curve needs
+it. A pushed one arrives complete, so every sample is resident from the moment
+the file opens. For the file sizes HDF5 is usually used for this is not
+noticeable; for a very large one it is the cost to be aware of.
+
+Reload works and goes back through the reader, keeping the file's index and with
+it every colour and style keyed on its runs.
+
+---
+
 ## The AOE file format
 
 Two dialects exist, and both are read.

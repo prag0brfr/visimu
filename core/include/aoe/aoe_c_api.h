@@ -74,6 +74,29 @@ AOE_API const char* aoe_file_path(aoe_session* session, int file);
 /* Number of files whose modification time changed on disk; the indices are
  * written into `out` (up to `max` of them). Pass NULL/0 to just count. */
 AOE_API int aoe_stale_files(aoe_session* session, int* out, int max);
+
+// ----------------------------------------------------------- pushed files
+//
+// A file whose format this core has no parser for is read by the caller and
+// handed over as arrays. What results is an ordinary file in every other
+// respect: same runs, same channels, same decimation, same formulas.
+//
+// Call order is begin, then add_sim per run, then set_column per
+// (run, column), then end. `replace` on begin names an existing file to
+// rebuild in place -- a reload of a pushed file -- or -1 for a new one.
+// Returns the file index, or -1 on failure.
+//
+// The samples are copied, so the caller's buffers may go as soon as
+// set_column returns. Unlike a parsed file, a pushed one holds every sample
+// it was given from the moment it opens: there is no parser to go back to,
+// so there is nothing to load lazily.
+AOE_API int aoe_begin_arrays(aoe_session* session, const char* path,
+                             const char* const* headers, const char* const* units,
+                             int n_headers, int replace);
+AOE_API int aoe_add_arrays_sim(aoe_session* session, int file, const char* id);
+AOE_API int aoe_set_arrays_column(aoe_session* session, int file, int sim, int column,
+                                  const float* data, size_t count);
+AOE_API void aoe_end_arrays(aoe_session* session, int file);
 AOE_API int aoe_reload_file(aoe_session* session, int file);
 
 /* Display names. Renaming affects only what is shown: the identity keys that

@@ -166,6 +166,13 @@ _PROTOTYPES = [
     ("aoe_last_error", [c_void_p], c_char_p),
 
     ("aoe_add_file", [c_void_p, c_char_p], c_int),
+    # Pushed files: a format read in Python and handed over as arrays.
+    ("aoe_begin_arrays",
+     [c_void_p, c_char_p, POINTER(c_char_p), POINTER(c_char_p), c_int, c_int], c_int),
+    ("aoe_add_arrays_sim", [c_void_p, c_int, c_char_p], c_int),
+    ("aoe_set_arrays_column",
+     [c_void_p, c_int, c_int, c_int, _FLOAT_P, c_size_t], c_int),
+    ("aoe_end_arrays", [c_void_p, c_int], None),
     ("aoe_remove_file", [c_void_p, c_int], None),
     ("aoe_clear_files", [c_void_p], None),
     ("aoe_file_count", [c_void_p], c_int),

@@ -384,12 +384,95 @@ void Dataset::build_index(const MappedFile& file) {
 }
 
 bool Dataset::reload() {
+    // Nothing here can rebuild a pushed file: the reader that produced its
+    // arrays lives above this core. Refusing is what tells the caller to.
+    if (arrays_backed_) return false;
+
     std::string path = path_;
     headers_.clear();
     units_.clear();
     header_index_.clear();
     sims_.clear();
     return open(path);
+}
+
+
+// ------------------------------------------------ construction from arrays
+//
+// The parsing routes above turn bytes into columns. These four turn columns
+// handed over by the caller into the same thing, for formats read outside this
+// core. Everything downstream is identical: the run list, the header table and
+// the per-run column slots are the ones open() would have produced.
+
+bool Dataset::begin_arrays(const std::string& path, const std::vector<std::string>& headers,
+                           const std::vector<std::string>& units) {
+    if (headers.empty()) return false;
+
+    path_ = path;
+    mod_time_ = MappedFile::mod_time(path);
+
+    if (name_.empty()) {
+        std::size_t slash = path.find_last_of("/\\");
+        name_ = (slash == std::string::npos) ? path : path.substr(slash + 1);
+    }
+    if (key_name_.empty()) key_name_ = name_;
+
+    // A sidecar describes a parse of this path. There is no parse here, so any
+    // sidecar lying beside the file belongs to something else.
+    cache_.reset();
+    fingerprint_ = SourceFingerprint{};
+
+    headers_ = headers;
+    units_ = units;
+    units_.resize(headers_.size());
+    header_index_.clear();
+    sims_.clear();
+
+    indexed_size_ = 0;
+    values_per_line_ = headers_.size();
+    arrays_backed_ = true;
+    return true;
+}
+
+int Dataset::add_arrays_sim(const std::string& id) {
+    if (!arrays_backed_) return -1;
+
+    std::unique_ptr<Simulation> sim(new Simulation());
+    sim->id = id;
+    sim->display_name = id;
+    sim->unique_key = key_name() + "::" + sim->id + "::" + std::to_string(sims_.size());
+    sim->columns.resize(headers_.size());
+    sims_.push_back(std::move(sim));
+    return static_cast<int>(sims_.size()) - 1;
+}
+
+bool Dataset::set_arrays_column(std::size_t sim_index, int column, const float* data,
+                                std::size_t count) {
+    if (!arrays_backed_) return false;
+    if (sim_index >= sims_.size()) return false;
+    if (column < 0 || static_cast<std::size_t>(column) >= headers_.size()) return false;
+    if (count && !data) return false;
+
+    Simulation& sim = *sims_[sim_index];
+    LockGuard guard(sim.lock);
+    if (sim.columns.size() < headers_.size()) sim.columns.resize(headers_.size());
+
+    SampleBlock block(new SampleData());
+    block->values.assign(data, data + count);
+    // Same summary the parser computes in the same pass, and for the same
+    // reason: autoscaling asks every visible curve for its extent on every
+    // replot.
+    summarise(*block);
+
+    Column& col = sim.columns[static_cast<std::size_t>(column)];
+    col.block = std::move(block);
+    col.loaded = true;
+    return true;
+}
+
+void Dataset::end_arrays() {
+    if (!arrays_backed_) return;
+    finish_open();
 }
 
 void Dataset::invalidate_data() {
@@ -994,6 +1077,10 @@ std::size_t Dataset::evict_until(std::size_t keep_bytes) {
 
 bool Dataset::write_cache(std::string* out_path) {
     if (out_path) out_path->clear();
+    // A sidecar is a rewrite of a parse of the source. A pushed file has no
+    // parse to rewrite, and a sidecar written beside it would be claimed by a
+    // later open() as though it did.
+    if (arrays_backed_) return false;
     if (headers_.empty() || sims_.empty() || path_.empty()) return false;
     if (!caching_enabled()) return false;
 

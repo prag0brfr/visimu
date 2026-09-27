@@ -13,12 +13,13 @@ being valid when the owning file is reloaded or removed.
 from __future__ import annotations
 
 import ctypes
-from ctypes import byref, c_double, c_float, c_int, c_size_t
+from ctypes import byref, c_char_p, c_double, c_float, c_int, c_size_t
 from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 
 from . import _core
+from . import hdf5
 from ._core import CoreError, as_array, as_pinned_array, decode, encode, lib, pin_of
 
 __all__ = ["Session", "FileHandle", "SimulationHandle", "IsoGroup", "CoreError"]
@@ -106,6 +107,17 @@ class FileHandle:
         self._session._invalidate_handles()
 
     def reload(self) -> bool:
+        # A pushed file has no parser inside the core to re-run, so the core
+        # refuses and the reader that produced it runs again instead. The file
+        # keeps its index, and with it every style and selection keyed on it.
+        path = self.path
+        if self._session.is_pushed(path):
+            try:
+                self._session._push_hdf5(path, replace=self.index)
+            except (CoreError, ValueError, OSError):
+                return False
+            return True
+
         ok = bool(lib.aoe_reload_file(self._session._handle, self.index))
         self._session._invalidate_handles()
         return ok
@@ -183,6 +195,9 @@ class Session:
         self._dy: Optional[np.ndarray] = None
         # file index -> run handles. See FileHandle.simulations.
         self._sim_cache: Dict[int, List[SimulationHandle]] = {}
+        # Paths read outside the core and pushed in as arrays. Reloading one
+        # means running its reader again, which only this side can do.
+        self._pushed: Dict[str, bool] = {}
 
     # ------------------------------------------------------------ lifetime
 
@@ -224,18 +239,80 @@ class Session:
         return handles
 
     def add_file(self, path: str) -> FileHandle:
+        # The core parses the .aoe dialect. Anything else is read here and
+        # pushed down as arrays; from the core's side the two are the same
+        # file, which is why nothing downstream of this call has to know.
+        if hdf5.looks_like_hdf5(path):
+            return self._push_hdf5(path, replace=-1)
+
         index = lib.aoe_add_file(self._handle, encode(path))
         if index < 0:
             raise CoreError(self.last_error or "could not read {0!r}".format(path))
         self._invalidate_handles()
         return FileHandle(self, index)
 
+    def _push_hdf5(self, path: str, replace: int) -> FileHandle:
+        """Read an HDF5 file here and hand its columns to the core.
+
+        Every way this can fail -- h5py absent, a tree whose layout cannot be
+        worked out, an unreadable file -- surfaces as the same CoreError the
+        parsing route raises, because to everything above this it is the same
+        event: that file could not be read, and the message says why.
+        """
+        try:
+            described = hdf5.inspect(path)
+        except (ValueError, OSError) as exc:
+            raise CoreError(str(exc))
+        layout = described.layout
+
+        headers = described.channels
+        header_array = (c_char_p * len(headers))(*[encode(n) for n in headers])
+        unit_array = (c_char_p * len(headers))(
+            *[encode(u) for u in described.units])
+
+        index = lib.aoe_begin_arrays(self._handle, encode(path), header_array,
+                                     unit_array, len(headers), int(replace))
+        if index < 0:
+            raise CoreError(self.last_error or "could not open {0!r}".format(path))
+
+        for run_key in layout.run_keys:
+            if lib.aoe_add_arrays_sim(self._handle, index, encode(run_key)) < 0:
+                raise CoreError(self.last_error or "could not add run {0!r}"
+                                .format(run_key))
+
+        try:
+            for run_index, channel_index, values in hdf5.read_columns(path, layout):
+                lib.aoe_set_arrays_column(
+                    self._handle, index, run_index, channel_index,
+                    values.ctypes.data_as(ctypes.POINTER(c_float)), values.size)
+        except (ValueError, OSError) as exc:
+            lib.aoe_end_arrays(self._handle, index)
+            self._invalidate_handles()
+            raise CoreError(str(exc))
+
+        lib.aoe_end_arrays(self._handle, index)
+        self._pushed[path] = True
+        self._invalidate_handles()
+        return FileHandle(self, index)
+
+    def is_pushed(self, path: str) -> bool:
+        """True when this path was read outside the core and handed to it.
+
+        Such a file has no sidecar and cannot be reloaded by the core, because
+        the reader that produced it lives here.
+        """
+        return bool(self._pushed.get(path))
+
     def remove_file(self, index: int) -> None:
+        handle = self.file(int(index))
+        if handle is not None:
+            self._pushed.pop(handle.path, None)
         lib.aoe_remove_file(self._handle, int(index))
         # Removing a file shifts every later index, so the whole cache goes.
         self._invalidate_handles()
 
     def clear(self) -> None:
+        self._pushed.clear()
         lib.aoe_clear_files(self._handle)
         self._invalidate_handles()
 

@@ -109,6 +109,60 @@ const char* aoe_last_error(aoe_session* session) {
 
 // --------------------------------------------------------------- files
 
+int aoe_begin_arrays(aoe_session* s, const char* path, const char* const* headers,
+                     const char* const* units, int n_headers, int replace) {
+    return guarded_write(s, [&] {
+        if (!path || !headers || n_headers <= 0) {
+            s->error = "no headers given";
+            return -1;
+        }
+        std::vector<std::string> names;
+        std::vector<std::string> unit_text;
+        names.reserve(static_cast<std::size_t>(n_headers));
+        unit_text.reserve(static_cast<std::size_t>(n_headers));
+        for (int i = 0; i < n_headers; ++i) {
+            names.push_back(headers[i] ? headers[i] : "");
+            unit_text.push_back(units && units[i] ? units[i] : "");
+        }
+        const int index = s->session.begin_arrays_file(path, names, unit_text, replace);
+        if (index < 0) s->error = std::string("could not open '") + path + "'";
+        return index;
+    }, -1);
+}
+
+int aoe_add_arrays_sim(aoe_session* s, int file, const char* id) {
+    return guarded_write(s, [&] {
+        aoe::Dataset* dataset = s->session.file(file);
+        if (!dataset) {
+            s->error = "no such file";
+            return -1;
+        }
+        return dataset->add_arrays_sim(id ? id : "");
+    }, -1);
+}
+
+int aoe_set_arrays_column(aoe_session* s, int file, int sim, int column,
+                          const float* data, size_t count) {
+    return guarded_write(s, [&] {
+        aoe::Dataset* dataset = s->session.file(file);
+        if (!dataset) {
+            s->error = "no such file";
+            return 0;
+        }
+        return dataset->set_arrays_column(static_cast<std::size_t>(sim), column, data,
+                                          count)
+                   ? 1
+                   : 0;
+    }, 0);
+}
+
+void aoe_end_arrays(aoe_session* s, int file) {
+    guarded_write(s, [&] {
+        s->session.end_arrays_file(file);
+        return 0;
+    }, 0);
+}
+
 int aoe_add_file(aoe_session* s, const char* path) {
     return guarded_write(s, [&] {
         if (!path) {

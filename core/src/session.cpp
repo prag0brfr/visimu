@@ -45,6 +45,32 @@ std::string Session::unique_display_name(const std::string& path) const {
     return base;
 }
 
+int Session::begin_arrays_file(const std::string& path,
+                               const std::vector<std::string>& headers,
+                               const std::vector<std::string>& units, int replace) {
+    if (replace >= 0) {
+        if (static_cast<std::size_t>(replace) >= files_.size()) return -1;
+        Dataset* existing = files_[static_cast<std::size_t>(replace)].data.get();
+        if (!existing || !existing->begin_arrays(path, headers, units)) return -1;
+        return replace;
+    }
+
+    auto dataset = std::unique_ptr<Dataset>(new Dataset());
+    dataset->set_name(unique_display_name(path));
+    if (!dataset->begin_arrays(path, headers, units)) return -1;
+
+    files_.push_back(Entry{std::move(dataset)});
+    return static_cast<int>(files_.size()) - 1;
+}
+
+void Session::end_arrays_file(int index) {
+    if (index < 0 || static_cast<std::size_t>(index) >= files_.size()) return;
+    Dataset* dataset = files_[static_cast<std::size_t>(index)].data.get();
+    if (!dataset) return;
+    dataset->end_arrays();
+    rebuild_parameters();
+}
+
 int Session::add_file(const std::string& path) {
     auto dataset = std::unique_ptr<Dataset>(new Dataset());
     dataset->set_name(unique_display_name(path));
