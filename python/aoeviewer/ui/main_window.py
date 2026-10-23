@@ -61,6 +61,7 @@ from .panels import (
     Plot3DPanel,
     ScalePanel,
     StylePanel,
+    SyncPanel,
     TextPanel,
 )
 from .plot_grid import PlotGrid
@@ -348,6 +349,7 @@ class MainWindow(QMainWindow):
         self.iso_panel = IsoPanel(self.session, self.state)
         self.style_panel = StylePanel(self.session, self.state)
         self.scale_panel = ScalePanel(self.session, self.state)
+        self.sync_panel = SyncPanel(self.session, self.state)
         self.area_panel = AreaPanel(self.session, self.state)
         self.marker_panel = MarkerPanel(self.session, self.state)
         self.alias_panel = AliasPanel(self.session, self.state)
@@ -363,6 +365,7 @@ class MainWindow(QMainWindow):
             ("ISO", self.iso_panel),
             ("STYLE", self.style_panel),
             ("SCALE", self.scale_panel),
+            ("SYNC", self.sync_panel),
             ("3D", self.plot3d_panel),
             ("INSPECT", self.inspect_panel),
             ("AREA", self.area_panel),
@@ -435,6 +438,10 @@ class MainWindow(QMainWindow):
         self.style_panel.style_changed.connect(self.refresh_plots)
         self.style_panel.legend_applied.connect(self._on_legend_applied)
         self.scale_panel.scale_changed.connect(self.refresh_plots)
+        # A full redraw, not a restyle: the alignment changes where every
+        # sample is drawn, and the curves have to be re-decimated against the
+        # new x values.
+        self.sync_panel.sync_changed.connect(self._on_sync_changed)
         self.area_panel.changed.connect(self.refresh_plots)
         self.marker_panel.changed.connect(self.refresh_plots)
 
@@ -446,6 +453,7 @@ class MainWindow(QMainWindow):
         # the grid exists -- failed at construction and took the window down.
         self.text_panel.changed.connect(self._on_texts_changed)
         self.grid.tile_activated.connect(self._on_tile_activated)
+        self.grid.tile_params_requested.connect(self._on_tile_params_requested)
         self.grid.cursor_moved.connect(self._on_cursor_moved)
         self.grid.view_changed.connect(self.scale_panel.follow_view)
         self.grid.view_changed.connect(self._on_view_changed)
@@ -733,6 +741,9 @@ class MainWindow(QMainWindow):
                         self.state.set_selected(index, sim, True)
 
             self.refresh_all()
+            # After refresh_all, so the file is drawn before its samples are
+            # fetched for the sidecar.
+            self._build_pushed_caches([index for index, _count in loaded])
             if failures:
                 QMessageBox.warning(
                     self, "Some files could not be read", "\n".join(failures[:10])
@@ -805,10 +816,76 @@ class MainWindow(QMainWindow):
                 return False
         except OSError:
             return False
+        # A pushed file is not cached here. Its columns are fetched as they are
+        # wanted, so writing a sidecar means fetching all of them first -- and
+        # doing that inside the open would reinstate exactly the wait the lazy
+        # reader removes. It happens afterwards instead, with the file already
+        # on screen: see _build_pushed_caches.
+        if self.session.is_pushed_index(index):
+            return False
         try:
             return bool(self.session.build_cache(index))
         except CoreError:
             return False
+
+    def _build_pushed_caches(self, indices) -> None:
+        """Write sidecars for files read outside the core, in the background.
+
+        The point of the whole arrangement: a large HDF5 file opens at once
+        because nothing is read until it is drawn, and a moment later -- while
+        it is already usable -- its samples are written out in the layout this
+        program reads fastest. Every later open of that file then takes the
+        cached path and needs the reader for nothing.
+
+        Everything here is best-effort and silent on failure. A sidecar is an
+        optimisation the user did not ask for, and the file is already open and
+        working without it.
+        """
+        if not self.session.cache_enabled:
+            return
+        wanted = []
+        for index in indices:
+            if not self.session.is_pushed_index(index):
+                continue
+            if self.session.cache_active(index):
+                continue
+            try:
+                if os.path.getsize(self.session.file(index).path) \
+                        < self.CACHE_THRESHOLD_BYTES:
+                    continue
+            except (OSError, AttributeError):
+                continue
+            wanted.append(index)
+        if not wanted:
+            return
+
+        def work():
+            done = 0
+            for index in wanted:
+                try:
+                    if not self.session.fill_pushed_completely(index):
+                        continue
+                    if self.session.build_cache(index):
+                        done += 1
+                except (CoreError, OSError, ValueError):
+                    continue
+            return done
+
+        def finished(count):
+            if count:
+                self.status_label.setText(
+                    "Cached {0} file(s) for faster reopening".format(count))
+                # Filling every column to write the sidecar left the whole file
+                # resident, which for a large one is most of the memory budget
+                # spent on samples nothing is drawing. They are on disk now and
+                # come back from there in milliseconds, so the cap is applied
+                # straight away rather than at the next redraw.
+                self._enforce_memory_limit()
+                self._update_memory_label()
+
+        self.tasks.submit(
+            "Caching {0} file(s) for faster reopening — the file is already "
+            "usable...".format(len(wanted)), work, finished)
 
     def reload_files(self, indices=None) -> None:
         """Re-read files from disk, because the user asked.
@@ -1082,6 +1159,16 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ inspect
 
+    def _on_tile_params_requested(self, index: int) -> None:
+        """A tile was double-clicked: it is fitted already, now show PARAMS.
+
+        The tile has already been activated by the same gesture, so the panel
+        that comes forward is describing the tile just clicked.
+        """
+        if index != self.state.active_tile:
+            self._on_tile_activated(index)
+        self._show_panel(self.param_panel)
+
     def _show_panel(self, panel) -> None:
         """Bring one panel to the front of the rail."""
         for index, (_name, widget) in enumerate(self._panels):
@@ -1201,6 +1288,15 @@ class MainWindow(QMainWindow):
         self.status_label.setText(
             "Legend position saved. Pick a corner in STYLE to snap it back."
         )
+
+    def _on_sync_changed(self) -> None:
+        """The alignment was edited, so the tiles have to be drawn again.
+
+        Through refresh_plots rather than refresh_active_plot: Apply to every
+        tile touches the whole page, and the title of each tile changes too.
+        """
+        self.refresh_plots()
+        self._invalidate_panels()
 
     def _on_texts_changed(self) -> None:
         """A caption was added, removed or edited in the panel."""

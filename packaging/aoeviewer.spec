@@ -151,8 +151,29 @@ EXCLUDES = [
     "PyQt5", "PyQt6", "PySide2",
     # Build-time only: reachable from numpy.f2py / numpy.distutils, which the
     # application never calls. Roughly 14 MB.
-    "setuptools", "pkg_resources", "distutils", "numpy.f2py", "numpy.distutils",
+    "setuptools", "pkg_resources", "numpy.f2py", "numpy.distutils",
 ]
+
+# "distutils" is deliberately NOT in that list, and must not be put back.
+#
+# PEP 632 removed distutils from the standard library in Python 3.12, so
+# PyInstaller supplies it instead: a pre-safe-import hook aliases
+# setuptools._distutils onto the name distutils as soon as anything in the
+# graph reaches for it, which numpy's own hook does by way of
+# importlib_metadata and packaging.
+#
+# Listing it as an exclude puts an ExcludedModule node under that name first,
+# and the alias then refuses to overwrite it:
+#
+#   ValueError: Target module "distutils" already imported as
+#   ExcludedModule('distutils',)
+#
+# -- which aborts the build during Analysis, before anything is written. On
+# 3.12 the exclusion saves nothing anyway, there being no stdlib distutils to
+# leave out; what the comment above is really excluding is setuptools and
+# pkg_resources, and those two stay. Everything distutils would have dragged in
+# comes through setuptools._distutils, which the setuptools exclude already
+# covers.
 
 # Deliberately NOT excluded, despite being tempting:
 #   unittest  - numpy imports it through numpy.testing, and excluding it makes

@@ -21,6 +21,7 @@ class PlotGrid(QWidget):
     """Lays out up to 5x5 tiles and keeps them in sync with the page state."""
 
     tile_activated = Signal(int)
+    tile_params_requested = Signal(int)
     cursor_moved = Signal(str)
     view_changed = Signal()
     point_inspected = Signal(int, int, float)
@@ -81,6 +82,7 @@ class PlotGrid(QWidget):
                     break
                 tile = PlotTile(self._session, self._state, index, self._theme, self)
                 tile.activated.connect(self.tile_activated.emit)
+                tile.params_requested.connect(self.tile_params_requested.emit)
                 tile.cursor_moved.connect(self.cursor_moved.emit)
                 tile.view_changed.connect(self.view_changed.emit)
                 tile.point_inspected.connect(self.point_inspected.emit)

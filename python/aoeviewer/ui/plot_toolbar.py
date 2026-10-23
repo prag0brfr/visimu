@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QToolButton,
     QWidget,
@@ -86,6 +87,8 @@ class PlotToolbar(QWidget):
 
         for text, handler, tip in (
             ("+", self._add_page, "Add a page"),
+            ("Duplicate", self._duplicate_page,
+             "Duplicate this page, with every tile on it"),
             ("−", self._remove_page, "Remove this page"),
             ("◄", lambda: self._move_page(-1), "Move this page earlier"),
             ("►", lambda: self._move_page(1), "Move this page later"),
@@ -241,8 +244,32 @@ class PlotToolbar(QWidget):
         self.refresh()
         self.pages_changed.emit()
 
+    def _duplicate_page(self) -> None:
+        if self._state.duplicate_page() is None:
+            return
+        self.refresh()
+        self.pages_changed.emit()
+
     def _remove_page(self) -> None:
         if len(self._state.pages) <= 1:
+            return
+        page = self._state.page
+        # Asked for, and the reason is the button: it sits next to Add and
+        # Duplicate, one character wide, and a mis-click used to take a page of
+        # configured tiles with no way back. The count is in the question
+        # because "Page 3" alone does not say how much work is in it.
+        filled = sum(1 for tile in page.visible_tiles() if not tile.is_empty())
+        detail = ("It holds {0} configured tile(s).".format(filled) if filled
+                  else "It is empty.")
+        answer = QMessageBox.question(
+            self, "Remove this page?",
+            "Remove \"{0}\"? {1}\n\nThis cannot be undone, though the "
+            "workspace on disk is unchanged until you save."
+            .format(page.name, detail),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
             return
         self._state.remove_page(self._state.active_page)
         self.refresh()

@@ -342,6 +342,70 @@ def inspect(path: str) -> Hdf5File:
                     [other.rule for _, other in ranked[1:]])
 
 
+def read_first_values(path: str, layout: Layout, channel_index: int):
+    """The first sample of one channel in every run, without reading a column.
+
+    What an ISO scan needs. The core answers this for a parsed file by reading
+    the first record of each block through its index, which is the difference
+    between an ISO scan taking microseconds and taking seconds; a pushed file
+    has no index here, but HDF5 can read element zero of a dataset directly,
+    which costs one chunk instead of the column.
+
+    NaN where a run does not carry the channel, which is what the core returns
+    for the same case.
+    """
+    import h5py
+
+    run_keys = layout.run_keys
+    out = np.full(len(run_keys), np.nan, dtype=np.float32)
+    if not (0 <= channel_index < len(layout.channels)):
+        return out
+    channel = layout.channels[channel_index]
+
+    with h5py.File(path, "r") as handle:
+        for index, run_key in enumerate(run_keys):
+            dataset_path = layout.runs[run_key].get(channel)
+            if dataset_path is None:
+                continue
+            dataset = handle[dataset_path]
+            if dataset.shape[0] == 0:
+                continue
+            out[index] = np.float32(dataset[0])
+    return out
+
+
+def read_selected(path: str, layout: Layout,
+                  wanted: Sequence[Tuple[int, int]]):
+    """Yield (run index, channel index, samples) for just the pairs asked for.
+
+    The lazy half of the reader. A page of four tiles wants four channels out
+    of forty, and reading the other thirty-six is most of the time a large
+    file takes to open -- so this reads the datasets named and no others.
+
+    The file is opened once for the whole batch and the pairs are walked in
+    (run, channel) order, which is the order the datasets of one run sit in the
+    tree: the alternative, one open per column, pays the HDF5 open and its
+    metadata walk per channel.
+    """
+    import h5py
+
+    run_keys = layout.run_keys
+    ordered = sorted(set((int(run), int(column)) for run, column in wanted))
+
+    with h5py.File(path, "r") as handle:
+        for run_index, channel_index in ordered:
+            if not (0 <= run_index < len(run_keys)):
+                continue
+            if not (0 <= channel_index < len(layout.channels)):
+                continue
+            channels = layout.runs[run_keys[run_index]]
+            dataset_path = channels.get(layout.channels[channel_index])
+            if dataset_path is None:
+                continue
+            values = np.asarray(handle[dataset_path][:], dtype=np.float32)
+            yield run_index, channel_index, np.ascontiguousarray(values)
+
+
 def read_columns(path: str, layout: Layout):
     """Yield (run index, channel index, samples) for every dataset in turn.
 

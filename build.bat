@@ -2,7 +2,7 @@
 REM ---------------------------------------------------------------------------
 REM Build the aoeViewer core on Windows with MinGW-w64.
 REM
-REM Application 2.1.2; these commands are unchanged.
+REM Application 2.2.0; these commands are unchanged.
 REM No cmake required -- only a compiler. g++ on PATH is enough; a portable
 REM MinGW-w64 that is not on PATH can be named with the AOE_CXX variable:
 REM

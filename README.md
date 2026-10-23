@@ -2,7 +2,18 @@
 
 A fast viewer for AOE simulation result files.
 
-**Version 2.1.2** makes the window fit any screen and the interface any taste:
+**Version 2.2.0** adds a thirteenth panel and makes large HDF5 files open at
+once. **SYNC** aligns the runs of a tile on an event rather than on the clock —
+"line these up where the speed began to rise" — with the offset found by
+interpolation, runs that never meet the condition reported rather than hidden,
+and the whole setting saved in the workspace. The DATA tab filters its run list
+by name, so `2.1` finds `2.1.3` and `1.2.1` in a study of hundreds. A page can
+be duplicated whole, and removing one now asks first. Double-clicking a tile
+fits it *and* opens PARAMS. And an HDF5 file is no longer read when it is
+opened: its columns are fetched as they are drawn, and a sidecar is written in
+the background afterwards, so every later open takes the cached path.
+
+**Version 2.1.2** made the window fit any screen and the interface any taste:
 two toolbar buttons scale the text and the spacing everywhere, each panel
 scrolls so the window's minimum height no longer follows the tallest one, the
 light/dark toggle moved out of the tab rail and into the toolbar, *Fit* moved
@@ -17,7 +28,7 @@ unticked parameter leaves the top of the PARAMS list, legend rows are set
 smaller and tighter, files are reloaded on request instead of on a timer, and
 `Colour by Parameter` is the default.
 
-The full manual is `doc/aoeViewer-2.1.2-User-and-Reference-Guide.pdf`, built
+The full manual is `doc/aoeViewer-2.2.0-User-and-Reference-Guide.pdf`, built
 from the LaTeX source beside it; it replaces both the 2.0.0 guide and the 2.1.x
 addenda, and Chapter 1 lists everything that changed.
 
@@ -1027,19 +1038,131 @@ Attributes holding anything other than a unit — masses, inertias, configuratio
 — are ignored. They are not channels, and there is nowhere in the interface that
 a per-run property belongs today.
 
-### Two differences worth knowing
+### How much is read, and when
 
-**No sidecar.** A `.aoec` describes a parse of a source file, and there is no
-parse here: the samples are handed to the core rather than read by it. No
-sidecar is written for an HDF5 file and none is looked for.
+Opening an HDF5 file reads **no samples at all**. The group tree gives the
+channel names, the run names and the shapes, which is everything the DATA tree
+and the parameter lists are built from, so a file of any size appears at once.
+A column is fetched the first time something asks to draw it: a page of four
+tiles against forty channels reads four of them.
 
-**No lazy loading.** A parsed file loads a column the first time a curve needs
-it. A pushed one arrives complete, so every sample is resident from the moment
-the file opens. For the file sizes HDF5 is usually used for this is not
-noticeable; for a very large one it is the cost to be aware of.
+Three places a column can come from are tried in order of cost — already in
+memory, in the sidecar, then read from the file — so nothing is ever read twice.
+An ISO scan is cheaper still: it reads element zero of each run's dataset, one
+chunk rather than a column, which is the same shortcut the core takes on a
+parsed file through its index.
+
+A moment after the file is on screen, and only for files over 8 MB, the samples
+are fetched in the background and written out as a `.aoec` sidecar in the
+layout this program reads fastest. The status bar says so, and the file stays
+usable throughout. Every later open of that file is then served from the
+sidecar: no reading of the HDF5 at all, and the memory cap applies normally.
+If the file changes, its fingerprint stops matching and the sidecar is ignored,
+exactly as for a parsed file.
+
+So the trade is: the first open is instant and incremental, one later pass pays
+for the sidecar, and from then on opening is the cached path. Deleting a
+sidecar only costs speed.
 
 Reload works and goes back through the reader, keeping the file's index and with
 it every colour and style keyed on its runs.
+
+---
+
+### SYNC — aligning the runs on an event
+
+A channel logged over several runs of the same manoeuvre carries that manoeuvre
+at a different place in each run, because each recording started at a different
+moment. Plotted against TIME the curves are the same shape smeared sideways,
+and comparing them means comparing the shapes rather than the clocks.
+
+SYNC shifts each run along the x axis so that a chosen event lands in the same
+place for all of them. Name the channel the event is about, say what counts as
+the event, and say where it should end up:
+
+| Condition | What it finds |
+| --- | --- |
+| first rises above / falls below | the first sample past a level you give, interpolated between samples |
+| first crosses | the same, in whichever direction the channel approaches it from |
+| first starts to rise / fall | no level needed: the first move of 2% of the channel's own range away from where it started |
+| reaches its maximum / minimum | the extreme of the run |
+
+| Move the event to | Result |
+| --- | --- |
+| zero | the axis reads as time since the event |
+| the first run's event | everything moves onto the first run, keeping the original axis values meaningful |
+| a value I choose | for lining two tiles up on the same reference |
+
+A car accelerating from rest, logged five times: choose SPEED, *first rises
+above*, 0.5, and *zero*. Every run is then drawn with x = 0 at the moment it
+began to move.
+
+Three things worth knowing.
+
+The event is found by interpolating between the two samples either side of it,
+not by taking the nearer sample. Two runs logged at different rates otherwise
+align only to the sampling interval, which shows up as a step between them.
+Where the crossing itself falls inside a gap — NaN, which is what an unreadable
+token becomes — the first readable sample past the level is reported instead,
+because there is nothing to interpolate across.
+
+A run in which the event never happens is left where it is, and counted: the
+panel says "7 run(s) aligned, 1 left unaligned because the event was not found
+in them", and *List the events* names them one by one with the x value found in
+each. Hiding such a run would lose data and shifting it by a guess would be a
+lie.
+
+The alignment is per tile, so one page can hold the aligned comparison beside
+the raw one — which is the arrangement that shows what the alignment did.
+*Apply to every tile on this page* copies it across when that is what you want.
+The tile title says so too: `ALT = f(TIME)  [0 = SPEED event]`.
+
+Markers and bands are evaluated in each run's own axis, so they keep meaning
+"this instant in this run" and travel with the curve they mark.
+
+Saved in the workspace. A workspace written before this feature existed opens
+unaligned, which is how it was saved; the schema version is unchanged.
+
+### Filtering the run list
+
+Runs are often named `X.Y.Z` and often number in the hundreds, so the slow part
+of the DATA tab is scrolling. The box above the tree hides what does not match:
+
+- `2.1` shows `2.1.3` and `1.2.1` alike — the match is on any part of the name,
+  because the middle field is as often the interesting one as the first.
+- `2.*.3` matches `2.1.3` and `2.57.3`: a pattern with a wildcard is matched
+  against the whole name instead.
+- Matching ignores case, and a file whose own name matches keeps all of its runs.
+
+It is a view and nothing more: hidden runs keep their tick and keep plotting.
+While a filter is typed, **Plot all** and **Plot none** say *(shown)* and act
+only on the rows on screen — "show me 2.1\*, then plot all of them" being the
+reason to have a filter at all.
+
+### Duplicating and removing pages
+
+**Duplicate** copies the current page with every tile on it, names the copy
+`<name> (2)`, inserts it straight after the original and makes it active — a
+duplicate is nearly always the start of a variation on the page it came from.
+Duplicating a duplicate gives `(3)` rather than `(2) (2)`.
+
+**−** now asks first, and says how much is on the page it is about to remove.
+It is one character wide and sits next to Add, and a mis-click used to take a
+page of configured tiles with no way back.
+
+### Fitting
+
+A tile frames itself the moment it acquires its first curve, and then leaves the
+frame alone: a rebuild happens for all sorts of reasons that say nothing about
+what should be on screen — restyling a curve, toggling the grid, coming back to
+a page — and re-fitting on every one of them would throw away whatever you had
+zoomed in on. Emptying a tile and filling it again fits the new contents, since
+an empty tile has no frame worth inheriting.
+
+Double-clicking a tile does three things in one gesture: it makes the tile
+active, fits it, and brings PARAMS forward, which is where the next click was
+going anyway. A locked axis is still respected — fitting must not quietly undo
+a limit you typed.
 
 ---
 

@@ -13,6 +13,7 @@ being valid when the owning file is reloaded or removed.
 from __future__ import annotations
 
 import ctypes
+import threading
 from ctypes import byref, c_char_p, c_double, c_float, c_int, c_size_t
 from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
@@ -20,9 +21,12 @@ import numpy as np
 
 from . import _core
 from . import hdf5
+from .logging_setup import get_logger
 from ._core import CoreError, as_array, as_pinned_array, decode, encode, lib, pin_of
 
 __all__ = ["Session", "FileHandle", "SimulationHandle", "IsoGroup", "CoreError"]
+
+_log = get_logger("session")
 
 
 class SimulationHandle:
@@ -198,6 +202,19 @@ class Session:
         # Paths read outside the core and pushed in as arrays. Reloading one
         # means running its reader again, which only this side can do.
         self._pushed: Dict[str, bool] = {}
+        # file index -> what the reader needs to fetch a column of that file:
+        # its path, its layout, and the channel order the core was given.
+        self._pushed_plans: Dict[int, tuple] = {}
+        # One reader at a time. The columns of a pushed file are fetched from
+        # whichever thread asked for them -- the UI thread for a tooltip, a
+        # worker for an open -- and HDF5 is not reentrant unless the library
+        # was built thread-safe, which is not something this program can know.
+        self._pull_lock = threading.Lock()
+        # (file index, channel) -> one value per run, for pushed files. An ISO
+        # filter asks for these on every change, and each answer means opening
+        # the source; the set of files is what makes them stale, which is what
+        # _invalidate_handles already tracks.
+        self._iso_cache: Dict[tuple, np.ndarray] = {}
 
     # ------------------------------------------------------------ lifetime
 
@@ -228,6 +245,7 @@ class Session:
         """Drop cached run handles. Anything that changes which files exist, or
         what they are called, has to call this."""
         self._sim_cache.clear()
+        self._iso_cache.clear()
 
     def _simulations(self, file_index: int) -> List[SimulationHandle]:
         cached = self._sim_cache.get(file_index)
@@ -280,20 +298,115 @@ class Session:
                 raise CoreError(self.last_error or "could not add run {0!r}"
                                 .format(run_key))
 
-        try:
-            for run_index, channel_index, values in hdf5.read_columns(path, layout):
-                lib.aoe_set_arrays_column(
-                    self._handle, index, run_index, channel_index,
-                    values.ctypes.data_as(ctypes.POINTER(c_float)), values.size)
-        except (ValueError, OSError) as exc:
-            lib.aoe_end_arrays(self._handle, index)
-            self._invalidate_handles()
-            raise CoreError(str(exc))
-
+        # No samples yet. Reading the whole file here is what made a large one
+        # take minutes to appear, and most of what it read was never plotted:
+        # a page of four tiles asks for four channels out of forty. The headers
+        # and the run list are enough to draw the DATA tree and fill the
+        # parameter lists, and a column is fetched the first time something
+        # asks for it -- see _fill_pushed.
+        #
+        # end_arrays looks for a sidecar once the runs are known, so a file
+        # opened a second time is served from that instead and this reader is
+        # never asked for anything.
         lib.aoe_end_arrays(self._handle, index)
         self._pushed[path] = True
+        self._pushed_plans[index] = (path, layout, headers)
         self._invalidate_handles()
         return FileHandle(self, index)
+
+    # --------------------------------------------- pushed files, on demand
+
+    def _fill_pushed(self, file_index: int, sim_indices: Sequence[int],
+                     names: Sequence[str]) -> None:
+        """Fetch the columns of a pushed file that are not resident yet.
+
+        The pull half of the array route, and the reason a large HDF5 file
+        opens at once: nothing is read until something asks to draw it.
+
+        The core is asked first -- aoe_preload serves anything a sidecar can
+        cover -- and only what is still missing afterwards is read out of the
+        source. So the three ways a column can arrive are tried in order of
+        cost: already in memory, in the sidecar, or read from the file.
+        """
+        plan = self._pushed_plans.get(int(file_index))
+        if plan is None:
+            return
+        path, layout, headers = plan
+
+        # Asked of the core rather than worked out here: a computed channel
+        # needs whatever its formula depends on, through aliases and through
+        # other computed channels, and the formula table is the only thing that
+        # knows. "ALT_FT = ALT * 3.28" has to fetch ALT.
+        wanted = self.required_columns(file_index, names)
+        if not wanted:
+            return
+
+        runs = ([int(s) for s in sim_indices] if sim_indices
+                else list(range(len(layout.run_keys))))
+
+        missing = [(run, column) for run in runs for column in wanted
+                   if not lib.aoe_column_loaded(self._handle, int(file_index),
+                                                run, column)]
+        if not missing:
+            return
+
+        with self._pull_lock:
+            # Checked again inside the lock: another thread may have fetched
+            # exactly these while this one waited, and reading them twice is
+            # the cost this whole mechanism exists to avoid.
+            missing = [(run, column) for run, column in missing
+                       if not lib.aoe_column_loaded(
+                           self._handle, int(file_index), run, column)]
+            if not missing:
+                return
+            try:
+                for run, column, values in hdf5.read_selected(
+                        path, layout, missing):
+                    lib.aoe_set_arrays_column(
+                        self._handle, int(file_index), run, column,
+                        values.ctypes.data_as(ctypes.POINTER(c_float)),
+                        values.size)
+            except (ValueError, OSError) as exc:
+                # The file has moved or changed under us. Nothing to do but
+                # leave the columns empty, which draws as a gap rather than as
+                # a wrong number.
+                _log.warning("could not read %s: %s", path, exc)
+
+    def required_columns(self, file_index: int,
+                         names: Sequence[str]) -> List[int]:
+        """Which physical columns of a file the named channels need.
+
+        Follows aliases and formulas, so a computed channel reports the columns
+        underneath it rather than itself.
+        """
+        if not names:
+            return []
+        name_array = _core.string_array(list(names))
+        count = lib.aoe_required_columns(
+            self._handle, int(file_index), name_array, len(names), None, 0)
+        if count <= 0:
+            return []
+        buffer = (c_int * count)()
+        written = lib.aoe_required_columns(
+            self._handle, int(file_index), name_array, len(names), buffer, count)
+        return [int(buffer[i]) for i in range(min(written, count))]
+
+    def fill_pushed_completely(self, file_index: int) -> bool:
+        """Fetch every column of a pushed file. False if it is not one.
+
+        What a sidecar needs: the core writes one from resident columns, and
+        has no reader of its own to fill a gap it finds.
+        """
+        plan = self._pushed_plans.get(int(file_index))
+        if plan is None:
+            return False
+        _path, _layout, headers = plan
+        self._fill_pushed(file_index, [], headers)
+        return bool(lib.aoe_all_columns_resident(self._handle, int(file_index)))
+
+    def is_pushed_index(self, file_index: int) -> bool:
+        """Whether this file was read outside the core, by index."""
+        return int(file_index) in self._pushed_plans
 
     def is_pushed(self, path: str) -> bool:
         """True when this path was read outside the core and handed to it.
@@ -308,11 +421,23 @@ class Session:
         if handle is not None:
             self._pushed.pop(handle.path, None)
         lib.aoe_remove_file(self._handle, int(index))
+        # Removing a file shifts every later index, and the plans are keyed by
+        # index, so they are rebuilt from the paths rather than renumbered.
+        self._reindex_pushed_plans(int(index))
         # Removing a file shifts every later index, so the whole cache goes.
         self._invalidate_handles()
 
+    def _reindex_pushed_plans(self, removed: int) -> None:
+        plans = {}
+        for index, plan in self._pushed_plans.items():
+            if index == removed:
+                continue
+            plans[index - 1 if index > removed else index] = plan
+        self._pushed_plans = plans
+
     def clear(self) -> None:
         self._pushed.clear()
+        self._pushed_plans.clear()
         lib.aoe_clear_files(self._handle)
         self._invalidate_handles()
 
@@ -425,6 +550,8 @@ class Session:
         which callers should treat as "nothing to plot" rather than an error --
         different files in one study legitimately hold different channels.
         """
+        if self._pushed_plans:
+            self._fill_pushed(file_index, [int(sim_index)], [name])
         count = c_size_t(0)
         handle = ctypes.c_void_p()
         pointer = lib.aoe_channel_pinned(
@@ -453,6 +580,11 @@ class Session:
         lib.aoe_preload(
             self._handle, int(file_index), sims, n_sims, name_array, len(names)
         )
+        # After the core's own pass, not instead of it: a sidecar covers these
+        # far faster than the reader can, and what it covered is resident by
+        # now and will not be fetched again.
+        if self._pushed_plans:
+            self._fill_pushed(file_index, sim_indices, names)
 
     # ------------------------------------------------------------ plotting
 
@@ -653,6 +785,8 @@ class Session:
 
     def iso_values(self, file_index: int, name: str) -> np.ndarray:
         """Value of an ISO parameter for each simulation of a file (NaN if absent)."""
+        if int(file_index) in self._pushed_plans:
+            return self._pushed_iso_values(int(file_index), name)
         count = lib.aoe_iso_values(self._handle, int(file_index), encode(name), None, 0)
         if count <= 0:
             return np.empty(0, dtype=np.float32)
@@ -662,14 +796,68 @@ class Session:
         )
         return np.frombuffer(buffer, dtype=np.float32, count=min(written, count)).copy()
 
+    def _pushed_iso_values(self, file_index: int, name: str) -> np.ndarray:
+        """The same answer for a pushed file, read here rather than in the core.
+
+        The core finds an ISO value by reading the first record of a run
+        through its index, and a pushed file has no index there -- but the
+        reader can read element zero of a dataset, which costs a chunk rather
+        than a column. Doing it that way keeps an ISO scan cheap on a file
+        whose columns are otherwise fetched lazily.
+        """
+        plan = self._pushed_plans.get(file_index)
+        if plan is None:
+            return np.empty(0, dtype=np.float32)
+        path, layout, headers = plan
+
+        resolved = self.resolve(name)
+        try:
+            column = headers.index(resolved)
+        except ValueError:
+            try:
+                column = headers.index(name)
+            except ValueError:
+                return np.full(len(layout.run_keys), np.nan, dtype=np.float32)
+
+        key = (file_index, column)
+        cached = self._iso_cache.get(key)
+        if cached is not None:
+            return cached.copy()
+
+        with self._pull_lock:
+            try:
+                values = hdf5.read_first_values(path, layout, column)
+            except (ValueError, OSError) as exc:
+                _log.warning("could not read %s: %s", path, exc)
+                values = np.full(len(layout.run_keys), np.nan, dtype=np.float32)
+        self._iso_cache[key] = values
+        return values.copy()
+
     def iso_distinct(self, name: str) -> np.ndarray:
         """Sorted distinct values of an ISO parameter across every open file."""
         count = lib.aoe_iso_distinct(self._handle, encode(name), None, 0)
         if count <= 0:
+            values = np.empty(0, dtype=np.float32)
+        else:
+            buffer = (c_float * count)()
+            written = lib.aoe_iso_distinct(self._handle, encode(name), buffer,
+                                           count)
+            values = np.frombuffer(buffer, dtype=np.float32,
+                                   count=min(written, count)).copy()
+        if not self._pushed_plans:
+            return values
+
+        # The core's answer covers the files it parsed. A pushed file's values
+        # are known here, so the union is assembled here -- otherwise an ISO
+        # filter on an HDF5 file would offer no values to group by.
+        parts = [values]
+        for file_index in sorted(self._pushed_plans):
+            parts.append(self._pushed_iso_values(file_index, name))
+        merged = np.concatenate([p for p in parts if p.size])
+        merged = merged[np.isfinite(merged)]
+        if merged.size == 0:
             return np.empty(0, dtype=np.float32)
-        buffer = (c_float * count)()
-        written = lib.aoe_iso_distinct(self._handle, encode(name), buffer, count)
-        return np.frombuffer(buffer, dtype=np.float32, count=min(written, count)).copy()
+        return np.unique(merged).astype(np.float32)
 
     def iso_auto_group(self, values: np.ndarray, group_count: int) -> List[IsoGroup]:
         """Evenly spaced intervals over the observed range of ``values``."""

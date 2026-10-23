@@ -8,7 +8,7 @@
 # tracks header dependencies and recompiles only what changed. This script
 # exists for the first build on a machine that has a compiler and not much
 # else, and so that a clone has an obvious thing to run on either platform.
-# Application 2.1.2; these commands are unchanged.
+# Application 2.2.0; these commands are unchanged.
 #
 #   ./build.sh            build the core shared library into build/
 #   ./build.sh test       build and run the C++ self-tests

@@ -40,7 +40,7 @@ from ..model import (
     curve_line_key,
     tile_title,
 )
-from .. import projection, scales
+from .. import projection, scales, sync
 from ..session import Session
 from ..theme import (
     PLOT_AXIS_PT,
@@ -730,7 +730,21 @@ class _GroupPlan:
 class PlotTile(pg.PlotWidget):
     """A single plot showing one x parameter against several y parameters."""
 
+    # Class attributes, not just instance ones set in __init__. Both are read
+    # before they are written on some path -- _sync_report by the panel, which
+    # can be refreshed before this tile has drawn anything -- and a missing
+    # instance attribute on a partially built tile is the kind of absence that
+    # reads as "some object" rather than as "not yet", which is how a guard
+    # ends up testing the wrong thing. The defaults here are the truthful
+    # answers for a tile that has not aligned anything.
+    _sync_cache = None
+    _sync_report = (0, 0)
+
     activated = Signal(int)
+    # Double-click: fit this tile, and bring the panel that chooses its
+    # parameters forward. Two things from one gesture, because they are the
+    # two things wanted on arriving at a tile.
+    params_requested = Signal(int)
     cursor_moved = Signal(str)
     view_changed = Signal()
     # (file index, sim index, x value) of a point clicked in Inspect mode.
@@ -789,6 +803,10 @@ class PlotTile(pg.PlotWidget):
         # What the markers and bands currently on the plot were drawn from.
         # See _draw_overlays().
         self._overlays_drawn_for: Optional[tuple] = None
+        # The alignment, and the shifted axes it produces. Both are caches:
+        # see _sync_plan and _shifted_x.
+        self._sync_cache = None
+        self._shift_cache = {}
 
         # A window can never be made smaller than the sum of its parts, and a
         # 5x5 page is twenty-five plot widgets. QGraphicsView asks for a
@@ -939,6 +957,11 @@ class PlotTile(pg.PlotWidget):
         names = [tile.x_param] + list(tile.y_params)
         if tile.plot3d and tile.z_param:
             names.append(tile.z_param)
+        # The alignment is found by reading the channel the condition is about,
+        # so it has to be resident like any other -- and unlike the ISO
+        # parameters below, the whole column is needed, not its first sample.
+        if tile.sync_enabled and tile.sync_param:
+            names.append(tile.sync_param)
         # Colouring by ISO does *not* put the ISO parameter here, and that is
         # the point. iso_values() reads the first record of each block through
         # the index -- it touches no column memory at all, which is what made
@@ -1154,6 +1177,79 @@ class PlotTile(pg.PlotWidget):
                       size="{0}pt".format(pt(PLOT_TITLE_PT)))
 
     # ---------------------------------------------------------- ISO lookup
+
+    # -------------------------------------------------------------- sync
+
+    def _sync_plan(self, tile: TileState, by_file):
+        """How far each run moves, plus what to tell the user about it.
+
+        Returns (offsets, found, missing): the shift per run, how many runs the
+        condition was located in, and how many it was not. A run with no entry
+        in `offsets` is drawn where it always was.
+
+        Cached on everything the answer depends on, including the address and
+        length of both channels of every run -- so a reload, or a column
+        evicted and read back, recomputes, while the dozen rebuilds a restyle
+        or a marker drag causes do not. Without the cache this would scan the
+        condition channel of every run on every rebuild.
+        """
+        if not (tile.sync_enabled and tile.sync_param and tile.x_param):
+            self._sync_cache = None
+            return {}, 0, 0
+
+        runs = [(file_index, sim_index)
+                for file_index, sims in sorted(by_file.items())
+                for sim_index in sims]
+
+        series = []
+        probe = []
+        for key in runs:
+            x = self._session.channel(key[0], key[1], tile.x_param)
+            y = self._session.channel(key[0], key[1], tile.sync_param)
+            series.append((key, x, y))
+            probe.append((x.ctypes.data, x.size, y.ctypes.data, y.size))
+
+        signature = (tile.sync_param, tile.sync_condition, tile.sync_level,
+                     tile.sync_target, tile.sync_target_value, tile.x_param,
+                     tuple(runs), tuple(probe))
+        if self._sync_cache is not None and self._sync_cache[0] == signature:
+            return self._sync_cache[1]
+
+        events = {key: sync.find_event(x, y, tile.sync_condition,
+                                       tile.sync_level)
+                  for key, x, y in series}
+        shifts = sync.offsets(events, tile.sync_target, tile.sync_target_value,
+                              order=runs)
+        found = sum(1 for event in events.values() if event.found)
+        answer = (shifts, found, len(events) - found)
+        self._sync_cache = (signature, answer)
+        return answer
+
+    def _shifted_x(self, file_index: int, sim_index: int, x: np.ndarray,
+                   offset: float) -> np.ndarray:
+        """`x` moved by `offset`, as the same array object every time.
+
+        The identity matters as much as the arithmetic. _reuse_signature
+         compares buffer addresses to decide whether a group still draws the
+        same thing, so handing out a fresh copy per rebuild would make every
+        group look new and re-decimate the whole page on every restyle. Keyed
+        on the source buffer, so a reload or an eviction produces a new one.
+        """
+        if not offset:
+            return x
+        # setdefault on the instance dictionary rather than a class attribute:
+        # a mutable default on the class would be one cache shared by every
+        # tile of the page, and two tiles aligning the same run differently
+        # would overwrite each other's axis.
+        cache = self.__dict__.setdefault("_shift_cache", {})
+        key = (file_index, sim_index)
+        cached = cache.get(key)
+        if (cached is not None and cached[0] == x.ctypes.data
+                and cached[1] == x.size and cached[2] == offset):
+            return cached[3]
+        shifted = sync.shift(x, offset)
+        cache[key] = (x.ctypes.data, x.size, offset, shifted)
+        return shifted
 
     def _iso_labels(self, iso_param: str):
         """(file, sim) -> ISO label, plus label -> where it sits in the legend.
@@ -1408,6 +1504,7 @@ class PlotTile(pg.PlotWidget):
             # dropped on it gets fitted rather than inheriting the range left
             # over from whatever used to be here.
             tile.view_initialised = False
+            self._sync_report = (0, 0)
             self._draw_overlays()
             self._refresh_texts()
             return
@@ -1424,6 +1521,11 @@ class PlotTile(pg.PlotWidget):
         by_file: Dict[int, List[int]] = {}
         for file_index, sim_index in self._state.plotted_sims():
             by_file.setdefault(file_index, []).append(sim_index)
+
+        # Before the walk below, because every curve of a run is shifted by
+        # the same amount and finding that amount reads a whole channel.
+        sync_offsets, sync_found, sync_missing = self._sync_plan(tile, by_file)
+        self._sync_report = (sync_found, sync_missing)
 
         iso_labels, iso_ranks = (
             self._iso_labels(tile.color_iso_param)
@@ -1474,6 +1576,9 @@ class PlotTile(pg.PlotWidget):
                 x = self._session.channel(file_index, sim_index, tile.x_param)
                 if x.size == 0:
                     continue
+                offset = sync_offsets.get((file_index, sim_index))
+                if offset:
+                    x = self._shifted_x(file_index, sim_index, x, offset)
 
                 sim = simulations[sim_index]
                 iso_label = iso_labels.get((file_index, sim_index), "")
@@ -1745,11 +1850,19 @@ class PlotTile(pg.PlotWidget):
         series = []
         x_bounds = y_bounds = z_bounds = None
 
+        by_file: Dict[int, List[int]] = {}
+        for file_index, sim_index in self._state.plotted_sims():
+            by_file.setdefault(file_index, []).append(sim_index)
+        sync_offsets, _found, _missing = self._sync_plan(tile, by_file)
+
         for file_index, sim_index in self._state.plotted_sims():
             handle = self._session.file(file_index)
             if handle is None or sim_index >= handle.simulation_count:
                 continue
             x = self._session.channel(file_index, sim_index, tile.x_param)
+            offset = sync_offsets.get((file_index, sim_index))
+            if offset:
+                x = self._shifted_x(file_index, sim_index, x, offset)
             y = self._session.channel(file_index, sim_index, y_param)
             z = self._session.channel(file_index, sim_index, tile.z_param)
             count = min(x.size, y.size, z.size)
@@ -2932,8 +3045,17 @@ class PlotTile(pg.PlotWidget):
             self._inspect_dot.setVisible(False)
 
     def mouseDoubleClickEvent(self, event) -> None:
-        """Refit the view, honouring whichever axes are locked."""
+        """Fit the view, and ask for the parameter panel.
+
+        Double-clicking a tile is how you say "this one, now" -- so as well as
+        re-framing it, it makes the tile active and opens PARAMS, which is
+        where nine times out of ten the next click was going anyway. The
+        activation goes first: PARAMS shows the active tile, and opening it on
+        the previous one would be worse than not opening it at all.
+        """
+        self.activated.emit(self._index)
         self.autoscale()
+        self.params_requested.emit(self._index)
         event.accept()
 
     def autoscale(self) -> None:

@@ -247,6 +247,11 @@ class PlotItem:
         self.grid_calls = []
         self.log_calls = []
         self.label_calls = []
+        # Range writes are recorded because fitting is behaviour now: a tile
+        # that has just acquired its first curve is supposed to frame itself,
+        # and every later rebuild is supposed to leave the frame alone. Without
+        # these the fit falls through to _Any and no test can see either half.
+        self.range_writes = []
 
     def addItem(self, item, *args, **kwargs):
         self.items.append(item)
@@ -261,6 +266,16 @@ class PlotItem:
         self.removed.append(item)
         if self.legend is not None:
             self.legend.removeItem(item)
+
+    def setXRange(self, low, high, **kwargs):
+        self.range_writes.append(("x", float(low), float(high)))
+        self._view_range[0] = [float(low), float(high)]
+        self.vb._range[0] = [float(low), float(high)]
+
+    def setYRange(self, low, high, **kwargs):
+        self.range_writes.append(("y", float(low), float(high)))
+        self._view_range[1] = [float(low), float(high)]
+        self.vb._range[1] = [float(low), float(high)]
 
     def getViewBox(self):
         return self.vb
@@ -707,6 +722,12 @@ class QTreeWidgetItem:
         child.tree = self.tree
         self._children.append(child)
 
+    def setHidden(self, hidden):
+        self._hidden = bool(hidden)
+
+    def isHidden(self):
+        return bool(getattr(self, "_hidden", False))
+
     def child(self, index):
         return self._children[index] if 0 <= index < len(self._children) else None
 
@@ -839,6 +860,38 @@ class QLineEdit:
 
     def text(self):
         return self._text
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return _Any()
+
+
+class QPushButton:
+    """Text, tooltip and a clicked signal.
+
+    Most buttons in the panels are fire-and-forget, which an auto-made stub
+    serves well enough. This exists for the few whose *label* is part of the
+    behaviour -- DATA retitles Plot all when a filter narrows its scope -- and
+    a test that reads a label back needs something that remembers one.
+    """
+
+    def __init__(self, text="", *args, **kwargs):
+        self._text = text
+        self._tip = ""
+        self.clicked = _BoundSignal()
+
+    def setText(self, text):
+        self._text = text
+
+    def text(self):
+        return self._text
+
+    def setToolTip(self, tip):
+        self._tip = tip
+
+    def toolTip(self):
+        return self._tip
 
     def __getattr__(self, name):
         if name.startswith("__"):
@@ -1048,6 +1101,7 @@ def install() -> None:
     widgets.QTreeWidgetItem = QTreeWidgetItem
     widgets.QLabel = QLabel
     widgets.QLineEdit = QLineEdit
+    widgets.QPushButton = QPushButton
     widgets.QSpinBox = QSpinBox
 
     pyside = types.ModuleType("PySide6")

@@ -6,7 +6,7 @@
 % passages the 2.1.0 and 2.1.1 releases invalidated rewritten rather than
 % appended to.
 %
-% Build:  pdflatex aoeViewer-2.1.2-User-and-Reference-Guide.tex   (three times,
+% Build:  pdflatex aoeViewer-2.2.0-User-and-Reference-Guide.tex   (three times,
 %         so the table of contents and the cross-references settle)
 
 \documentclass[11pt,a4paper,oneside]{report}
@@ -43,13 +43,13 @@
 \definecolor{aoeshade}{HTML}{F4F6F8}
 
 \hypersetup{
-  pdftitle={aoeViewer 2.1.2 -- User and Reference Guide},
+  pdftitle={aoeViewer 2.2.0 -- User and Reference Guide},
   pdfauthor={Paulo R. A. Gilz},
   pdfsubject={The interface, the algorithms, the file format, the C ABI and the scripting API},
   colorlinks=false,
 }
 
-\newcommand{\appver}{2.1.2}
+\newcommand{\appver}{2.2.0}
 
 \pagestyle{fancy}
 \fancyhf{}
@@ -822,6 +822,28 @@ tooltip gains a sentence explaining that it is held back rather than unselected.
 That greying is the visible half of the two-constraint model described in
 \S\ref{sec:iso}.
 
+\section{Filtering the run list}
+
+\begin{aoenew}{New in 2.2.0}
+The box above the DATA tree.
+\end{aoenew}
+
+Runs are often named \code{X.Y.Z} and often number in the hundreds, so the slow
+part of this panel is scrolling. Typing in the box hides what does not match.
+
+A bare pattern matches any part of the name: \code{2.1} shows \code{2.1.3} and
+\code{1.2.1} alike, because the middle field is as often the interesting one as
+the first. A pattern containing a wildcard is matched against the whole name
+instead, so \code{2.*.3} means first field 2, last field 3. Matching ignores
+case, and a file whose own name matches keeps all of its runs --- having asked
+for that file, hiding most of it would be perverse.
+
+It is a view and nothing else: a hidden run keeps its tick and goes on being
+plotted, and clearing the box brings it back exactly as it was. While a filter
+is typed, \emph{Plot all} and \emph{Plot none} read \emph{(shown)} and act only
+on the rows on screen; ``show me 2.1*, then plot all of them'' is the reason to
+have a filter at all.
+
 \section{PARAMS --- choosing the axes of a tile}
 \label{sec:params}
 
@@ -1459,6 +1481,21 @@ and the spin boxes follow; clicking outside every note passes the click through,
 so empty space still selects the tile.
 
 \chapter{Pages, grids and tiles}
+
+\begin{aoenew}{New in 2.2.0}
+\textbf{Duplicate} copies the whole page, tiles and all: the copy is named
+\code{<name> (2)}, inserted straight after the original and made active, since
+a duplicate is nearly always the start of a variation on the page it came from.
+Duplicating a duplicate gives \code{(3)} rather than \code{(2) (2)}.
+
+The \textbf{remove} button now asks before removing a page, and says how many
+configured tiles
+are on it. It is one character wide and sits beside Add; a mis-click used to
+take a page of work with no way back.
+
+Double-clicking a tile makes it active, fits it \emph{and} brings PARAMS
+forward --- three things from the gesture that means ``this tile, now''.
+\end{aoenew}
 \label{ch:pages}
 
 \section{The page and tile bar}
@@ -1945,6 +1982,93 @@ dialog's filter, which accepts \code{*.aoe}, \code{*.dat}, \code{*.txt},
 \code{*.res} and \code{*.out}. Those are the same format under different
 customary names; the two real dialects are the packed and indexed header forms,
 and they are distinguished by content rather than by filename.
+
+\section{SYNC --- aligning the runs on an event}
+\label{sec:sync}
+
+\begin{aoenew}{New in 2.2.0}
+A thirteenth panel. Earlier versions could compare runs only against the clock
+they were recorded on.
+\end{aoenew}
+
+A channel logged over several runs of the same manoeuvre carries that manoeuvre
+at a different place in each run, because each recording started at a different
+moment. Plotted against \code{TIME} the curves are the same shape smeared
+sideways, and comparing them means comparing the shapes rather than the clocks.
+
+This panel shifts each run along the x axis so that a chosen event lands in the
+same place for all of them. Nothing in the file changes and no sample is
+altered; only where the curves are drawn.
+
+\subsection*{The event}
+
+\begin{longtable}{@{}p{0.34\textwidth}p{0.6\textwidth}@{}}
+\toprule
+\textbf{Condition} & \textbf{What it finds} \\
+\midrule
+\endhead
+first rises above & the first sample past a level you give \\
+first falls below & the same, downwards \\
+first crosses & either direction, judged against where the channel started \\
+first starts to rise & no level needed: the first move of 2\% of the channel's
+own range away from its first sample \\
+first starts to fall & the same, downwards \\
+reaches its maximum & the largest sample of the run \\
+reaches its minimum & the smallest \\
+\bottomrule
+\end{longtable}
+
+The two \emph{starts to} conditions take a threshold in percent of the
+channel's own span rather than an absolute level, which is what lets the same
+setting mean the same thing on a speed in m/s and an angle in radians.
+
+\subsection*{Where it goes}
+
+\begin{longtable}{@{}p{0.34\textwidth}p{0.6\textwidth}@{}}
+\toprule
+\textbf{Move the event to} & \textbf{Result} \\
+\midrule
+\endhead
+zero & the axis reads as time since the event \\
+the first run's event & everything moves onto the first run drawn, which keeps
+the original axis values meaningful \\
+a value I choose & for lining two tiles up on one reference \\
+\bottomrule
+\end{longtable}
+
+A car accelerating from rest, logged five times: choose \code{SPEED},
+\emph{first rises above}, \code{0.5}, and \emph{zero}. Every run is then drawn
+with $x = 0$ at the moment it began to move.
+
+\subsection*{What it does with the awkward cases}
+
+\begin{aoenote}{Three decisions worth knowing}
+\textbf{The event is interpolated, not rounded to a sample.} Two runs logged at
+different rates would otherwise align only to the sampling interval, which is
+visible as a step between them. Where the crossing itself falls inside a gap
+--- \code{NaN}, which is what an unreadable token becomes --- the first
+readable sample past the level is reported instead, because there is nothing to
+interpolate across.
+
+\textbf{A run in which the event never happens is left where it is}, and
+counted. The panel reports ``7 run(s) aligned, 1 left unaligned because the
+event was not found in them'', and \emph{List the events} names each run with
+the value found in it. Hiding such a run would lose data; shifting it by a
+guess would be a lie.
+
+\textbf{Markers and bands are evaluated in each run's own axis.} They go on
+meaning ``this instant in this run'' and travel with the curve they mark,
+rather than being reinterpreted as an offset from the event.
+\end{aoenote}
+
+The alignment belongs to the tile, so one page can hold the aligned comparison
+beside the raw one. \emph{Apply to every tile on this page} copies it across.
+The title says so as well: \code{ALT = f(TIME)~~[0 = SPEED event]}.
+
+It is saved in the workspace. A workspace written before this existed carries
+none of these fields, which the loader reads as the default --- off --- so it
+opens exactly as it was saved. The schema version is unchanged, deliberately:
+bumping it would make the workspace unreadable by the version that wrote it.
 
 \section{Files that are not AOE: HDF5}
 \label{sec:hdf5}
@@ -3424,7 +3548,7 @@ two-space indentation. The schema is at version~3.
 \begin{aoecode}
 {
   "version": 3,
-  "app_version": "2.1.2",
+  "app_version": "2.2.0",
   "files":    ["/abs/path/run_a.aoe"],
   "computed": {"LOAD_FACTOR": "NZ * 9.80665"},
   "aliases":  {"Angle of attack": "ALPHA"},

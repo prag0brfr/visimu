@@ -8,6 +8,7 @@ them decoupled is what makes it cheap to add the remaining tabs later.
 
 from __future__ import annotations
 
+import fnmatch
 from contextlib import contextmanager
 
 from typing import Dict, List, Optional
@@ -29,6 +30,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGridLayout,
     QGroupBox,
+    QMessageBox,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -52,7 +54,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import isogroups
+from .. import isogroups, sync
 from ..model import (
     DASH_STYLES,
     SYMBOL_LABELS,
@@ -197,6 +199,32 @@ class DataPanel(QWidget):
         buttons.addWidget(clear)
         layout.addLayout(buttons)
 
+        # Runs are routinely named X.Y.Z and routinely number in the
+        # hundreds, so finding the handful you want by scrolling is the slow
+        # part of using this panel. Typing "2.1" shows 2.1.3 and 1.2.1 alike:
+        # the match is on any part of the name, not a prefix, because the
+        # middle field is as often the interesting one as the first.
+        self.filter_edit = QLineEdit()
+        self.filter_edit.setPlaceholderText("Filter runs (e.g. 2.1, or 2.*.3 )")
+        self.filter_edit.setToolTip(
+            "Show only runs whose name contains what you type.\n"
+            "Wildcards work: 2.*.3 matches 2.1.3 and 2.57.3.\n"
+            "A file stays visible while any of its runs match, and a file "
+            "whose own name matches keeps all of its runs.\n"
+            "This hides rows; it never changes what is plotted."
+        )
+        self._filter_timer = QTimer(self)
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.setInterval(FILTER_IDLE_MS)
+        self._filter_timer.timeout.connect(self._apply_filter)
+        self.filter_edit.textChanged.connect(self._on_filter_typed)
+        layout.addWidget(self.filter_edit)
+
+        self.filter_count = QLabel("")
+        self.filter_count.setObjectName("Hint")
+        self.filter_count.setVisible(False)
+        layout.addWidget(self.filter_count)
+
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["File / run"])
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -228,6 +256,7 @@ class DataPanel(QWidget):
         # carry their own box: with three studies open, "all of them" is rarely
         # the question. The tooltips say which scope each control has, since
         # the buttons and the boxes now look equally like the obvious one.
+        self.select_buttons = {}
         for text, tip, handler in (
                 ("Plot all", "Every run of every loaded file",
                  lambda: self._set_all(True)),
@@ -237,6 +266,7 @@ class DataPanel(QWidget):
             button.setToolTip(tip)
             button.clicked.connect(handler)
             selection.addWidget(button)
+            self.select_buttons[text] = (button, tip)
         layout.addLayout(selection)
 
         hint = QLabel(
@@ -246,6 +276,109 @@ class DataPanel(QWidget):
         hint.setObjectName("Hint")
         hint.setWordWrap(True)
         layout.addWidget(hint)
+
+    # ------------------------------------------------------------- filter
+
+    def _on_filter_typed(self, _text: str) -> None:
+        # Debounced for the same reason the PARAMS filter is: on a study of a
+        # thousand runs, hiding and showing rows on every keystroke is visible
+        # as lag while typing a four-character pattern.
+        self._filter_timer.start()
+
+    @staticmethod
+    def matches(pattern: str, name: str) -> bool:
+        """Whether one run name answers the filter.
+
+        A bare pattern matches anywhere in the name, which is what makes "2.1"
+        find both 2.1.3 and 1.2.1. A pattern containing a wildcard is matched
+        as a whole name instead, so "2.*.3" means first field 2, last field 3,
+        and nothing in between is assumed.
+        """
+        pattern = pattern.strip().lower()
+        if not pattern:
+            return True
+        name = name.lower()
+        if any(ch in pattern for ch in "*?[" ):
+            return fnmatch.fnmatch(name, pattern)
+        return pattern in name
+
+    def _filter_text(self) -> str:
+        return self.filter_edit.text().strip()
+
+    def _apply_filter(self) -> None:
+        """Hide the rows that do not match, leaving the selection untouched.
+
+        Rows are hidden rather than the tree rebuilt: a rebuild would cost the
+        scroll position, the expanded state and the check marks, which is the
+        very thing _tree_signature exists to avoid.
+        """
+        pattern = self._filter_text()
+        shown = 0
+        total = 0
+        for i in range(self.tree.topLevelItemCount()):
+            parent = self.tree.topLevelItem(i)
+            file_matches = self.matches(pattern, parent.text(0))
+            visible_children = 0
+            for j in range(parent.childCount()):
+                child = parent.child(j)
+                total += 1
+                # A file whose own name matches keeps all of its runs: having
+                # asked for that file, hiding most of it would be perverse.
+                ok = file_matches or self.matches(pattern, child.text(0))
+                child.setHidden(not ok)
+                if ok:
+                    visible_children += 1
+                    shown += 1
+            parent.setHidden(bool(pattern) and visible_children == 0
+                             and not file_matches)
+            if pattern and visible_children:
+                parent.setExpanded(True)
+
+        if pattern:
+            self.filter_count.setText(
+                "{0} of {1} run(s) shown".format(shown, total))
+            self.filter_count.setVisible(True)
+        else:
+            self.filter_count.setVisible(False)
+        self._describe_selection_scope(bool(pattern))
+
+    def _describe_selection_scope(self, filtered: bool) -> None:
+        """Say what Plot all and Plot none will act on.
+
+        With a filter typed, they act on what is on screen -- "show me 2.1*,
+        then plot all of them" is the reason to have a filter at all. The
+        buttons say so, because a button that silently changes scope is worse
+        than one that does not change it.
+        """
+        for text, (button, tip) in self.select_buttons.items():
+            if filtered:
+                button.setText(text + " (shown)")
+                button.setToolTip(tip + "\n\nA filter is active, so this "
+                                        "applies only to the runs on screen.")
+            else:
+                button.setText(text)
+                button.setToolTip(tip)
+
+    def _visible_runs(self):
+        """(file index, run index) for every run the filter admits, or None.
+
+        None means no filter is typed, which the callers read as "everything"
+        -- deliberately not the same as a filter that happens to match
+        everything, since that still has to be driven from the tree.
+        """
+        if not self._filter_text():
+            return None
+        runs = []
+        for i in range(self.tree.topLevelItemCount()):
+            parent = self.tree.topLevelItem(i)
+            for j in range(parent.childCount()):
+                child = parent.child(j)
+                if child.isHidden():
+                    continue
+                payload = child.data(0, Qt.ItemDataRole.UserRole)
+                if payload and payload[0] == "sim":
+                    runs.append((payload[1], payload[2]))
+        return runs
 
     def _tree_signature(self):
         """What the tree is *made of* -- deliberately not what is ticked in it.
@@ -411,6 +544,8 @@ class DataPanel(QWidget):
             self.tree.blockSignals(blocked)
             self.tree.setUpdatesEnabled(True)
             self._updating = False
+        # The rows are new, so whatever was hidden before is not hidden now.
+        self._apply_filter()
 
     def _should_expand(self, file_handle) -> bool:
         """Whether this file's runs are shown without being asked for."""
@@ -501,6 +636,18 @@ class DataPanel(QWidget):
         # same set of runs, but the session is the one that knows it -- and a
         # loop over widget items to decide what the state should be had the
         # dependency the wrong way round.
+        #
+        # The exception is a filtered tree, where the question being asked is
+        # about what is on screen, and the tree is the only thing that knows
+        # what that is.
+        visible = self._visible_runs()
+        if visible is not None:
+            for file_index, sim_index in visible:
+                self._state.set_selected(file_index, sim_index, on)
+            self._sync_check_states()
+            self.selection_changed.emit()
+            return
+
         for handle in self._session.files:
             for sim in handle.simulations:
                 self._state.set_selected(handle.index, sim.index, on)
@@ -3058,6 +3205,309 @@ class StylePanel(QWidget):
 # Axis scaling
 # ==========================================================================
 
+
+
+class SyncPanel(QWidget):
+    """Align the runs of one tile on an event instead of on the clock.
+
+    The case this exists for: a car accelerating from rest, logged five times.
+    Each recording started at a different moment, so plotted against TIME the
+    five curves are the same shape smeared sideways, and comparing them means
+    comparing the shapes rather than the clocks. The question the user wants to
+    ask is "line these up where the speed began to rise", and that is what this
+    panel asks: name a channel, name a condition, and every run is shifted so
+    the instant the condition first holds lands in the same place.
+
+    Per tile, deliberately. One page routinely carries the aligned comparison
+    beside the raw one, and that is the arrangement that shows what the
+    alignment did.
+    """
+
+    sync_changed = Signal()
+
+    def __init__(self, session: Session, state: AppState, parent=None):
+        super().__init__(parent)
+        self._session = session
+        self._state = state
+        self._updating = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
+
+        self.tile_label = QLabel("")
+        self.tile_label.setObjectName("Hint")
+        self.tile_label.setWordWrap(True)
+        layout.addWidget(self.tile_label)
+
+        self.enabled = QCheckBox("Align the runs on an event")
+        self.enabled.setToolTip(
+            "Shift each run along the x axis so that the chosen event lands "
+            "in the same place for all of them.\n"
+            "Nothing in the file changes and no sample is altered: only where "
+            "the curves are drawn."
+        )
+        self.enabled.toggled.connect(self._on_changed)
+        layout.addWidget(self.enabled)
+
+        box = QGroupBox("The event")
+        form = QFormLayout(box)
+
+        self.param_combo = QComboBox()
+        self.param_combo.setToolTip(
+            "The channel the condition is about. It does not have to be "
+            "plotted on this tile."
+        )
+        self.param_combo.currentTextChanged.connect(self._on_changed)
+        form.addRow("Channel", self.param_combo)
+
+        self.condition_combo = QComboBox()
+        for key, label in sync.CONDITIONS:
+            self.condition_combo.addItem(label, key)
+        self.condition_combo.setToolTip(
+            "What counts as the event.\n\n"
+            "first rises above / falls below: the first sample past a level "
+            "you choose, interpolated between samples.\n"
+            "first crosses: the same, in whichever direction the channel "
+            "happens to approach it from.\n"
+            "first starts to rise / fall: no level needed — the first move of "
+            "2% of the channel's own range away from where it started.\n"
+            "reaches its maximum / minimum: the extreme of the run."
+        )
+        self.condition_combo.currentIndexChanged.connect(self._on_changed)
+        form.addRow("Condition", self.condition_combo)
+
+        self.level = QDoubleSpinBox()
+        self.level.setRange(-1e12, 1e12)
+        self.level.setDecimals(6)
+        self.level.setSingleStep(0.1)
+        self.level.setKeyboardTracking(False)
+        self.level.setToolTip("The level the condition is about.")
+        self.level.valueChanged.connect(self._on_changed)
+        form.addRow("Level", self.level)
+
+        layout.addWidget(box)
+
+        target_box = QGroupBox("Move the event to")
+        target_form = QFormLayout(target_box)
+
+        self.target_combo = QComboBox()
+        for key, label in sync.TARGETS:
+            self.target_combo.addItem(label, key)
+        self.target_combo.setToolTip(
+            "zero: the event becomes x = 0, so the axis reads as time since "
+            "the event.\n"
+            "the first run's event: everything moves onto the first run, which "
+            "keeps the original axis values meaningful.\n"
+            "a value I choose: for lining two tiles up on the same reference."
+        )
+        self.target_combo.currentIndexChanged.connect(self._on_changed)
+        target_form.addRow("Where", self.target_combo)
+
+        self.target_value = QDoubleSpinBox()
+        self.target_value.setRange(-1e12, 1e12)
+        self.target_value.setDecimals(6)
+        self.target_value.setSingleStep(0.1)
+        self.target_value.setKeyboardTracking(False)
+        self.target_value.valueChanged.connect(self._on_changed)
+        target_form.addRow("Value", self.target_value)
+
+        layout.addWidget(target_box)
+
+        self.report = QLabel("")
+        self.report.setObjectName("Hint")
+        self.report.setWordWrap(True)
+        layout.addWidget(self.report)
+
+        preview = QPushButton("List the events")
+        preview.setToolTip(
+            "Show where the event was found in each run, and which runs it "
+            "was not found in."
+        )
+        preview.clicked.connect(self._show_events)
+        layout.addWidget(preview)
+
+        apply_all = QPushButton("Apply to every tile on this page")
+        apply_all.setToolTip(
+            "Copy this alignment to the other tiles of this page, so a page "
+            "of channels can be read against one event."
+        )
+        apply_all.clicked.connect(self._apply_to_page)
+        layout.addWidget(apply_all)
+
+        hint = QLabel(
+            "Runs in which the event is never found are left where they are, "
+            "and counted above. Markers and bands keep their meaning in each "
+            "run's own axis, so they travel with the curve they mark."
+        )
+        hint.setObjectName("Hint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        layout.addStretch(1)
+
+    # ------------------------------------------------------------ refresh
+
+    def refresh(self) -> None:
+        tile = self._state.tile
+        self._updating = True
+        try:
+            self.tile_label.setText("Tile {0}: {1}".format(
+                self._state.active_tile + 1, tile_title(tile)))
+
+            names = list(self._session.plottable_parameters)
+            current = tile.sync_param
+            self.param_combo.clear()
+            self.param_combo.addItems(names)
+            if current and current not in names:
+                # Named in the tile but absent from the open files: shown so
+                # the panel agrees with the tile rather than silently
+                # answering with a different channel.
+                self.param_combo.addItem(current)
+            if current:
+                self.param_combo.setCurrentText(current)
+            elif names:
+                # TIME is never the interesting condition channel, so the
+                # default lands on the first channel that is not the x axis.
+                suggestion = next((n for n in names if n != tile.x_param),
+                                  names[0])
+                self.param_combo.setCurrentText(suggestion)
+
+            self.enabled.setChecked(tile.sync_enabled)
+            self._select_data(self.condition_combo, tile.sync_condition)
+            self._select_data(self.target_combo, tile.sync_target)
+            self.level.setValue(float(tile.sync_level))
+            self.target_value.setValue(float(tile.sync_target_value))
+        finally:
+            self._updating = False
+        self._update_enabled_state()
+        self._describe()
+
+    @staticmethod
+    def _select_data(combo: QComboBox, key: str) -> None:
+        for index in range(combo.count()):
+            if combo.itemData(index) == key:
+                combo.setCurrentIndex(index)
+                return
+        combo.setCurrentIndex(0)
+
+    def _update_enabled_state(self) -> None:
+        """Grey out what the current condition does not use.
+
+        A level box that is read by nothing is worse than no level box: it
+        invites a number and then ignores it.
+        """
+        on = self.enabled.isChecked()
+        condition = self.condition_combo.currentData()
+        for widget in (self.param_combo, self.condition_combo,
+                       self.target_combo):
+            widget.setEnabled(on)
+        self.level.setEnabled(on and condition in ("above", "below",
+                                                   "crosses"))
+        self.target_value.setEnabled(
+            on and self.target_combo.currentData() == "value")
+
+    def _describe(self) -> None:
+        tile = self._state.tile
+        if not tile.sync_enabled:
+            self.report.setText("Off: every run is drawn at its own x values.")
+            return
+        line = sync.describe(tile.sync_condition, tile.sync_param,
+                             tile.sync_level, tile.sync_target,
+                             tile.sync_target_value)
+        found, missing = self._counts()
+        if missing:
+            line += "\n{0} run(s) aligned, {1} left unaligned because the " \
+                    "event was not found in them.".format(found, missing)
+        elif found:
+            line += "\n{0} run(s) aligned.".format(found)
+        self.report.setText(line)
+
+    def _counts(self):
+        """How the last redraw got on, as (aligned, not found).
+
+        Read off the tile that drew it rather than recomputed here: the drawing
+        is what the user is looking at, and a second answer computed in the
+        panel could disagree with it.
+        """
+        window = self.window()
+        grid = getattr(window, "grid", None)
+        if grid is None:
+            return 0, 0
+        tiles = grid.tiles()
+        index = self._state.active_tile
+        if index >= len(tiles):
+            return 0, 0
+        return getattr(tiles[index], "_sync_report", (0, 0))
+
+    # ------------------------------------------------------------- edits
+
+    def _on_changed(self, *_args) -> None:
+        if self._updating:
+            return
+        tile = self._state.tile
+        tile.sync_enabled = self.enabled.isChecked()
+        tile.sync_param = self.param_combo.currentText().strip()
+        tile.sync_condition = self.condition_combo.currentData() or "above"
+        tile.sync_level = float(self.level.value())
+        tile.sync_target = self.target_combo.currentData() or "zero"
+        tile.sync_target_value = float(self.target_value.value())
+        self._state.dirty = True
+        self._update_enabled_state()
+        self.sync_changed.emit()
+        self._describe()
+
+    def _apply_to_page(self) -> None:
+        source = self._state.tile
+        page = self._state.page
+        for tile in page.visible_tiles():
+            if tile is source:
+                continue
+            tile.sync_enabled = source.sync_enabled
+            tile.sync_param = source.sync_param
+            tile.sync_condition = source.sync_condition
+            tile.sync_level = source.sync_level
+            tile.sync_target = source.sync_target
+            tile.sync_target_value = source.sync_target_value
+        self._state.dirty = True
+        self.sync_changed.emit()
+
+    def _show_events(self) -> None:
+        """Where the event is in each run, run by run.
+
+        The counts in the panel say how many matched; this says which, and
+        that is the difference between knowing the alignment is imperfect and
+        knowing which run to go and look at.
+        """
+        tile = self._state.tile
+        if not (tile.sync_param and tile.x_param):
+            QMessageBox.information(self, "Nothing to list",
+                                    "Choose a channel and an x axis first.")
+            return
+
+        lines = []
+        for file_index, sim_index in self._state.plotted_sims():
+            handle = self._session.file(file_index)
+            if handle is None or sim_index >= handle.simulation_count:
+                continue
+            x = self._session.channel(file_index, sim_index, tile.x_param)
+            y = self._session.channel(file_index, sim_index, tile.sync_param)
+            event = sync.find_event(x, y, tile.sync_condition, tile.sync_level)
+            name = handle.simulations[sim_index].name
+            if event.found:
+                lines.append("{0}:  {1} = {2:g}".format(
+                    name, tile.x_param, event.x))
+            else:
+                lines.append("{0}:  not found — {1}".format(name,
+                                                            event.reason))
+            if len(lines) >= 200:
+                lines.append("… (first 200 runs)")
+                break
+
+        if not lines:
+            lines = ["No runs are selected."]
+        QMessageBox.information(self, "Where the event is",
+                                "\n".join(lines))
 
 class ScalePanel(QWidget):
     """Fix the displayed range of either axis, per tile or across a variable.

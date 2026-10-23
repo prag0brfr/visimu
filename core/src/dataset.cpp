@@ -417,8 +417,11 @@ bool Dataset::begin_arrays(const std::string& path, const std::vector<std::strin
     }
     if (key_name_.empty()) key_name_ = name_;
 
-    // A sidecar describes a parse of this path. There is no parse here, so any
-    // sidecar lying beside the file belongs to something else.
+    // A sidecar beside a pushed file is one this program wrote from the
+    // samples it was handed, and it fingerprints the same source -- so if one
+    // matches, it serves the columns and the reader above is never asked for
+    // them. Dropped first, because what is attached describes whatever this
+    // dataset held before.
     cache_.reset();
     fingerprint_ = SourceFingerprint{};
 
@@ -434,6 +437,13 @@ bool Dataset::begin_arrays(const std::string& path, const std::vector<std::strin
     return true;
 }
 
+void Dataset::end_arrays_attach_cache() {
+    // After the runs exist, not before: a sidecar is indexed by
+    // [column * runs + run], so attaching one to a dataset that does not yet
+    // know how many runs it has would bounds-check against nothing.
+    if (arrays_backed_) attach_cache();
+}
+
 int Dataset::add_arrays_sim(const std::string& id) {
     if (!arrays_backed_) return -1;
 
@@ -444,6 +454,24 @@ int Dataset::add_arrays_sim(const std::string& id) {
     sim->columns.resize(headers_.size());
     sims_.push_back(std::move(sim));
     return static_cast<int>(sims_.size()) - 1;
+}
+
+bool Dataset::column_loaded(std::size_t sim_index, int column) const {
+    if (sim_index >= sims_.size()) return false;
+    if (column < 0 || static_cast<std::size_t>(column) >= headers_.size())
+        return false;
+    const Simulation& sim = *sims_[sim_index];
+    LockGuard guard(sim.lock);
+    if (sim.columns.size() <= static_cast<std::size_t>(column)) return false;
+    return sim.columns[static_cast<std::size_t>(column)].loaded;
+}
+
+bool Dataset::all_columns_resident() const {
+    if (headers_.empty() || sims_.empty()) return false;
+    for (std::size_t s = 0; s < sims_.size(); ++s)
+        for (std::size_t c = 0; c < headers_.size(); ++c)
+            if (!column_loaded(s, static_cast<int>(c))) return false;
+    return true;
 }
 
 bool Dataset::set_arrays_column(std::size_t sim_index, int column, const float* data,
@@ -473,6 +501,7 @@ bool Dataset::set_arrays_column(std::size_t sim_index, int column, const float* 
 void Dataset::end_arrays() {
     if (!arrays_backed_) return;
     finish_open();
+    end_arrays_attach_cache();
 }
 
 void Dataset::invalidate_data() {
@@ -660,6 +689,13 @@ void Dataset::load_columns(const std::vector<int>& columns,
     if (num_cols <= 0 || columns.empty() || sims_.empty()) return;
 
     if (load_from_cache(columns, sim_indices)) return;
+
+    // A pushed file has no parser here. Falling through would map the source
+    // and run the AOE text parser over it -- which on an HDF5 file marks every
+    // column loaded-and-empty, so the samples the reader above was about to
+    // supply would never be asked for and every curve would draw as a gap.
+    // Leaving them unloaded is what lets that reader see they are missing.
+    if (arrays_backed_) return;
 
     std::vector<int> sim_list;
     if (sim_indices.empty()) {
@@ -1077,10 +1113,12 @@ std::size_t Dataset::evict_until(std::size_t keep_bytes) {
 
 bool Dataset::write_cache(std::string* out_path) {
     if (out_path) out_path->clear();
-    // A sidecar is a rewrite of a parse of the source. A pushed file has no
-    // parse to rewrite, and a sidecar written beside it would be claimed by a
-    // later open() as though it did.
-    if (arrays_backed_) return false;
+    // A pushed file has no parser here, so the loop below cannot fill a column
+    // it finds missing -- it would write an empty one and the sidecar would
+    // record the file as holding no samples. Writing one is therefore allowed
+    // only once every column has been pushed in, which is the caller's job and
+    // which it can check with all_columns_resident().
+    if (arrays_backed_ && !all_columns_resident()) return false;
     if (headers_.empty() || sims_.empty() || path_.empty()) return false;
     if (!caching_enabled()) return false;
 

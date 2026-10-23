@@ -336,6 +336,231 @@ class PushedFileTests(Hdf5Mixin, unittest.TestCase):
 
 
 @unittest.skipUnless(core_available(), "the core library is not loadable here")
+
+class LazyPushTests(Hdf5Mixin, unittest.TestCase):
+    """What is read, and when.
+
+    The whole point of the pull route: a file that opens without being read,
+    and columns that arrive as they are drawn. So these tests count reads
+    rather than inspect values -- the values are covered above, and the cost is
+    what changed.
+    """
+
+    def setUp(self):
+        self.reads = []
+        self._real_read_selected = hdf5.read_selected
+        self._real_read_first = hdf5.read_first_values
+
+        def counting_selected(path, layout, wanted):
+            pairs = sorted(set((int(r), int(c)) for r, c in wanted))
+            self.reads.append(("columns", tuple(pairs)))
+            return self._real_read_selected(path, layout, wanted)
+
+        def counting_first(path, layout, column):
+            self.reads.append(("first", int(column)))
+            return self._real_read_first(path, layout, column)
+
+        hdf5.read_selected = counting_selected
+        hdf5.read_first_values = counting_first
+        self.addCleanup(setattr, hdf5, "read_selected", self._real_read_selected)
+        self.addCleanup(setattr, hdf5, "read_first_values", self._real_read_first)
+
+    def open_session(self, name="lazy.hdf5"):
+        from aoeviewer import Session
+
+        target = self.write_channel_groups(name)
+        session = Session()
+        self.addCleanup(session.close)
+        return session, session.add_file(target), target
+
+    def column_reads(self):
+        return [pairs for kind, pairs in self.reads if kind == "columns"]
+
+    def test_opening_reads_no_samples_at_all(self):
+        session, handle, _path = self.open_session()
+        self.assertEqual(self.column_reads(), [])
+        # And yet the file is fully described: this is what the DATA tree and
+        # the parameter lists are built from.
+        self.assertEqual(handle.simulation_count, 2)
+        self.assertEqual(session.parameters, CHANNELS)
+
+    def test_asking_for_one_channel_reads_one_channel(self):
+        session, handle, _path = self.open_session()
+        session.channel(handle.index, 0, "ALFA")
+        column = CHANNELS.index("ALFA")
+        self.assertEqual(self.column_reads(), [((0, column),)])
+
+    def test_asking_twice_reads_once(self):
+        session, handle, _path = self.open_session()
+        session.channel(handle.index, 0, "ALFA")
+        session.channel(handle.index, 0, "ALFA")
+        self.assertEqual(len(self.column_reads()), 1)
+
+    def test_each_run_is_fetched_separately(self):
+        session, handle, _path = self.open_session()
+        session.channel(handle.index, 0, "ALFA")
+        session.channel(handle.index, 1, "ALFA")
+        column = CHANNELS.index("ALFA")
+        self.assertEqual(self.column_reads(),
+                         [((0, column),), ((1, column),)])
+
+    def test_a_preload_fetches_the_whole_batch_in_one_pass(self):
+        session, handle, _path = self.open_session()
+        session.preload(handle.index, [0, 1], ["TIME", "ALFA"])
+        self.assertEqual(len(self.column_reads()), 1)
+        self.assertEqual(len(self.column_reads()[0]), 4)
+
+    def test_a_preloaded_channel_is_not_fetched_again_on_use(self):
+        session, handle, _path = self.open_session()
+        session.preload(handle.index, [0], ["ALFA"])
+        before = len(self.column_reads())
+        session.channel(handle.index, 0, "ALFA")
+        self.assertEqual(len(self.column_reads()), before)
+
+    def test_the_values_are_right_whichever_way_they_arrived(self):
+        session, handle, _path = self.open_session()
+        session.preload(handle.index, [0], ["ALFA"])          # batched
+        batched = session.channel(handle.index, 0, "ALFA")
+        single = session.channel(handle.index, 1, "MACH")     # on demand
+        expected_a = make_channels(0)["ALFA"].astype(np.float32)
+        expected_m = make_channels(1)["MACH"].astype(np.float32)
+        self.assertTrue(np.array_equal(batched, expected_a))
+        self.assertTrue(np.array_equal(single, expected_m))
+
+    def test_an_unknown_channel_asks_the_reader_for_nothing(self):
+        session, handle, _path = self.open_session()
+        session.channel(handle.index, 0, "NOT_A_CHANNEL")
+        self.assertEqual(self.column_reads(), [])
+
+    def test_an_iso_scan_reads_one_element_per_run_not_the_column(self):
+        session, handle, _path = self.open_session()
+        values = session.iso_values(handle.index, "MASSE")
+        self.assertEqual(len(values), 2)
+        self.assertAlmostEqual(values[0], 61000.0, places=1)
+        self.assertAlmostEqual(values[1], 60900.0, places=1)
+        # Through the cheap path, and no column was pulled in to answer it.
+        self.assertEqual(self.column_reads(), [])
+        self.assertEqual([kind for kind, _ in self.reads], ["first"])
+
+    def test_an_iso_scan_is_answered_from_memory_the_second_time(self):
+        session, handle, _path = self.open_session()
+        session.iso_values(handle.index, "MASSE")
+        session.iso_values(handle.index, "MASSE")
+        self.assertEqual(len(self.reads), 1)
+
+    def test_distinct_iso_values_include_the_pushed_file(self):
+        session, handle, _path = self.open_session()
+        distinct = session.iso_distinct("MASSE")
+        self.assertEqual(sorted(round(float(v), 1) for v in distinct),
+                         [60900.0, 61000.0])
+
+    def test_reloading_forgets_what_it_had_read(self):
+        session, handle, _path = self.open_session()
+        session.channel(handle.index, 0, "ALFA")
+        self.assertTrue(handle.reload())
+        before = len(self.column_reads())
+        # The reload re-pushed the file with no samples, so the next ask has to
+        # go back to the reader.
+        session.channel(0, 0, "ALFA")
+        self.assertEqual(len(self.column_reads()), before + 1)
+
+
+class PushedSidecarTests(Hdf5Mixin, unittest.TestCase):
+    """The sidecar written from pushed columns, and the open that uses it."""
+
+    def session(self):
+        from aoeviewer import Session
+
+        session = Session()
+        self.addCleanup(session.close)
+        return session
+
+    def test_a_sidecar_cannot_be_written_while_columns_are_missing(self):
+        # There is no parser here to fill a gap, so a sidecar written with one
+        # would record the file as holding no samples.
+        target = self.write_channel_groups("partial.hdf5")
+        session = self.session()
+        handle = session.add_file(target)
+        session.channel(handle.index, 0, "ALFA")      # one column of one run
+        self.assertFalse(session.build_cache(handle.index))
+        self.assertFalse(os.path.exists(target + ".aoec"))
+
+    def test_filling_it_completely_lets_the_sidecar_be_written(self):
+        target = self.write_channel_groups("full.hdf5")
+        session = self.session()
+        handle = session.add_file(target)
+        self.assertTrue(session.fill_pushed_completely(handle.index))
+        self.assertTrue(session.build_cache(handle.index))
+        self.assertTrue(session.cache_active(handle.index))
+
+    def test_a_later_open_is_served_by_the_sidecar(self):
+        target = self.write_channel_groups("cached.hdf5")
+        first = self.session()
+        handle = first.add_file(target)
+        first.fill_pushed_completely(handle.index)
+        self.assertTrue(first.build_cache(handle.index))
+
+        # A second session, as a later run of the program would be.
+        second = self.session()
+        again = second.add_file(target)
+        self.assertTrue(second.cache_active(again.index))
+        # And the columns are there without the reader being asked, which is
+        # what makes the cached open the fast one.
+        self.assertTrue(second.is_pushed_index(again.index))
+        for run in range(again.simulation_count):
+            for name in CHANNELS:
+                got = second.channel(again.index, run, name)
+                want = make_channels(run)[name].astype(np.float32)
+                self.assertTrue(np.array_equal(got, want), name)
+
+    def test_the_sidecar_is_refused_when_the_source_has_changed(self):
+        target = self.write_channel_groups("changed.hdf5")
+        session = self.session()
+        handle = session.add_file(target)
+        session.fill_pushed_completely(handle.index)
+        self.assertTrue(session.build_cache(handle.index))
+
+        # Rewrite the source with different numbers under the same name.
+        with open(target, "r+b") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.write(b"\0" * 64)
+
+        again = self.session()
+        reopened = again.add_file(target)
+        self.assertFalse(again.cache_active(reopened.index))
+
+    def test_values_survive_the_sidecar_round_trip_exactly(self):
+        # float32 both sides, so this is equality and not closeness.
+        target = self.write_channel_groups("exact.hdf5")
+        first = self.session()
+        handle = first.add_file(target)
+        first.fill_pushed_completely(handle.index)
+        first.build_cache(handle.index)
+
+        second = self.session()
+        again = second.add_file(target)
+        for run in range(again.simulation_count):
+            expected = make_channels(run)
+            for name in CHANNELS:
+                self.assertTrue(np.array_equal(
+                    second.channel(again.index, run, name),
+                    expected[name].astype(np.float32)), name)
+
+    def test_the_run_names_and_units_come_back_too(self):
+        target = self.write_channel_groups("meta.hdf5")
+        first = self.session()
+        handle = first.add_file(target)
+        first.fill_pushed_completely(handle.index)
+        first.build_cache(handle.index)
+
+        second = self.session()
+        again = second.add_file(target)
+        self.assertEqual([sim.name for sim in again.simulations],
+                         ["1_2_0", "2_2_0"])
+        self.assertEqual(second.unit("TIME"), "s")
+
+
+@unittest.skipUnless(core_available(), "the core library is not loadable here")
 class MissingDependencyTests(unittest.TestCase):
 
     def test_the_error_names_the_missing_package(self):

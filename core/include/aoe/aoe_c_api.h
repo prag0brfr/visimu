@@ -97,6 +97,30 @@ AOE_API int aoe_add_arrays_sim(aoe_session* session, int file, const char* id);
 AOE_API int aoe_set_arrays_column(aoe_session* session, int file, int sim, int column,
                                   const float* data, size_t count);
 AOE_API void aoe_end_arrays(aoe_session* session, int file);
+
+// Whether one column of one run of a pushed file is already resident.
+//
+// The pull half of the route: a pushed file is opened with its headers and
+// runs but no samples, and the side that owns the reader asks this before
+// reading anything. A column served from a sidecar, or pushed earlier, answers
+// 1 and must not be read out of the source again.
+AOE_API int aoe_column_loaded(aoe_session* session, int file, int sim, int column);
+
+// Whether every column of every run of a file is resident -- what
+// aoe_build_cache needs to be true of a pushed file before it can write a
+// sidecar from them.
+AOE_API int aoe_all_columns_resident(aoe_session* session, int file);
+
+// Which physical columns of one file the named channels need, after following
+// aliases and formulas. Writes up to `max` column indices and returns how many
+// there are -- call with out=NULL to ask for the count.
+//
+// What the reader of a pushed file needs in order to fetch the right thing:
+// "ALT_FT = ALT * 3.28" needs the column ALT, and only the formula table knows
+// that.
+AOE_API int aoe_required_columns(aoe_session* session, int file,
+                                 const char* const* names, int n_names,
+                                 int* out, int max);
 AOE_API int aoe_reload_file(aoe_session* session, int file);
 
 /* Display names. Renaming affects only what is shown: the identity keys that

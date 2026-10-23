@@ -159,12 +159,28 @@ public:
     bool begin_arrays(const std::string& path, const std::vector<std::string>& headers,
                       const std::vector<std::string>& units);
     int add_arrays_sim(const std::string& id);
+    // Looks for a sidecar once the runs are known. Called by end_arrays().
+    void end_arrays_attach_cache();
     bool set_arrays_column(std::size_t sim_index, int column, const float* data,
                            std::size_t count);
     void end_arrays();
 
     // True when this dataset was pushed rather than parsed.
     bool arrays_backed() const noexcept { return arrays_backed_; }
+
+    // Whether one column of one run is resident.
+    //
+    // The pull half of the array route. A pushed file is opened with its
+    // headers and runs but no samples, and the side that owns the reader asks
+    // this before reading anything: a column already served from a sidecar, or
+    // already pushed, must not be read out of the source a second time.
+    bool column_loaded(std::size_t sim_index, int column) const;
+
+    // Whether every column of every run is resident. What write_cache() needs
+    // to be true of a pushed file before it can write one: there is no parser
+    // here to fill a gap, so a sidecar written with gaps would record empty
+    // columns as though the file held none.
+    bool all_columns_resident() const;
 
     bool is_open() const noexcept { return !headers_.empty(); }
     const std::string& path() const noexcept { return path_; }

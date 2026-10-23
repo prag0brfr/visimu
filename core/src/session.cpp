@@ -318,24 +318,32 @@ void Session::collect_dependencies(const std::string& name,
         collect_dependencies(variable, out, depth + 1);
 }
 
-void Session::preload(int file_index, const std::vector<int>& sim_indices,
-                      const std::vector<std::string>& names) {
+std::vector<int> Session::required_columns(int file_index,
+                                           const std::vector<std::string>& names) {
+    std::vector<int> columns;
     Dataset* dataset = file(file_index);
-    if (!dataset) return;
+    if (!dataset) return columns;
 
     std::vector<std::string> physical;
     for (const auto& name : names) collect_dependencies(name, physical, 0);
 
-    std::vector<int> columns;
     columns.reserve(physical.size());
     for (const auto& name : physical) {
         const int column = dataset->column_index(name);
         if (column >= 0) columns.push_back(column);
     }
-    if (columns.empty()) return;
-
     std::sort(columns.begin(), columns.end());
     columns.erase(std::unique(columns.begin(), columns.end()), columns.end());
+    return columns;
+}
+
+void Session::preload(int file_index, const std::vector<int>& sim_indices,
+                      const std::vector<std::string>& names) {
+    Dataset* dataset = file(file_index);
+    if (!dataset) return;
+
+    const std::vector<int> columns = required_columns(file_index, names);
+    if (columns.empty()) return;
 
     dataset->load_columns(columns, sim_indices);
 }

@@ -53,6 +53,16 @@ public:
     // Closes the array route on `index` and refreshes the parameter union.
     void end_arrays_file(int index);
 
+    // Which physical columns of one file a channel needs: itself, when it is a
+    // column of that file, or everything its formula depends on, through
+    // aliases and through other computed channels.
+    //
+    // The same resolution preload() does, exposed because a pushed file's
+    // reader lives outside this core and has to know what to fetch -- and
+    // "what ALT_FT needs" is a question only the formula table can answer.
+    std::vector<int> required_columns(int file_index,
+                                      const std::vector<std::string>& names);
+
     // Re-reads a file in place, keeping its index and display name. Cached
     // formula results for that file are dropped.
     bool reload_file(int index);

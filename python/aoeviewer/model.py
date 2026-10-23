@@ -292,6 +292,30 @@ class TileState:
     # already showing.
     legend_show_style: bool = False
 
+    # ---------------------------------------------------------------- sync
+    #
+    # Aligning the runs on an event instead of on the clock. A channel logged
+    # over several runs of the same manoeuvre carries that manoeuvre at a
+    # different place in each run, because each recording started at a
+    # different moment; plotted against TIME they are the same shape smeared
+    # sideways. With this on, the tile finds where a condition first holds in
+    # each run and shifts every curve so those instants coincide.
+    #
+    # Per tile, not global: one page routinely holds the aligned comparison and
+    # the raw one side by side, and that is the useful arrangement.
+    #
+    # Absent from a workspace written before this existed, which from_dict
+    # reads as the default -- off -- so an old workspace opens unaligned, which
+    # is exactly how it was saved.
+    sync_enabled: bool = False
+    sync_param: str = ""
+    # One of aoeviewer.sync.CONDITION_KEYS.
+    sync_condition: str = "above"
+    sync_level: float = 0.0
+    # One of aoeviewer.sync.TARGET_KEYS: where the events are moved to.
+    sync_target: str = "zero"
+    sync_target_value: float = 0.0
+
     # Fixed axis ranges. When locked the tile stops auto-fitting, which is what
     # you want while comparing several plots on identical scales.
     lock_x: bool = False
@@ -382,6 +406,12 @@ class TileState:
             "legend_show_iso": self.legend_show_iso,
             "legend_show_file": self.legend_show_file,
             "legend_show_sim": self.legend_show_sim,
+            "sync_enabled": self.sync_enabled,
+            "sync_param": self.sync_param,
+            "sync_condition": self.sync_condition,
+            "sync_level": self.sync_level,
+            "sync_target": self.sync_target,
+            "sync_target_value": self.sync_target_value,
             "lock_x": self.lock_x,
             "lock_y": self.lock_y,
             "x_min": self.x_min,
@@ -445,8 +475,9 @@ def tile_title(tile: "TileState", max_names: int = 4, wrap: int = 36) -> str:
     if tile.plot3d:
         if not (tile.x_param and tile.y_params and tile.z_param):
             return "3D tile — choose X, Y and Z"
-        return "{0} = f({1}, {2})".format(tile.z_param, tile.x_param,
-                                          tile.y_params[0])
+        return "{0} = f({1}, {2}){3}".format(tile.z_param, tile.x_param,
+                                             tile.y_params[0],
+                                             sync_note(tile))
 
     if not tile.y_params and not tile.x_param:
         return "empty tile"
@@ -455,8 +486,24 @@ def tile_title(tile: "TileState", max_names: int = 4, wrap: int = 36) -> str:
     if not tile.x_param:
         return _wrap_names(tile.y_params, suffix="  (no x axis selected)", wrap=wrap)
 
-    suffix = " = f({0})".format(tile.x_param)
+    suffix = " = f({0}){1}".format(tile.x_param, sync_note(tile))
     return _wrap_names(tile.y_params, suffix=suffix, wrap=wrap)
+
+
+def sync_note(tile: "TileState") -> str:
+    """What the title says while a tile's runs are aligned on an event.
+
+    In the title because the axis captions are deliberately blank -- the title
+    is where this program names what is on the axes. And it has to be said
+    somewhere: a tile whose x axis has been shifted per run is not plotting
+    TIME any more, and a reader who did not set the alignment up has no other
+    way to know that its zero means an event.
+    """
+    if not (tile.sync_enabled and tile.sync_param):
+        return ""
+    if tile.sync_target == "zero":
+        return "  [0 = {0} event]".format(tile.sync_param)
+    return "  [aligned on {0}]".format(tile.sync_param)
 
 
 def _wrap_names(names, suffix: str, wrap: int) -> str:
@@ -1247,6 +1294,16 @@ class AppState:
                         where, label, current, replacement or "none"))
                     setattr(tile, field, replacement)
 
+                # The alignment channel, for the same reason: a tile aligned on
+                # a channel the new files do not carry would keep naming it and
+                # quietly align nothing, with SYNC still showing the old name
+                # as the answer.
+                if tile.sync_param and tile.sync_param not in names:
+                    notes.append("{0}: alignment channel {1} cleared".format(
+                        where, tile.sync_param))
+                    tile.sync_param = ""
+                    tile.sync_enabled = False
+
         if notes:
             self.dirty = True
         return notes
@@ -1270,6 +1327,53 @@ class AppState:
         self.active_page = len(self.pages) - 1
         self.dirty = True
         return page
+
+    def duplicate_page(self, index: int = -1) -> Optional[PageState]:
+        """Copy a whole page -- grid, tiles and all -- in after the original.
+
+        Through to_dict/from_dict rather than copy.deepcopy, for the same
+        reason paste_tile does: that round trip is the one the workspace takes,
+        so a field it does not carry is a field the copy does not carry either,
+        and the two cannot drift apart silently.
+
+        The copy is inserted straight after its original, since a duplicate is
+        nearly always the start of a variation on the page it came from, and
+        becomes the active page: duplicating and then editing the one you were
+        already looking at is the mistake to design out.
+        """
+        if index < 0:
+            index = self.active_page
+        if not (0 <= index < len(self.pages)):
+            return None
+
+        source = self.pages[index]
+        page = PageState.from_dict(source.to_dict())
+        page.name = self._unique_page_name(source.name)
+        self.pages.insert(index + 1, page)
+        self.active_page = index + 1
+        self.dirty = True
+        return page
+
+    def _unique_page_name(self, name: str) -> str:
+        """`name` with a " (2)" suffix, or the lowest free number after that.
+
+        Pages are addressed by name in the combo box and nowhere else, so two
+        pages called the same thing are legal but useless to the person reading
+        the list.
+        """
+        taken = {page.name for page in self.pages}
+        base = name
+        # Duplicating a duplicate should give " (3)", not " (2) (2)".
+        if base.endswith(")") and " (" in base:
+            head, _, tail = base.rpartition(" (")
+            if tail[:-1].isdigit():
+                base = head
+        candidate = "{0} (2)".format(base)
+        number = 2
+        while candidate in taken:
+            number += 1
+            candidate = "{0} ({1})".format(base, number)
+        return candidate
 
     def remove_page(self, index: int) -> None:
         if len(self.pages) <= 1:
@@ -1441,7 +1545,7 @@ class AppState:
     def to_dict(self) -> dict:
         return {
             "version": 3,
-            "app_version": "2.1.2",
+            "app_version": "2.2.0",
             "pages": [p.to_dict() for p in self.pages],
             "active_page": self.active_page,
             "selected_sims": sorted(list(self.selected_sims)),

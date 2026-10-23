@@ -38,7 +38,8 @@ from aoeviewer import isogroups
 from aoeviewer import scales
 from aoeviewer import theme as theme_module
 from aoeviewer import model
-from aoeviewer.model import MAX_TILES, AppState, StyleRegistry
+from aoeviewer import sync
+from aoeviewer.model import MAX_TILES, AppState, StyleRegistry, TileState
 from aoeviewer.scales import resample_key
 from aoeviewer.ui import main_window
 from aoeviewer.ui import panels
@@ -1966,6 +1967,20 @@ def make_data_panel(session=None):
         lambda item, col=0: panel._on_item_changed(item, col))
     panel.tree.itemExpanded.connect(panel._on_expanded)
     panel.tree.itemCollapsed.connect(panel._on_collapsed)
+    # The name filter, as the real panel builds it. Without these the double
+    # answers `_Any()` for the pattern and every refresh goes through a filter
+    # pass against a value that is not a string.
+    panel.filter_edit = qt_stubs.QLineEdit()
+    panel.filter_count = qt_stubs.QLabel()
+    from PySide6.QtCore import QTimer as _StubTimer
+    panel._filter_timer = _StubTimer()
+    panel._filter_timer.setSingleShot(True)
+    panel._filter_timer.timeout.connect(panel._apply_filter)
+    panel.filter_edit.textChanged.connect(panel._on_filter_typed)
+    panel.select_buttons = {
+        "Plot all": (qt_stubs.QPushButton("Plot all"), "all"),
+        "Plot none": (qt_stubs.QPushButton("Plot none"), "none"),
+    }
     return panel
 
 
@@ -3585,6 +3600,723 @@ class TestTheIsoPanelDoesNotSelectRuns(unittest.TestCase):
         panel.apply_filter()
         self.assertEqual(len(fired), 1)
 
+
+
+
+
+
+class _SyncSession(_DrawSession):
+    """Three runs of the same manoeuvre, each starting at a different moment.
+
+    SPEED is zero until the run's own start time and then rises linearly: the
+    shape every run shares, placed differently on the clock. That is the whole
+    situation the alignment exists for, so it is the situation the tests use.
+    """
+
+    parameters = ["TIME", "SPEED", "ALT"]
+
+    def __init__(self, starts=(2.0, 5.0, 8.0)):
+        _DrawSession.__init__(self, iso_values=tuple(
+            float(i) for i in range(len(starts))))
+        self._starts = list(starts)
+
+    def channel(self, file_index, sim_index, name):
+        key = (file_index, sim_index, name)
+        if key not in self._channels:
+            time = np.arange(0.0, 20.0, 0.5, dtype=np.float32)
+            start = self._starts[sim_index % len(self._starts)]
+            if name == "TIME":
+                values = time
+            elif name == "SPEED":
+                values = np.where(time < start, 0.0,
+                                  (time - start) * 10.0).astype(np.float32)
+            else:
+                values = (time * 2.0).astype(np.float32)
+            self._channels[key] = values
+        return self._channels[key]
+
+
+class TestFindingTheEvent(unittest.TestCase):
+    """Where the condition first holds, in one run."""
+
+    def setUp(self):
+        self.t = np.arange(0.0, 10.0, 0.1, dtype=np.float32)
+        # At rest for two seconds, then accelerating.
+        self.v = np.where(self.t < 2.0, 0.0,
+                          (self.t - 2.0) * 10.0).astype(np.float32)
+
+    def test_above_a_level_is_interpolated_between_samples(self):
+        event = sync.find_event(self.t, self.v, "above", 0.5)
+        self.assertTrue(event.found)
+        # The samples either side are 2.0 (v=0) and 2.1 (v=1), so half way.
+        self.assertAlmostEqual(event.x, 2.05, places=4)
+
+    def test_interpolating_is_not_the_same_as_taking_the_sample(self):
+        # The point of interpolating: two runs logged on different grids
+        # otherwise align only to the nearest sample, which is a visible step.
+        event = sync.find_event(self.t, self.v, "above", 0.5)
+        self.assertNotAlmostEqual(event.x, 2.1, places=4)
+
+    def test_below_a_level(self):
+        falling = (100.0 - self.t * 10.0).astype(np.float32)
+        event = sync.find_event(self.t, falling, "below", 50.0)
+        self.assertTrue(event.found)
+        self.assertAlmostEqual(event.x, 5.0, places=3)
+
+    def test_crossing_works_in_whichever_direction_the_channel_arrives(self):
+        rising = sync.find_event(self.t, self.v, "crosses", 0.5)
+        falling = sync.find_event(self.t, (1.0 - self.v).astype(np.float32),
+                                  "crosses", 0.5)
+        self.assertTrue(rising.found)
+        self.assertTrue(falling.found)
+        self.assertAlmostEqual(rising.x, falling.x, places=4)
+
+    def test_starts_to_rise_needs_no_level(self):
+        event = sync.find_event(self.t, self.v, "rises")
+        self.assertTrue(event.found)
+        # 2% of a span of ~78 is ~1.6, reached just after the motion starts.
+        self.assertGreater(event.x, 2.0)
+        self.assertLess(event.x, 2.3)
+
+    def test_starts_to_rise_is_scale_free(self):
+        # The same answer whether the channel is in m/s or in thousands of
+        # them, which is what a threshold in percent of the span buys.
+        slow = sync.find_event(self.t, self.v, "rises")
+        fast = sync.find_event(self.t, (self.v * 1000.0).astype(np.float32),
+                               "rises")
+        self.assertAlmostEqual(slow.x, fast.x, places=4)
+
+    def test_starts_to_fall(self):
+        event = sync.find_event(self.t, (-self.v).astype(np.float32), "falls")
+        self.assertTrue(event.found)
+        self.assertGreater(event.x, 2.0)
+
+    def test_the_maximum_and_the_minimum(self):
+        high = sync.find_event(self.t, self.v, "max")
+        low = sync.find_event(self.t, self.v, "min")
+        self.assertAlmostEqual(high.x, float(self.t[-1]), places=3)
+        self.assertAlmostEqual(low.x, 0.0, places=3)
+
+    def test_a_condition_that_never_holds_says_so(self):
+        event = sync.find_event(self.t, self.v, "above", 1e9)
+        self.assertFalse(event.found)
+        self.assertIn("never above", event.reason)
+
+    def test_a_flat_channel_cannot_start_to_rise(self):
+        event = sync.find_event(self.t, np.zeros_like(self.t), "rises")
+        self.assertFalse(event.found)
+        self.assertIn("never changes", event.reason)
+
+    def test_gaps_are_skipped_rather_than_counted_as_zero(self):
+        # NaN is what the parser writes for an unreadable token, and it
+        # satisfies nothing. A gap before the crossing is skipped, not read as
+        # a run of zeros that the channel then rises out of.
+        holed = self.v.copy()
+        holed[:15] = np.nan            # the hole ends before the event
+        event = sync.find_event(self.t, holed, "above", 0.5)
+        self.assertTrue(event.found)
+        self.assertAlmostEqual(event.x, 2.05, places=4)
+
+    def test_a_crossing_inside_a_gap_is_reported_at_the_first_real_sample(self):
+        # The samples that would show the crossing are missing, so there is
+        # nothing to interpolate between. The first readable sample past the
+        # level is the honest answer; interpolating across the hole would
+        # invent the instant.
+        holed = self.v.copy()
+        holed[:25] = np.nan            # the hole covers the event
+        event = sync.find_event(self.t, holed, "above", 0.5)
+        self.assertTrue(event.found)
+        self.assertAlmostEqual(event.x, 2.5, places=4)
+
+    def test_an_empty_channel_is_not_an_event(self):
+        empty = np.array([], dtype=np.float32)
+        self.assertFalse(sync.find_event(empty, empty, "above", 0.0).found)
+
+    def test_channels_of_different_lengths_use_the_overlap(self):
+        # A computed channel can come out shorter than the axis.
+        event = sync.find_event(self.t, self.v[:40], "above", 0.5)
+        self.assertTrue(event.found)
+
+    def test_an_unknown_condition_is_refused_rather_than_guessed(self):
+        event = sync.find_event(self.t, self.v, "whenever", 0.0)
+        self.assertFalse(event.found)
+        self.assertIn("unknown condition", event.reason)
+
+
+class TestTheOffsets(unittest.TestCase):
+    """Turning one event per run into one shift per run."""
+
+    def events(self, *positions):
+        return {(0, i): sync.Event(x, True) for i, x in enumerate(positions)}
+
+    def test_moving_to_zero_subtracts_the_event(self):
+        shifts = sync.offsets(self.events(2.0, 5.0), "zero")
+        self.assertEqual(shifts, {(0, 0): 2.0, (0, 1): 5.0})
+
+    def test_moving_to_the_first_run_leaves_the_first_run_alone(self):
+        shifts = sync.offsets(self.events(2.0, 5.0), "first",
+                              order=[(0, 0), (0, 1)])
+        self.assertEqual(shifts[(0, 0)], 0.0)
+        self.assertEqual(shifts[(0, 1)], 3.0)
+
+    def test_the_first_run_is_the_first_drawn_not_the_lowest_key(self):
+        events = self.events(2.0, 5.0)
+        shifts = sync.offsets(events, "first", order=[(0, 1), (0, 0)])
+        self.assertEqual(shifts[(0, 1)], 0.0)
+        self.assertEqual(shifts[(0, 0)], -3.0)
+
+    def test_moving_to_a_chosen_value(self):
+        shifts = sync.offsets(self.events(2.0), "value", 10.0)
+        self.assertEqual(shifts[(0, 0)], -8.0)
+
+    def test_a_run_with_no_event_gets_no_offset_at_all(self):
+        events = self.events(2.0)
+        events[(0, 1)] = sync.Event(reason="never above 3")
+        shifts = sync.offsets(events, "zero")
+        # Not an offset of zero: that is the same number and a different
+        # statement, and the panel reports the difference.
+        self.assertNotIn((0, 1), shifts)
+
+    def test_nothing_found_means_nothing_moves(self):
+        events = {(0, 0): sync.Event(reason="no")}
+        self.assertEqual(sync.offsets(events, "first"), {})
+
+    def test_the_reference_run_is_one_that_was_actually_found(self):
+        events = {(0, 0): sync.Event(reason="no"),
+                  (0, 1): sync.Event(4.0, True)}
+        shifts = sync.offsets(events, "first", order=[(0, 0), (0, 1)])
+        self.assertEqual(shifts[(0, 1)], 0.0)
+
+
+class TestShiftingIsNeverInPlace(unittest.TestCase):
+
+    def test_the_source_array_is_untouched(self):
+        # The array handed in is a view into the core's own memory, shared with
+        # every other tile and with the cache.
+        values = np.arange(5, dtype=np.float32)
+        before = values.copy()
+        sync.shift(values, 2.0)
+        self.assertTrue(np.array_equal(values, before))
+
+    def test_the_result_is_moved_by_the_offset(self):
+        values = np.arange(5, dtype=np.float32)
+        self.assertTrue(np.allclose(sync.shift(values, 2.0), values - 2.0))
+
+
+class TestATileDrawsTheAlignedRuns(unittest.TestCase):
+    """The alignment, through the tile that draws it."""
+
+    def setUp(self):
+        self.session = _SyncSession(starts=(2.0, 5.0, 8.0))
+        self.tile = make_drawable_tile(self.session)
+        state = self.tile._state
+        state.selected_sims.update({(0, 0), (0, 1), (0, 2)})
+        tile = state.tile
+        tile.x_param, tile.y_params = "TIME", ["ALT"]
+        tile.sync_param = "SPEED"
+        tile.sync_condition = "above"
+        tile.sync_level = 0.5
+        tile.sync_target = "zero"
+
+    def drawn_x(self):
+        """The first x value each curve was drawn with, by run."""
+        out = {}
+        for key, entry in self.tile._curves.items():
+            run = int(key.split("|")[1])
+            out[run] = float(entry.x[0])
+        return out
+
+    def test_unaligned_every_run_starts_at_the_same_x(self):
+        self.tile.rebuild()
+        self.assertEqual(set(self.drawn_x().values()), {0.0})
+
+    def test_aligned_each_run_is_moved_by_its_own_event(self):
+        self.tile._state.tile.sync_enabled = True
+        self.tile.rebuild()
+        starts = self.drawn_x()
+        # Event at 2.05 / 5.05 / 8.05, moved to zero, so the curves now begin
+        # at minus those.
+        self.assertAlmostEqual(starts[0], -2.05, places=3)
+        self.assertAlmostEqual(starts[1], -5.05, places=3)
+        self.assertAlmostEqual(starts[2], -8.05, places=3)
+
+    def test_the_y_values_are_not_touched(self):
+        self.tile._state.tile.sync_enabled = True
+        self.tile.rebuild()
+        for entry in self.tile._curves.values():
+            self.assertAlmostEqual(float(entry.y[0]), 0.0, places=5)
+
+    def test_the_source_channel_is_left_alone(self):
+        before = self.session.channel(0, 1, "TIME").copy()
+        self.tile._state.tile.sync_enabled = True
+        self.tile.rebuild()
+        self.assertTrue(np.array_equal(self.session.channel(0, 1, "TIME"),
+                                       before))
+
+    def test_aligning_to_the_first_run_keeps_it_where_it_was(self):
+        tile = self.tile._state.tile
+        tile.sync_enabled = True
+        tile.sync_target = "first"
+        self.tile.rebuild()
+        starts = self.drawn_x()
+        self.assertAlmostEqual(starts[0], 0.0, places=3)
+        self.assertAlmostEqual(starts[1], -3.0, places=3)
+
+    def test_a_run_without_the_event_is_left_where_it_is(self):
+        tile = self.tile._state.tile
+        tile.sync_enabled = True
+        tile.sync_level = 1e9          # no run ever gets there
+        self.tile.rebuild()
+        self.assertEqual(set(self.drawn_x().values()), {0.0})
+
+    def test_the_panel_is_told_how_many_matched(self):
+        tile = self.tile._state.tile
+        tile.sync_enabled = True
+        self.tile.rebuild()
+        self.assertEqual(self.tile._sync_report, (3, 0))
+        tile.sync_level = 1e9
+        self.tile.rebuild()
+        self.assertEqual(self.tile._sync_report, (0, 3))
+
+    def test_the_shifted_axis_is_the_same_object_across_rebuilds(self):
+        # _reuse_signature compares buffer addresses, so a fresh copy per
+        # rebuild would make every group look new and re-decimate the page on
+        # every restyle.
+        self.tile._state.tile.sync_enabled = True
+        self.tile.rebuild()
+        first = {k: id(e.x) for k, e in self.tile._curves.items()}
+        self.tile.rebuild()
+        again = {k: id(e.x) for k, e in self.tile._curves.items()}
+        self.assertEqual(first, again)
+
+    def test_changing_the_level_moves_the_curves_again(self):
+        tile = self.tile._state.tile
+        tile.sync_enabled = True
+        self.tile.rebuild()
+        before = self.drawn_x()
+        tile.sync_level = 50.0
+        self.tile.rebuild()
+        self.assertNotEqual(before, self.drawn_x())
+
+    def test_turning_it_off_puts_the_curves_back(self):
+        tile = self.tile._state.tile
+        tile.sync_enabled = True
+        self.tile.rebuild()
+        tile.sync_enabled = False
+        self.tile.rebuild()
+        self.assertEqual(set(self.drawn_x().values()), {0.0})
+
+    def test_the_condition_channel_is_preloaded(self):
+        tile = self.tile._state.tile
+        tile.sync_enabled = True
+        self.assertIn("SPEED", self.tile.required_channels())
+        tile.sync_enabled = False
+        self.assertNotIn("SPEED", self.tile.required_channels())
+
+    def test_the_title_says_the_tile_is_aligned(self):
+        tile = self.tile._state.tile
+        tile.sync_enabled = True
+        self.tile.rebuild()
+        self.assertIn("SPEED event", self.tile.getPlotItem().titles[-1])
+
+    def test_a_tile_with_no_x_axis_aligns_nothing(self):
+        tile = self.tile._state.tile
+        tile.sync_enabled = True
+        tile.x_param = ""
+        self.tile.rebuild()
+        self.assertEqual(self.tile._sync_report, (0, 0))
+
+
+class TestTheSyncWorkspace(unittest.TestCase):
+    """What a workspace carries, and what an older one does not."""
+
+    def test_every_field_round_trips(self):
+        tile = TileState()
+        tile.sync_enabled = True
+        tile.sync_param = "SPEED"
+        tile.sync_condition = "crosses"
+        tile.sync_level = 0.5
+        tile.sync_target = "value"
+        tile.sync_target_value = 12.5
+        back = TileState.from_dict(tile.to_dict())
+        for field in ("sync_enabled", "sync_param", "sync_condition",
+                      "sync_level", "sync_target", "sync_target_value"):
+            self.assertEqual(getattr(back, field), getattr(tile, field), field)
+
+    def test_a_workspace_written_before_sync_existed_opens_unaligned(self):
+        written = TileState().to_dict()
+        for key in list(written):
+            if key.startswith("sync_"):
+                del written[key]
+        back = TileState.from_dict(written)
+        self.assertFalse(back.sync_enabled)
+        self.assertEqual(back.sync_param, "")
+        self.assertEqual(back.sync_condition, "above")
+        self.assertEqual(back.sync_target, "zero")
+
+    def test_it_survives_a_whole_app_state_round_trip(self):
+        state = AppState()
+        tile = state.tile
+        tile.sync_enabled = True
+        tile.sync_param = "SPEED"
+        tile.sync_condition = "rises"
+        restored = AppState()
+        restored.load_dict(state.to_dict())
+        self.assertTrue(restored.tile.sync_enabled)
+        self.assertEqual(restored.tile.sync_param, "SPEED")
+        self.assertEqual(restored.tile.sync_condition, "rises")
+
+    def test_the_schema_version_is_unchanged(self):
+        # Adding fields that older readers ignore and newer readers default
+        # does not need a version bump, and bumping it would make this
+        # workspace unreadable by the version that wrote it.
+        self.assertEqual(AppState().to_dict()["version"], 3)
+
+    def test_an_alignment_channel_the_new_files_lack_is_cleared(self):
+        state = AppState()
+        tile = state.tile
+        tile.x_param = "TIME"
+        tile.sync_enabled = True
+        tile.sync_param = "GONE"
+        notes = state.resolve_missing_parameters(["TIME", "ALT"])
+        self.assertEqual(tile.sync_param, "")
+        self.assertFalse(tile.sync_enabled)
+        self.assertTrue(any("alignment channel" in note for note in notes))
+
+    def test_a_channel_the_files_still_have_is_left_alone(self):
+        state = AppState()
+        tile = state.tile
+        tile.x_param = "TIME"
+        tile.sync_enabled = True
+        tile.sync_param = "ALT"
+        state.resolve_missing_parameters(["TIME", "ALT"])
+        self.assertEqual(tile.sync_param, "ALT")
+        self.assertTrue(tile.sync_enabled)
+
+class _ClickEvent:
+    """What the tile reads off a mouse event, and nothing else."""
+
+    def __init__(self):
+        self.accepted = False
+
+    def accept(self):
+        self.accepted = True
+
+
+class TestDoubleClickingATile(unittest.TestCase):
+    """One gesture, three consequences: activate, fit, open PARAMS.
+
+    The order is the part worth testing. PARAMS describes the *active* tile, so
+    a double-click that opened the panel before activating would show the
+    previous tile's parameters -- worse than not opening it.
+    """
+
+    def setUp(self):
+        self.tile = make_drawable_tile()
+        state = self.tile._state
+        state.selected_sims.update({(0, 0)})
+        page = state.page
+        page.rows, page.cols = 1, 2
+        tile = page.tiles[0]
+        tile.x_param, tile.y_params = "TIME", ["ALT"]
+        self.tile.rebuild()
+        self.events = []
+        self.tile.activated.connect(lambda i: self.events.append(("activated", i)))
+        self.tile.params_requested.connect(
+            lambda i: self.events.append(("params", i)))
+
+    def test_it_activates_the_tile_then_asks_for_params(self):
+        self.tile.mouseDoubleClickEvent(_ClickEvent())
+        self.assertEqual(self.events,
+                         [("activated", 0), ("params", 0)])
+
+    def test_it_still_fits_the_view(self):
+        before = len(self.tile.getPlotItem().range_writes)
+        self.tile.mouseDoubleClickEvent(_ClickEvent())
+        self.assertGreater(len(self.tile.getPlotItem().range_writes), before)
+
+    def test_it_consumes_the_event(self):
+        event = _ClickEvent()
+        self.tile.mouseDoubleClickEvent(event)
+        self.assertTrue(event.accepted)
+
+    def test_a_locked_axis_is_still_respected(self):
+        # Fitting on double-click must not undo a limit the user typed, which
+        # is the whole contract of autoscale().
+        tile = self.tile._state.tile
+        tile.lock_x = True
+        tile.x_min, tile.x_max = 3.0, 4.0
+        self.tile.mouseDoubleClickEvent(_ClickEvent())
+        writes = [w for w in self.tile.getPlotItem().range_writes if w[0] == "x"]
+        self.assertEqual(writes[-1], ("x", 3.0, 4.0))
+
+
+class TestDuplicatingAPage(unittest.TestCase):
+    """A page copy is the start of a variation on the page it came from."""
+
+    def setUp(self):
+        self.state = AppState()
+        page = self.state.page
+        page.name = "Speed plots"
+        page.rows, page.cols = 1, 2
+        page.tiles[0].x_param = "TIME"
+        page.tiles[0].y_params = ["ALT", "MACH"]
+        page.tiles[1].x_param = "TIME"
+        page.tiles[1].y_params = ["NZ"]
+
+    def test_the_copy_lands_straight_after_the_original(self):
+        self.state.add_page()                 # so there is a page after it
+        self.state.active_page = 0
+        self.state.duplicate_page()
+        self.assertEqual(len(self.state.pages), 3)
+        self.assertEqual(self.state.active_page, 1)
+
+    def test_it_becomes_the_active_page(self):
+        copy = self.state.duplicate_page()
+        self.assertIs(self.state.page, copy)
+
+    def test_every_tile_comes_with_it(self):
+        copy = self.state.duplicate_page()
+        self.assertEqual(copy.rows, 1)
+        self.assertEqual(copy.cols, 2)
+        self.assertEqual(copy.tiles[0].y_params, ["ALT", "MACH"])
+        self.assertEqual(copy.tiles[1].y_params, ["NZ"])
+
+    def test_the_copy_is_independent_of_the_original(self):
+        copy = self.state.duplicate_page()
+        copy.tiles[0].y_params.append("NY")
+        self.assertEqual(self.state.pages[0].tiles[0].y_params,
+                         ["ALT", "MACH"])
+
+    def test_the_name_is_free_and_recognisable(self):
+        copy = self.state.duplicate_page()
+        self.assertEqual(copy.name, "Speed plots (2)")
+
+    def test_duplicating_a_duplicate_counts_up(self):
+        self.state.duplicate_page()
+        again = self.state.duplicate_page()
+        # Not "Speed plots (2) (2)".
+        self.assertEqual(again.name, "Speed plots (3)")
+
+    def test_a_clashing_name_is_stepped_over(self):
+        self.state.add_page()
+        self.state.pages[1].name = "Speed plots (2)"
+        self.state.active_page = 0
+        copy = self.state.duplicate_page()
+        self.assertEqual(copy.name, "Speed plots (3)")
+
+    def test_it_marks_the_workspace_dirty(self):
+        self.state.dirty = False
+        self.state.duplicate_page()
+        self.assertTrue(self.state.dirty)
+
+    def test_a_bad_index_duplicates_nothing(self):
+        self.assertIsNone(self.state.duplicate_page(9))
+        self.assertEqual(len(self.state.pages), 1)
+
+    def test_the_copy_survives_the_workspace_round_trip(self):
+        self.state.duplicate_page()
+        restored = AppState()
+        restored.load_dict(self.state.to_dict())
+        self.assertEqual([p.name for p in restored.pages],
+                         ["Speed plots", "Speed plots (2)"])
+        self.assertEqual(restored.pages[1].tiles[1].y_params, ["NZ"])
+
+class TestTheFirstCurveIsFitted(unittest.TestCase):
+    """A tile that has just acquired its first curve frames itself.
+
+    The rule is "fit only when the tile has never been framed", and what makes
+    it work is that an empty tile declares itself unframed on every rebuild --
+    so whatever range was left behind by a previous occupant cannot be
+    inherited by the next one.
+    """
+
+    def setUp(self):
+        self.session = _DrawSession()
+        self.tile = make_drawable_tile(self.session)
+        self.state = self.tile._state
+        self.state.selected_sims.update({(0, 0)})
+
+    def fits(self):
+        """How many range writes the fit has made on this tile."""
+        return len(self.tile.getPlotItem().range_writes)
+
+    def test_an_empty_tile_reports_itself_unframed(self):
+        tile = self.state.tile
+        tile.view_initialised = True
+        self.tile.rebuild()
+        self.assertFalse(tile.view_initialised)
+
+    def test_the_first_parameter_is_fitted(self):
+        tile = self.state.tile
+        tile.x_param = "TIME"
+        self.tile.rebuild()                 # empty: no y yet
+        before = self.fits()
+        tile.y_params = ["ALT"]
+        self.tile.rebuild()
+        self.assertGreater(self.fits(), before)
+        self.assertTrue(tile.view_initialised)
+
+    def test_later_rebuilds_leave_the_frame_alone(self):
+        tile = self.state.tile
+        tile.x_param, tile.y_params = "TIME", ["ALT"]
+        self.tile.rebuild()
+        settled = self.fits()
+        for _ in range(3):
+            self.tile.rebuild()
+        self.assertEqual(self.fits(), settled)
+
+    def test_emptying_a_tile_and_filling_it_again_refits(self):
+        tile = self.state.tile
+        tile.x_param, tile.y_params = "TIME", ["ALT"]
+        self.tile.rebuild()
+        tile.y_params = []
+        self.tile.rebuild()                 # back to empty
+        before = self.fits()
+        tile.y_params = ["MACH"]
+        self.tile.rebuild()
+        self.assertGreater(self.fits(), before)
+
+    def test_a_tile_with_no_runs_selected_is_also_unframed(self):
+        tile = self.state.tile
+        tile.x_param, tile.y_params = "TIME", ["ALT"]
+        self.tile.rebuild()
+        self.state.selected_sims.clear()
+        self.state._plotted = None
+        self.tile.rebuild()
+        self.assertFalse(tile.view_initialised)
+
+class TestDataPanelRunFilter(unittest.TestCase):
+    """Finding a handful of runs among hundreds, by name.
+
+    Runs are named X.Y.Z and there are often several hundred of them, so the
+    slow part of using DATA is scrolling. The filter is a view: it hides rows
+    and never changes what is plotted, which is what lets it be applied and
+    cleared freely in the middle of building a page.
+    """
+
+    def panel(self, sims):
+        panel = make_data_panel(_ListSession(sims=sims))
+        panel.refresh()
+        return panel
+
+    def visible(self, panel):
+        return [row.text(0) for row in sim_rows(panel) if not row.isHidden()]
+
+    def type_filter(self, panel, text):
+        panel.filter_edit.setText(text)
+        # The real panel waits out a keystroke pause; firing the timer is what
+        # the pause ends in.
+        panel._filter_timer.fire()
+
+    def test_a_bare_pattern_matches_any_part_of_the_name(self):
+        panel = self.panel(("1.2.1", "2.1.3", "3.4.5"))
+        self.type_filter(panel, "2.1")
+        # Both of these contain 2.1; a prefix match would find only one, which
+        # is the whole reason the match is on any part of the name.
+        self.assertEqual(self.visible(panel), ["1.2.1", "2.1.3"])
+
+    def test_the_match_ignores_case(self):
+        panel = self.panel(("Run_A", "run_b"))
+        self.type_filter(panel, "RUN_A")
+        self.assertEqual(self.visible(panel), ["Run_A"])
+
+    def test_a_wildcard_matches_the_whole_name(self):
+        panel = self.panel(("2.1.3", "2.57.3", "2.1.4", "1.1.3"))
+        self.type_filter(panel, "2.*.3")
+        self.assertEqual(self.visible(panel), ["2.1.3", "2.57.3"])
+
+    def test_clearing_the_filter_shows_everything_again(self):
+        panel = self.panel(("1.2.1", "2.1.3"))
+        self.type_filter(panel, "zzz")
+        self.assertEqual(self.visible(panel), [])
+        self.type_filter(panel, "")
+        self.assertEqual(self.visible(panel), ["1.2.1", "2.1.3"])
+
+    def test_a_file_with_no_matching_run_is_hidden_too(self):
+        panel = self.panel(("1.2.1", "2.1.3"))
+        self.type_filter(panel, "9.9")
+        parent = panel.tree.topLevelItem(0)
+        self.assertTrue(parent.isHidden())
+
+    def test_a_file_whose_own_name_matches_keeps_all_of_its_runs(self):
+        # Having asked for that file by name, hiding most of it would be
+        # perverse.
+        panel = self.panel(("1.2.1", "2.1.3"))
+        self.type_filter(panel, "flight_a")
+        self.assertEqual(self.visible(panel), ["1.2.1", "2.1.3"])
+
+    def test_the_filter_never_changes_the_selection(self):
+        panel = self.panel(("1.2.1", "2.1.3"))
+        state = panel._state
+        state.set_selected(0, 0, True)
+        state.set_selected(0, 1, True)
+        self.type_filter(panel, "1.2")
+        self.assertTrue(state.is_selected(0, 0))
+        self.assertTrue(state.is_selected(0, 1))
+
+    def test_a_hidden_run_stays_ticked_and_comes_back_ticked(self):
+        panel = self.panel(("1.2.1", "2.1.3"))
+        panel._state.set_selected(0, 1, True)
+        # Through a refresh, so the tick is on the row and not merely in the
+        # state: what is being tested is that hiding the row leaves it there.
+        panel.refresh()
+        self.type_filter(panel, "1.2")
+        self.type_filter(panel, "")
+        row = sim_rows(panel)[1]
+        self.assertEqual(row.checkState(0), Qt.CheckState.Checked)
+
+    def test_the_count_says_how_much_is_shown(self):
+        panel = self.panel(("1.2.1", "2.1.3", "3.4.5"))
+        self.type_filter(panel, "2.1")
+        self.assertIn("2 of 3", panel.filter_count.text())
+
+    def test_plot_all_follows_the_filter_while_one_is_typed(self):
+        # "Show me 2.1*, then plot all of them" is the reason to have a filter.
+        panel = self.panel(("1.2.1", "2.1.3", "3.4.5"))
+        self.type_filter(panel, "2.1")
+        panel._set_all(True)
+        state = panel._state
+        self.assertEqual([state.is_selected(0, i) for i in range(3)],
+                         [True, True, False])
+
+    def test_plot_all_covers_everything_with_no_filter_typed(self):
+        panel = self.panel(("1.2.1", "2.1.3", "3.4.5"))
+        panel._set_all(True)
+        state = panel._state
+        self.assertEqual([state.is_selected(0, i) for i in range(3)],
+                         [True, True, True])
+
+    def test_the_buttons_say_when_their_scope_has_narrowed(self):
+        panel = self.panel(("1.2.1", "2.1.3"))
+        self.type_filter(panel, "2.1")
+        self.assertIn("shown", panel.select_buttons["Plot all"][0].text())
+        self.type_filter(panel, "")
+        self.assertEqual(panel.select_buttons["Plot all"][0].text(), "Plot all")
+
+    def test_typing_does_not_filter_until_the_pause(self):
+        panel = self.panel(("1.2.1", "2.1.3"))
+        panel.filter_edit.setText("1.2")
+        # No fire() yet: the pattern is in the box but the pass has not run.
+        self.assertEqual(self.visible(panel), ["1.2.1", "2.1.3"])
+        panel._filter_timer.fire()
+        self.assertEqual(self.visible(panel), ["1.2.1"])
+
+    def test_a_rebuilt_tree_is_filtered_again(self):
+        # refresh() clears and rebuilds the rows, so whatever was hidden is not
+        # hidden any more unless the pass runs again.
+        panel = self.panel(("1.2.1", "2.1.3"))
+        self.type_filter(panel, "1.2")
+        panel._tree_state = None
+        panel.refresh()
+        self.assertEqual(self.visible(panel), ["1.2.1"])
+
+    def test_matching_is_a_pure_function_of_two_strings(self):
+        self.assertTrue(panels.DataPanel.matches("", "anything"))
+        self.assertTrue(panels.DataPanel.matches("2.1", "12.10.3"))
+        self.assertFalse(panels.DataPanel.matches("2.1", "3.4.5"))
+        self.assertTrue(panels.DataPanel.matches("*.3", "2.1.3"))
+        self.assertFalse(panels.DataPanel.matches("2.*.3", "2.1.4"))
 
 class TestHeldBackRunsAreMarked(unittest.TestCase):
     """A ticked run that is not on screen has to say why.

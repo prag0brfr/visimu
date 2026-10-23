@@ -163,6 +163,45 @@ void aoe_end_arrays(aoe_session* s, int file) {
     }, 0);
 }
 
+int aoe_column_loaded(aoe_session* s, int file, int sim, int column) {
+    return guarded(s, [&] {
+        aoe::Dataset* dataset = s->session.file(file);
+        if (!dataset) return 0;
+        return dataset->column_loaded(static_cast<std::size_t>(sim), column)
+                   ? 1
+                   : 0;
+    }, 0);
+}
+
+int aoe_all_columns_resident(aoe_session* s, int file) {
+    return guarded(s, [&] {
+        aoe::Dataset* dataset = s->session.file(file);
+        if (!dataset) return 0;
+        return dataset->all_columns_resident() ? 1 : 0;
+    }, 0);
+}
+
+int aoe_required_columns(aoe_session* s, int file, const char* const* names,
+                         int n_names, int* out, int max) {
+    return guarded(s, [&] {
+        if (!names || n_names <= 0) return 0;
+        std::vector<std::string> wanted;
+        wanted.reserve(static_cast<std::size_t>(n_names));
+        for (int i = 0; i < n_names; ++i)
+            if (names[i]) wanted.push_back(names[i]);
+
+        const std::vector<int> columns = s->session.required_columns(file, wanted);
+        if (out && max > 0) {
+            const int count = static_cast<int>(
+                columns.size() < static_cast<std::size_t>(max)
+                    ? columns.size()
+                    : static_cast<std::size_t>(max));
+            for (int i = 0; i < count; ++i) out[i] = columns[static_cast<std::size_t>(i)];
+        }
+        return static_cast<int>(columns.size());
+    }, 0);
+}
+
 int aoe_add_file(aoe_session* s, const char* path) {
     return guarded_write(s, [&] {
         if (!path) {
