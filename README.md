@@ -2,42 +2,28 @@
 
 A fast viewer for AOE simulation result files.
 
-**Version 2.2.0** adds a thirteenth panel and makes large HDF5 files open at
-once. **SYNC** aligns the runs of a tile on an event rather than on the clock —
-"line these up where the speed began to rise" — with the offset found by
-interpolation, runs that never meet the condition reported rather than hidden,
-and the whole setting saved in the workspace. The DATA tab filters its run list
-by name, so `2.1` finds `2.1.3` and `1.2.1` in a study of hundreds. A page can
-be duplicated whole, and removing one now asks first. Double-clicking a tile
-fits it *and* opens PARAMS. And an HDF5 file is no longer read when it is
-opened: its columns are fetched as they are drawn, and a sidecar is written in
-the background afterwards, so every later open takes the cached path.
+**Version 2.2.1.** What it does:
 
-**Version 2.1.2** made the window fit any screen and the interface any taste:
-two toolbar buttons scale the text and the spacing everywhere, each panel
-scrolls so the window's minimum height no longer follows the tallest one, the
-light/dark toggle moved out of the tab rail and into the toolbar, *Fit* moved
-down to the page and tile bar with the rest of what acts on tiles, the colour
-picker stops painting its own buttons in the colour being edited, and building
-the executable writes `sample/` beside `build/` and `dist/`.
+- **Opens a study, not a file.** Add any number of result files, tick the runs
+  you want, and compare them across a grid of plot tiles arranged in pages.
+  Thirteen side panels decide what is drawn and how; the whole arrangement
+  saves as a workspace.
+- **Reads AOE text and HDF5.** Both dialects of the `.aoe` format, and HDF5
+  under any of the four tree conventions exporters use. Everything downstream —
+  decimation, ISO filters, computed parameters, styles, workspaces — is
+  identical either way.
+- **Large files open at once.** An HDF5 file is not read when it is opened: its
+  columns are fetched as they are drawn. A faster `.aoec` copy of any file over
+  8 MB is written afterwards by a separate process, so the window stays usable
+  while it happens and every later open takes the cached path.
+- **Compares runs on their own terms.** Filter runs by a value they hold
+  constant, colour and dash them by independent keys, align them on an event
+  rather than on the clock, and read any sample of any channel off the plot.
+- **Derived channels** from an expression over the ones in the file, evaluated
+  in the core.
 
-**Version 2.1.1** fixed what 2.1.0 got wrong and tightened the legend: names
-given to files and runs are saved in the workspace, `Style by ISO` reaches the
-legend, the checkbox beside an ISO parameter ticks all of its values, an
-unticked parameter leaves the top of the PARAMS list, legend rows are set
-smaller and tighter, files are reloaded on request instead of on a timer, and
-`Colour by Parameter` is the default.
-
-The full manual is `doc/aoeViewer-2.2.0-User-and-Reference-Guide.pdf`, built
-from the LaTeX source beside it; it replaces both the 2.0.0 guide and the 2.1.x
-addenda, and Chapter 1 lists everything that changed.
-
-**Version 2.1.0** added independent *Colour by* and *Style by* encodings, scrollable
-Colour/Line tables, two-line plot titles that keep every selected parameter
-name, unlabelled plot axes (the title already carries the names), and PARAMS
-lists that put the active tile's selected channels first without breaking the
-filter. Workspaces stay JSON schema version 3 and record `app_version`; files
-written by 2.0.0 open unchanged (`Style by` defaults to None).
+The full manual is `doc/aoeViewer-2.2.1-User-and-Reference-Guide.pdf`, built
+from the LaTeX source beside it.
 
 The heavy work — parsing, computed parameters, plot decimation — happens in a
 C++17 core. The user interface is Python with Qt (PySide6). The two meet at a
@@ -84,16 +70,17 @@ seconds, and megabytes apiece.
 - [Quick start](#quick-start)
 - [Requirements](#requirements)
 - [Building the core](#building-the-core)
-  - [Linux and macOS](#linux-and-macos)
-  - [Windows](#windows)
-  - [With CMake (optional)](#with-cmake-optional)
 - [Installing the Python packages](#installing-the-python-packages)
-  - [Normal networks](#normal-networks)
-  - [Offline or behind a proxy](#offline-or-behind-a-proxy)
 - [Running](#running)
 - [Building the standalone executable](#building-the-standalone-executable)
 - [Using it](#using-it)
+  - [The panels](#the-panels)
+  - [Mouse modes](#mouse-modes)
+  - [Fitting](#fitting)
+  - [Pages and tiles](#pages-and-tiles)
+  - [Workspaces](#workspaces)
 - [Computed parameters](#computed-parameters)
+- [HDF5 files](#hdf5-files)
 - [The AOE file format](#the-aoe-file-format)
 - [Scripting without the GUI](#scripting-without-the-gui)
 - [Performance](#performance)
@@ -337,6 +324,31 @@ loaded, and the worker-thread count.
 To use a core library from elsewhere, set `AOEVIEWER_CORE` to its directory or
 its full path.
 
+### Command-line options
+
+| | |
+|---|---|
+| `[files...]` | result files to open at startup |
+| `--version` | print the package, core and library versions, and exit |
+| `--selftest` | check that every dependency loads, report, and exit. Run this first when the application will not start |
+| `--memory-limit MB` | cap on cached sample data (default 2048). Columns beyond this are dropped least-recently-used first and re-read on demand |
+| `--build-cache FILE...` | write a `.aoec` sidecar for each named file and exit, without opening a window |
+
+`--build-cache` is how the application builds sidecars for large files in the
+background — it starts a copy of itself with this flag, and the window carries
+on. It is also useful on its own, to warm a directory of results overnight so
+that nobody waits for a first open:
+
+```bash
+PYTHONPATH=python python -m aoeviewer --build-cache study/*.aoe study/*.hdf5
+```
+
+It opens each file read-only, writes nothing but the sidecar, takes no lock that
+would stop a solver writing to the source, and abandons a sidecar whose source
+changes while it works. The exit status is the number of files for which no
+sidecar was written, and a failure is never fatal: a sidecar only makes opening
+faster.
+
 ---
 
 ## Building the standalone executable
@@ -455,72 +467,65 @@ which makes it the better answer if you have the choice.
 
 ## Using it
 
-A narrow rail down the left edge holds six tabs with vertical labels, so they
-cost almost no width. The rest of the window is a grid of plots.
+The window has a tab rail down the left edge, a panel beside it, and a grid of
+plot tiles filling the rest. A bar above the grid manages pages and tiles; a
+status bar along the bottom carries the current summary, a progress bar while
+the application is busy, the crosshair readout and the size of the sample cache.
+
+One tile is **active** — marked by an accent border — and every per-tile control
+acts on it. Click a tile to make it active; double-click to make it active, fit
+it, and bring PARAMS forward.
+
+### The panels
+
+Thirteen panels, selected from the rail. Six act on the active tile only
+(PARAMS, STYLE, SCALE, SYNC, 3D, TEXT); the rest apply to everything.
 
 **DATA** — add and remove files, and tick which runs to plot. Every run of the
-first file loaded is selected automatically so something is on screen straight
-away. **Reload** re-reads the selected file(s) from disk, or every open file
-when nothing is selected; it is also on the right-click menu, by name.
+first file is ticked automatically, so something is on screen straight away.
+*Reload* re-reads the selected files from disk, or every open file when nothing
+is selected. Nothing polls the disk: whether the data on disk is finished is a
+question only the person running the solver can answer, so re-reading happens
+when you ask and at no other time.
 
-**PARAMS** — pick the x parameter and tick y parameters for the *active* tile
-(click a tile to make it active). Channels already selected on that tile are
-listed first, in the order they were ticked; the rest keep the file order, and
-unticking one puts it straight back among them. (The promotion is recomputed
-from the file order on every tick. Applying it to the list's own order instead,
-as 2.1.0 did, has no way back: once a name has been moved to the top, "the
-order as given" *is* the promoted one, and unticking it left it there.) The
-filter box accepts wildcards: `AL*` matches `ALPHA` and `ALT`. Filtering only
-hides rows — a selected name that does not match stays selected and stays at
-the top, and reappears as soon as the filter lets it through. **Right-click a
-parameter** to create an alias for it, to make it the x axis, or to copy its
-name — creating an alias where you found the parameter beats being sent to
-another tab to find it again. How the tile *looks* — legend, grid, log-y,
-markers — is all in STYLE. Plot titles name every selected Y; when the list is
-long they wrap onto two lines. The axes themselves are left unlabelled — the
-title already says what is plotted.
+Double-click a file or run to **rename** it, or use the right-click menu. Only
+the label changes — the identity a colour or a saved workspace is keyed on is
+untouched, so a renamed run keeps its style. Hovering shows the full path, and a
+renamed run also shows the name the file itself gives it.
 
-**COMPUTE** — define derived channels. See below.
+Runs are often named `X.Y.Z` and often number in the hundreds, so the box above
+the tree **filters** them:
 
-Anything drawn **over** the curves — the crosshair readout, the slope figure,
-a text note, a 3D tick — sits on an opaque panel in the plot's own background
-colour. Without one, text was dark on dark wherever a trace ran under it and
-the eye read the two as one object.
+- `2.1` shows `2.1.3` and `1.2.1` alike — the match is on any part of the name,
+  because the middle field is as often the interesting one as the first.
+- `2.*.3` matches `2.1.3` and `2.57.3`: a pattern containing a wildcard is
+  matched against the whole name instead.
+- Matching ignores case, and a file whose own name matches keeps all of its runs.
 
-**Markers and bands have no captions of their own.** They had, and it was the
-wrong place for them twice over: pyqtgraph anchors a line's label to the line,
-so it sat on the data with nothing behind it, and every keystroke while editing
-one rebuilt the tile and deleted the item being edited — the caption vanished as
-it was typed. Name a band with a **text note** placed over it instead: those are
-positioned where you want them, dragged rather than typed at, and carry the
-opaque ground described above. Workspaces saved when the field existed still
-open; the retired key is ignored.
+The filter is a view and nothing more: a hidden run keeps its tick and keeps
+plotting. While one is typed, *Plot all* and *Plot none* say *(shown)* and act
+only on the rows on screen.
 
-**ISO values** are written the same way everywhere they appear — a tree row, a
-legend entry, a generated interval name — because every character there is one
-the data does not get: two decimals with trailing zeros trimmed (`0.75`, `3`,
-`180`, `1234.57`), and a power of ten at either end of the range where two
-decimals stop saying anything (`1.23e-3`, `5e-5`, `1.23e6`, `-2.5e8`). The
-rules, and the reason the small end is decided by rounding rather than by a
-threshold, are at the top of `core/include/aoe/iso.hpp`; `ISO_DECIMALS` there is
-the one place to change if you want more.
+**PARAMS** — pick the x parameter and tick y parameters for the active tile.
+Channels already on the tile are listed first, in the order they were ticked;
+the rest keep the file order, and unticking one puts it straight back among
+them. The filter box accepts wildcards: `AL*` matches `ALPHA` and `ALT`.
+Filtering only hides rows — a selected name that does not match stays selected
+and reappears as soon as the filter lets it through. **Right-click a parameter**
+to alias it, make it the x axis, or copy its name.
 
-Two decimals cannot tell `1.1701` from `1.1703`, so a parameter whose values are
-that close shows repeated rows. Each still ticks independently — a row carries
-the value it stands for, not its label — but they read alike.
+**COMPUTE** — define derived channels from the ones in the file. See
+[Computed parameters](#computed-parameters).
 
-**ISO** — filter runs by parameters that are constant within a run (Mach number,
-mass, altitude). **Several filters can be active at once and they combine with
-AND**, so adding one narrows the set: Mach 0.75 *and* 180 t. Tick values
-individually, or group them into intervals when a sweep has more distinct values
-than you want to read. Colouring is a separate choice, made per tile in STYLE,
-and keys on exactly one parameter — named in the legend so it is unambiguous.
+**ALIAS** — give a channel a readable display name without touching the file,
+so the application shows "Load factor" while still reading `NZ`.
 
-The tab is a **tree**: one collapsible node per parameter over its own values,
-so every filter and everything selected in it is on screen at once. It replaced
-a list of parameters above a list of the selected one's values, which could only
-ever show one filter's values at a time — with three active there was no way to
-see what was selected without clicking through them and remembering.
+**ISO** — filter runs by parameters that are constant within a run (Mach
+number, mass, altitude). **Several filters can be active at once and they
+combine with AND**, so adding one narrows the set: Mach 0.75 *and* 180 t.
+
+The panel is a tree, one collapsible node per parameter over its own values, so
+every filter and everything selected in it is visible at once:
 
 ```
  v MACH      3/12
@@ -532,142 +537,120 @@ see what was selected without clicking through them and remembering.
 
 A parameter's checkbox is a **select-all for the values under it**: it ticks
 every value (or every interval, when the parameter is grouped), unticks them
-all, and shows a partial tick when some but not all are on — the same thing the
-*All* and *None* buttons do to the selected parameter, on the row itself. Up to
-2.1.0 it carried the filter's own on/off flag instead, so the obvious reading of
-a checkbox over a list of checkboxes did something else entirely.
+all, and shows a partial tick when some but not all are on. The filter's own
+on/off flag is on the right-click menu as *Use this filter*; switching it off
+keeps the values you ticked, which makes "with and without this" a two-click
+comparison, and the row says `paused`. Each row carries a count (`3/12`,
+`all 5`, `none of 8`) and hovering names the selected values. Nodes stay open
+across refreshes, and one that no longer appears in any loaded file says so.
 
-That flag is on the **right-click menu** now, as *Use this filter*, where it is
-named rather than guessed at. Switching it off keeps the values you ticked,
-which is what makes "with and without this" a two-click comparison, and the row
-says `paused` so the tree still accounts for a filter that is not narrowing
-anything. Its row also carries a count (`3/12`, `all 5`, `none of 8`) and
-hovering names the selected values. Nodes stay open across refreshes, and one
-that no longer appears in any loaded file says so rather than showing an empty
-node that looks broken.
+**Group…** opens the interval editor for the selected parameter, for a sweep
+with more distinct values than you want to read. Choose the number of groups —
+never more than there are values — and it splits the observed range evenly; then
+edit any boundary and the rest follow. Editing moves an *edge*, not an interval:
+a row's From and the row above's To are the same number, so overlaps and gaps
+cannot be expressed. Pulling an outer edge inwards is how you deliberately
+exclude an outlier. The **Values** column counts what each interval actually
+claims, so an interval that catches nothing says so before you close the dialog.
 
-**Group…** opens the interval editor for the selected parameter (also on the
-right-click menu, along with select-all/none and remove). Choose the number of
-groups — never more than there are values — and it splits the observed range
-evenly; then edit any boundary and the rest follow. Editing moves an *edge*, not
-an interval: a row's From and the row above's To are the same number, so
-overlaps and gaps are not something to validate but something that cannot be
-expressed. Pulling an outer edge inwards is how you deliberately exclude an
-outlier. The **Values** column counts what each interval actually claims, the
-same way the filter will, so an interval that catches nothing says so before you
-close the dialog rather than after.
+If a file is loaded whose values fall outside intervals set up for the old ones,
+the parameter's row says how many fall outside every group — those runs are
+being filtered out, and without the note the plot simply comes back short. The
+grouping is reported rather than silently redrawn; **Distribute evenly** is the
+one-click fix.
 
-When data changes under a grouping — a file loaded whose values fall outside
-intervals set up for the old ones — the parameter's row says how many values
-fall outside every group. Those runs are being filtered out, and without the
-note the plot simply comes back short. The grouping is reported, not silently
-redrawn: rewriting boundaries someone edited by hand, because a file was opened,
-would be worse. **Distribute evenly** is the one-click fix.
+**STYLE** — how the tile and its curves look.
 
-**STYLE** — how the tile and its curves look:
-
-In **Inspect** mode, clicking marks the sample being reported with a red dot, so
-the table of forty channels beside it is anchored to something visible — the
-click lands on whichever curve was nearest, which is not always the one you were
-aiming at. The dot comes off when you leave Inspect or make another tile active.
-
-- *Tile display* — legend, grid, log Y and point markers. These used to be at
-  the bottom of PARAMS, which split "what is plotted" and "how it looks" across
-  two tabs with no principle behind the split.
-- *Colour by* — parameter, simulation, or ISO value. This sets the colour only.
-  **Parameter is the default**, and leads the row: a tile is nearly always asked
-  which quantity a line is, and colouring by run answers a different question —
-  one that a twenty-five-run study answers with twenty-five colours that name
-  nothing the user chose. Colour by run is one click away for the case where
-  the runs are the subject.
-  The active mode is shown both by the radio indicator and by a bold label, so
-  it stays legible whatever the platform style does with check indicators.
-  Styles are keyed by name, not by list position, so loading another file never
-  recolours what is already on screen. The radios are identified by their mode
-  rather than by their position in the row, so reordering the row cannot
-  re-label a saved tile.
-- *Style by* — None, File, Simulation, or ISO. This sets the dash pattern and
-  marker independently of colour. *None* keeps the previous behaviour (dash
-  follows the colour key). *File* is the usual partner for *Colour by
-  Parameter*: one colour per quantity, one dash per result file. *Apply
-  encoding to all tiles* copies both choices, including the ISO parameter each
-  mode is using.
-- Two tables, *Colour* and *Line*, each with its own scrollbar when the list
-  is long. Colour rows are the identities of *Colour by*; Line rows are the
-  identities of *Style by*. In ISO mode the rows are the ISO values (or
-  groups), so you set the colour for "MACH = 0.75" once and every run at that
-  Mach uses it.
+- *Tile display* — legend, grid, log Y and point markers.
+- *Colour by* — parameter, simulation, or ISO value; this sets the colour only.
+  **Parameter is the default**: a tile is nearly always asked which quantity a
+  line is, and colouring by run answers a different question — one a
+  twenty-five-run study answers with twenty-five colours that name nothing you
+  chose. Styles are keyed by name, not by list position, so loading another file
+  never recolours what is already on screen.
+- *Style by* — None, File, Simulation or ISO; this sets the dash pattern and
+  marker independently of colour. *None* makes the dash follow the colour key.
+  *File* is the usual partner for *Colour by Parameter*: one colour per
+  quantity, one dash per result file. *Apply encoding to all tiles* copies both
+  choices, including the ISO parameter each is keyed on.
+- Two tables, *Colour* and *Line*, each scrolling when the list is long. Colour
+  rows are the identities of *Colour by*, Line rows those of *Style by*. In ISO
+  mode the rows are the ISO values, so you set the colour for "MACH = 0.75" once
+  and every run at that Mach uses it.
 - Global line width and marker size, plus *Re-assign palette* to start over.
 - *Legend* — which corner it sits in, and which parts each entry is built from
-  (parameter, ISO value, file, run). **Turning File and Run off merges identical
-  entries**, which is what turns a fifty-run ISO plot into one legend row per ISO
-  value instead of fifty rows saying the same thing. *ISO* writes every ISO
-  identity a curve carries — the colour's and the dash's, once each if both key
-  on the same parameter — so a tile coloured by parameter and dashed by ISO
-  still gets one row per value, and the rows are ordered by value or by
-  interval rather than by which run happened to be walked first. The dash
-  pattern and marker are not spelled out in the text: the legend already draws a
-  sample of the actual curve, so the swatch carries both at once.
-  **Apply legend to all tiles** copies the whole lot — shown or not, corner or
-  dragged position, and the four parts — onto every tile on every page, and says
-  how many it changed. Comparing tiles is the reason to have several, and a
-  legend settled on one of them was settled for all of them.
+  (parameter, ISO value, file, run). The default is the parameter name alone.
+  **Turning File and Run off merges identical entries**, which turns a fifty-run
+  ISO plot into one row per ISO value instead of fifty rows saying the same
+  thing. *ISO* writes every ISO identity a curve carries — the colour's and the
+  dash's, once each if both key on the same parameter — so *Colour by Parameter*
+  with *Style by ISO* reads `ALT | MACH = 0.75`, ordered by value or interval.
+  The dash and marker are not spelled out in words: the legend draws a sample of
+  the actual curve, which carries both. **Apply legend to all tiles** copies the
+  whole lot onto every tile on every page and says how many it changed.
 
-Files and runs can be **renamed** from the DATA tab — double-click, or use the
-right-click menu. Only the label changes: the identity keys that colours and
-saved workspaces are built on are untouched, so a renamed run keeps its style.
-Hovering shows the full path, and a renamed run also shows the name the file
-itself gives it. **The names are saved with the workspace** and put back when it
-is loaded; see *Workspaces* above for how they are keyed and what an older
-workspace does.
-
-**ALIAS** — give a channel a readable display name without touching the file, so
-the application shows "Load factor" while still reading `NZ`.
+The legend and any text captions can be dragged wherever you want them.
 
 **SCALE** — fix the displayed range of either axis. While unlocked the four
 boxes follow the plot as you zoom and pan, so ticking *Lock* freezes exactly
-what you are looking at.
-
-A locked axis is a hard bound, not just a starting position: the view box is
-given matching limits and the mouse is disabled on that axis, so a drag or a
-wheel cannot take you back outside the range you just imposed.
+what you are looking at. A locked axis is a hard bound, not a starting position:
+the view box is given matching limits and the mouse is disabled on that axis, so
+a drag or a wheel cannot take you back outside it.
 
 *Apply X range to every tile with the same X axis* attaches the range **to the
-variable**, not just to the tiles that exist at that moment — so a tile you fill
-in afterwards is scaled the same way. Setting up the scales first and then
-populating the grid is the normal order of work, and the earlier version, which
-walked the current tiles and stopped, silently ignored everything you did after
-that. The *Constrained variables* list shows what is currently declared, and
-*Unlock both and auto-fit* releases the constraint on this tile's parameters as
-well as unlocking the tile — otherwise the button would appear to do nothing,
-since the next redraw would re-apply it.
+variable** rather than to the tiles that exist at that moment, so a tile you
+fill in afterwards is scaled the same way — setting up the scales first and then
+populating the grid is the normal order of work. The *Constrained variables*
+list shows what is declared, and *Unlock both and auto-fit* releases the
+constraint on this tile's parameters as well as unlocking the tile.
 
-**INSPECT** — two sub-tabs, because they answer the same question ("what are
-the numbers here?") one sample and one curve at a time; having them as separate
-top-level tabs meant two places that were only ever useful together.
+**SYNC** — align the runs of a tile on an event rather than on the clock.
 
-*Statistics* — min, max, mean, standard deviation and sample count per curve,
-over **the range currently shown**, updated as you pan and zoom. When you have
-zoomed into a manoeuvre, the peak load factor *there* is the question; the
-figure over the whole run is not. A checkbox switches to the whole channel, and
-the table copies to the clipboard tab-separated.
+A channel logged over several runs of the same manoeuvre carries that manoeuvre
+at a different place in each run, because each recording started at a different
+moment. Plotted against TIME the curves are the same shape smeared sideways.
+SYNC shifts each run along the x axis so that a chosen event lands in the same
+place for all of them. Name the channel the event is about, say what counts as
+the event, and say where it should end up:
 
-*At a point* — switch the mouse to Inspect, then:
+| Condition | What it finds |
+| --- | --- |
+| first rises above / falls below | the first sample past a level you give, interpolated between samples |
+| first crosses | the same, in whichever direction the channel approaches it from |
+| first starts to rise / fall | no level needed: the first move of 2 % of the channel's own range away from where it started |
+| reaches its maximum / minimum | the extreme of the run |
 
-- **click** a curve — the panel lists every channel of *that* run at that x
-  value, with the file and run named. This is the "what was everything else
-  doing here?" question that a single plot cannot answer.
-- **drag** across the tile — a dashed line follows the pointer and the panel
-  reports d*y*/d*x*, both deltas, the two endpoints and the inverse slope. It
-  answers the question people otherwise answer by reading two points off the
-  screen and doing the arithmetic on paper.
+| Move the event to | Result |
+| --- | --- |
+| zero | the axis reads as time since the event |
+| the first run's event | everything moves onto the first run, keeping the original axis values meaningful |
+| a value I choose | for lining two tiles up on the same reference |
 
-A drag shorter than about six pixels counts as a click, so the two gestures do
-not fight each other.
+A car accelerating from rest, logged five times: choose SPEED, *first rises
+above*, 0.5, and *zero*. Every run is then drawn with x = 0 at the moment it
+began to move.
+
+Three things worth knowing. The event is found by **interpolating** between the
+two samples either side of it rather than taking the nearer one; two runs logged
+at different rates would otherwise align only to the sampling interval, which
+shows up as a step between them. Where the crossing falls inside a gap — NaN,
+which is what an unreadable token becomes — the first readable sample past the
+level is reported instead, because there is nothing to interpolate across. And a
+run in which the event never happens is **left where it is, and counted**: the
+panel says "7 run(s) aligned, 1 left unaligned because the event was not found
+in them", and *List the events* names them with the x value found in each.
+Hiding such a run would lose data; shifting it by a guess would be a lie.
+
+The alignment is per tile, so one page can hold the aligned comparison beside
+the raw one — the arrangement that shows what the alignment did. *Apply to every
+tile on this page* copies it across. The tile title says so too:
+`ALT = f(TIME)  [0 = SPEED event]`. Markers and bands are evaluated in each
+run's own axis, so they keep meaning "this instant in this run" and travel with
+the curve they mark.
 
 **3D** — turn the active tile into a rotatable projection of three channels:
 pick X, Y and Z, then spin it with the two sliders, the Iso/Top/Front/Side
-presets, or with the mouse. Navigation in Pan mode follows the convention every
+presets, or with the mouse. In Pan mode, navigation follows the convention every
 simulation viewer shares:
 
 | | |
@@ -678,237 +661,208 @@ simulation viewer shares:
 | wheel (Zoom mode) | zoom |
 | double-click, `Ctrl+0` | frame everything again |
 
-Rotate alone was not enough: once you have zoomed in there is no way to reach
-anything but the centre. The zoom range runs from 1000× in to 5000× out, so
-pulling right back from a long trajectory is possible. The zoom is remembered across
-rotations — a 3D tile is rebuilt on every rotation step, so without somewhere
-to keep it, a zoom would vanish the moment you turned the object.
+The zoom runs from 1000× in to 5000× out, so pulling right back from a long
+trajectory is possible, and it survives a rotation.
 
-**The grid is on the back walls.** An orthographic projection has no
-perspective cue at all, so without a reference surface a point in the middle of
-the frame could be anywhere along the line of sight, and a trajectory that loops
-back on itself is guesswork. Grid lines are drawn on the three faces of the data
-box that lie *behind* the trajectory, and which three those are is recomputed
-from the view direction, so they swap as you turn the object and never draw over
-the data. MATLAB, Origin, Tecplot, gnuplot, matplotlib's mplot3d and Plotly all
-render 3D axes this way; the convention is old enough to be read without
-explanation.
-
-Tick values sit on the three box edges radiating from the far corner, coloured
-by axis to match the triad. They matter as much as the lines do: before them a
-3D tile carried no numeric scale anywhere — you could see the shape of a
-trajectory and not read a single value off it.
-
-The whole thing is one checkbox in the 3D tab, on by default. A very dense
-trajectory is occasionally clearer bare. Note this is *not* the wireframe cube
-that used to sit in the middle of the tile: only the far faces are drawn, so
-what you see is three panels meeting at a corner rather than a box around the
-data.
+**The grid is drawn on the back walls.** An orthographic projection has no
+perspective cue, so without a reference surface a point in the middle of the
+frame could be anywhere along the line of sight, and a trajectory that loops
+back on itself is guesswork. Grid lines go on the three faces of the data box
+that lie *behind* the trajectory, recomputed from the view direction so they
+swap as you turn the object and never draw over the data — the convention
+MATLAB, Origin, Tecplot, gnuplot, mplot3d and Plotly all share. Tick values sit
+on the three box edges radiating from the far corner, coloured by axis. It is
+one checkbox, on by default; a very dense trajectory is occasionally clearer
+bare.
 
 Orientation comes from a **triad in the bottom-left corner** — three labelled
-arrows, X red, Y green, Z blue, turning with the view. That is the convention
-ParaView, Tecplot, EnSight and every CAD package share, and it is the one part
-of this interface a user already knows before opening it. The labels stay
-`X`/`Y`/`Z` rather than becoming parameter names, so the gizmo does not turn
-into a second legend; hover it for the channel on each axis and its range, and
-the panel says which is which.
+arrows, X red, Y green, Z blue, turning with the view, as in ParaView, Tecplot,
+EnSight and every CAD package. The labels stay `X`/`Y`/`Z` rather than becoming
+parameter names, so the triad does not turn into a second legend; hover it for
+the channel on each axis and its range. There is no wireframe box around the
+data: a cube drawn through the middle of a trajectory competes with the curves
+while answering a question the triad answers better.
 
-It holds a constant size at any zoom because it is parented to the *view box*
-rather than to the data: pyqtgraph applies the pan/zoom transform to a child
-group, so an item attached directly to the view box lives in viewport pixels
-and neither pan nor zoom reaches it. Drawing it in data coordinates and
-rescaling on every range change would also work, but would be wrong for the
-frame between the zoom and the correction.
+Each axis is normalised to the cube, so three channels with unrelated units —
+metres, radians, Mach — produce a readable shape instead of a needle, and the
+bounding box carries each axis's real range.
 
-There is deliberately no wireframe box around the data. A cube drawn through
-the middle of a trajectory competes with the curves for attention while
-answering a question the corner triad answers better. Each axis is
-normalised to the cube, so three channels with unrelated units — metres,
-radians, Mach — produce a readable shape instead of a needle. The bounding box
-carries each axis's real range.
+**INSPECT** — two sub-tabs, answering "what are the numbers here?" one curve
+and one sample at a time.
 
-It is an orthographic projection drawn with the ordinary 2D machinery rather
-than an OpenGL scene, for two reasons: pyqtgraph's GL view needs PyOpenGL, which
-is one more wheel to get past a blocked package index, and under perspective the
-same interval covers different distances depending on where it sits in the
-frame — exactly the property you do not want when reading values off a plot.
+*Statistics* — min, max, mean, standard deviation and sample count per curve,
+over **the range currently shown**, updated as you pan and zoom: when you have
+zoomed into a manoeuvre, the peak load factor *there* is the question. A
+checkbox switches to the whole channel, and the table copies to the clipboard
+tab-separated.
 
-**TEXT** — captions on the active tile: text, size, colour, bold, and a
-position given as a fraction of the tile (with nine one-click presets). Because
-the position is a fraction rather than a data coordinate, a caption stays where
-you put it when the plot is panned or zoomed — furniture that slides off screen
-at the first zoom is not useful. Deliberately per-tile, unlike markers and
-areas: those describe a *condition* and belong wherever it can be seen, while a
-caption describes this particular picture. *Copy to all tiles* is there when you
-do want it everywhere.
+*At a point* — switch the mouse to Inspect, then **click** a curve to list every
+channel of that run at that x value, with the file and run named — the "what was
+everything else doing here?" question a single plot cannot answer — or **drag**
+across the tile for a dashed line that reports d*y*/d*x*, both deltas, the two
+endpoints and the inverse slope. A drag shorter than about six pixels counts as
+a click, so the two gestures do not fight each other. The sample being reported
+is marked with a red dot, since the click lands on whichever curve was nearest,
+which is not always the one you were aiming at.
 
 **AREA** — shaded x bands, for marking phases of a manoeuvre, with an optional
-caption drawn at the top of the band. On a tile plotted
-against the band's own parameter it is a vertical stripe; **on any other tile the
-matching span of each curve is highlighted instead**. A band on `TIME` from 10 s
-to 20 s has no vertical stripe on `ALTITUDE = f(RANGE)`, but it does have a
-piece of each curve — and that piece says where the aircraft actually was during
-those ten seconds. Previously such a band simply vanished, which read as the
-annotation being lost.
+caption at the top of the band. On a tile plotted against the band's own
+parameter it is a vertical stripe; **on any other tile the matching span of each
+curve is highlighted instead**. A band on `TIME` from 10 s to 20 s has no
+vertical stripe on `ALTITUDE = f(RANGE)`, but it does have a piece of each curve
+— and that piece says where the aircraft actually was during those ten seconds.
 
 **MARKERS** — a condition on one parameter, drawn on every tile. On a tile
 plotted against that same parameter it is a vertical line; **on any other tile
 it becomes a dot** on each curve, at the sample where the condition holds. Put a
-marker at `TIME = 5` and you can see where five seconds falls on `ALPHA = f(NZ)`.
-A marker outside a run's range is not drawn for it, rather than being clamped to
-the nearest end — a clamped dot would claim a condition was met that never was.
+marker at `TIME = 5` and you can see where five seconds falls on
+`ALPHA = f(NZ)`. A marker outside a run's range is not drawn for it rather than
+clamped to the nearest end — a clamped dot would claim a condition was met that
+never was.
 
-Both are **global**: an annotation is attached to a parameter, not to a tile, so
-it appears on every page at once. New ones default to the middle of the current
-view, so they are visible immediately rather than off-screen.
+Areas and markers are **global**: an annotation is attached to a parameter, not
+to a tile, so it appears on every page at once. New ones default to the middle
+of the current view. Both are drawn **over** the curves, because the point of a
+band is to see which part of the trace it covers.
+
+**TEXT** — captions on the active tile: text, size, colour, bold, and a position
+given as a fraction of the tile, with nine one-click presets. Because the
+position is a fraction rather than a data coordinate, a caption stays where you
+put it when the plot is panned or zoomed. Deliberately per-tile, unlike markers
+and areas: those describe a *condition* and belong wherever it can be seen,
+while a caption describes this particular picture. *Copy to all tiles* is there
+when you do want it everywhere.
+
+Anything drawn **over** the curves — the crosshair readout, the slope figure, a
+text note, a 3D tick — sits on an opaque panel in the plot's own background
+colour, so text never reads as part of a trace running under it.
+
+### ISO values on screen
+
+ISO values are written the same way everywhere they appear — a tree row, a
+legend entry, a generated interval name — because every character there is one
+the data does not get: two decimals with trailing zeros trimmed (`0.75`, `3`,
+`180`, `1234.57`), and a power of ten at either end of the range where two
+decimals stop saying anything (`1.23e-3`, `5e-5`, `1.23e6`, `-2.5e8`). The
+rules are at the top of `core/include/aoe/iso.hpp`, where `ISO_DECIMALS` is the
+one place to change if you want more.
+
+Two decimals cannot tell `1.1701` from `1.1703`, so a parameter whose values are
+that close shows repeated rows. Each still ticks independently — a row carries
+the value it stands for, not its label — but they read alike.
 
 ### Mouse modes
 
 Four mutually exclusive modes in the toolbar (`Ctrl+1` … `Ctrl+4`). The inactive
-modes are genuinely off, not merely unbound — in Select and Inspect the view box
-has mouse interaction disabled entirely, so a stray drag cannot pan a plot you
-only meant to click.
+ones are genuinely off: in Select and Inspect the view box has mouse interaction
+disabled entirely, so a stray drag cannot pan a plot you only meant to click.
 
 | Mode | |
 |---|---|
 | **Select** | click a tile to make it active; the view does not move |
 | **Inspect** | click a curve to read every channel of that run at that point |
+| **Pan** | drag to move; the wheel is disabled. On a 3D tile, Pan means rotate |
+| **Zoom** | the wheel zooms, and a drag zooms — see below |
 
-| **Pan** | drag to move; the wheel is disabled |
-| **Zoom** | wheel zooms, drag a rectangle to zoom into it |
+In **Zoom**, the shape of the drag chooses which axes it applies to:
 
-Clicking a curve in Inspect mode, or dragging out a slope, brings the **INSPECT**
-tab forward. Choosing the mode shows it too, but you are free to go and look at
-something else afterwards — and then a click would read a whole run, fill in a
-table, and leave it on a tab nobody was watching.
+| Drag | Result |
+| --- | --- |
+| an area | zooms into that rectangle |
+| a flat line across | zooms the **x axis only**, leaving y exactly as it was |
+| a line up and down | zooms the **y axis only**, leaving x exactly as it was |
 
-Each mode has an icon as well as a label, drawn in code rather than loaded from
-a file — so there is no asset to lose in a frozen build, and the icons follow
-the light and dark themes instead of being a fixed bitmap that disappears
-against one of them. On a 3D tile, Pan means rotate.
+The rubber band shows which of the three it has decided — spanning the full
+height of the tile for an x-only zoom, the full width for a y-only one — so the
+gesture is confirmed before you release the button. There is no mode to select
+and nothing to hold down.
 
-The toolbar itself cannot be hidden. Qt offers every toolbar as a checkbox in
-the frame's context menu, and with no menu bar in this window, ticking it off
-removes the only toolbar there is with no way to get it back.
+The reason for the two constrained gestures is that the unconstrained one is
+usually not what is wanted: a stretch of x with y untouched is the common case,
+and doing that with a rectangle means dragging the full height of the tile by
+eye and getting it slightly wrong, which rescales y by a few per cent for no
+reason and makes two tiles that should be comparable no longer comparable. A
+drag of only a pixel or two does nothing at all, so a twitch while clicking
+cannot zoom the view by a factor of a hundred.
 
-**Double-click any plot to auto-scale it** (`Ctrl+0` fits every tile). Locked
-axes are honoured: a lock is a deliberate constraint, often applied across every
-tile sharing a variable so they can be compared, so auto-scale moves only the
-free axes.
+Clicking a curve in Inspect mode, or dragging out a slope, brings the INSPECT
+panel forward.
 
-Auto-scale fits **what is in the window**, not what is in the file. With x
-pinned to a range, y is fitted to the samples that fall inside it — otherwise
-the part you are examining ends up as a flat line at the bottom of a tile scaled
-to a manoeuvre elsewhere in the run.
+### Fitting
 
-**The zoom is yours and stays put.** A tile is framed once, when it first
-acquires a parameter. After that the view moves only when you ask: Fit,
-double-click, or a change to the SCALE limits. Restyling a curve, toggling the
-grid, dragging a marker, selecting another run, switching page and coming back
-— none of these re-fit the plot any more.
+**Double-click any plot to fit it**; `Ctrl+0` fits every tile. A tile also
+frames itself the moment it acquires its first curve, and then leaves the frame
+alone — a rebuild happens for all sorts of reasons that say nothing about what
+should be on screen, and re-fitting on every one would throw away whatever you
+had zoomed in on. Emptying a tile and filling it again fits the new contents.
 
-### Above the plots
+Fitting uses **what is in the window**, not what is in the file: with x pinned
+to a range, y is fitted to the samples that fall inside it, otherwise the part
+you are examining ends up as a flat line at the bottom of a tile scaled to a
+manoeuvre elsewhere in the run. Locked axes are honoured — a lock is a
+deliberate constraint, often applied across every tile sharing a variable so
+they can be compared, so fitting moves only the free axes.
 
-Page and tile management sits on a bar directly above the grid, next to what it
-manipulates:
+### Pages and tiles
 
-- **Page** — previous/next, a dropdown, and a name box. Type "Speed Plots",
-  press Enter. `+` and `−` add and remove pages, `◄` `►` reorder them.
-- **Grid** — a Word-style dropdown: sweep the mouse over the 5x5 matrix and
+Page and tile management sits on a bar directly above the grid:
+
+- **Page** — previous/next, a dropdown and a name box. `+` and `−` add and
+  remove pages, `◄` `►` reorder them, and **Duplicate** copies the current page
+  with every tile on it, names the copy `<name> (2)`, inserts it after the
+  original and makes it active. Duplicating a duplicate gives `(3)` rather than
+  `(2) (2)`. Removing a page asks first, and says how much is on the one it is
+  about to remove.
+- **Grid** — a Word-style dropdown: sweep the mouse over the 5×5 matrix and
   click to set the layout. Cells beyond 25 tiles are greyed out.
-- **Tile** — arrow buttons swap the active tile with its neighbour (disabled at
-  the edges), and Copy/Cut/Paste/Clear move a tile's whole configuration.
+- **Tile** — arrow buttons swap the active tile with its neighbour, and
+  Copy/Cut/Paste/Clear move a tile's whole configuration.
 
 Each tile is titled with what it is plotting, as `ALPHA, NZ = f(TIME)`. Every
-selected Y is named; a long list wraps onto a second line instead of being
-cut. The x and y axis captions are left blank — the title already carries
-those names.
+selected y is named, and a long list wraps onto a second line. The axes
+themselves are left unlabelled: the title already carries the names, and the
+units reach the reader through the tick values and the INSPECT tables.
 
 Moving the mouse over a plot shows the value of every curve at that x in the
 status bar.
 
-Legends show the parameter name alone by default; tick File, Simulation or ISO
-value back on in STYLE when you need them. With fifty runs on a tile the fuller
-form produced fifty rows that differed only in a run id, filling the plot it was
-meant to explain — and the run is already identifiable by its colour. The legend
-and any text captions can be dragged wherever you want them.
+### Workspaces
 
-Ticking **ISO** writes every ISO identity the curve carries, so *Colour by
-Parameter* + *Style by ISO* reads `ALT | MACH = 0.75` — one row per value,
-ordered by value or by interval. A parameter that both modes key on is named
-once. Rows with identical text are still merged, which is what turns a fifty-run
-sweep into one row per ISO value rather than fifty saying the same thing; it is
-also why the ISO value has to be *in* the text for the rows to survive.
+`Ctrl+S` and `Ctrl+L` save and load a workspace: file paths, pages and their
+names, tiles, selections, computed parameters, aliases, *Colour by* / *Style
+by*, the names you gave files and runs, the interface size, the theme, and every
+colour and line style, as JSON (schema version 3, plus `app_version`).
 
-Shaded areas and markers are drawn **over** the curves. A band is a translucent
-wash marking a phase of the run, and the point of it is to see which part of the
-trace it covers.
-
-Workspaces (`Ctrl+S` / `Ctrl+L`) save file paths, pages and their names, tiles,
-selections, computed parameters, *Colour by* / *Style by*, the names you gave
-files and runs, and every colour and line style as JSON (schema version 3, plus
-`app_version`). A 2.0.0 workspace loads with *Style by* set to None, and one
-from 2.1.0 or earlier — which saved no display names — loads with each file and
-run under the name its own contents give it.
-
-Display names ride in two optional keys, `file_names` and `sim_names`. Both are
-keyed by identity rather than by position — a file by its path, a run by the
-core's `<file>::<id>::<ordinal>` key — because a workspace is routinely opened
-against files that have since gained a run or lost one, and a name pinned to
-"the seventh run" would then land on whichever run happens to sit there. A name
-whose file or run is not in the data is dropped without comment; there is
-nothing for it to label. Neither key is written when nothing was renamed, so a
-session in which nobody renamed anything still writes what 2.1.0 wrote.
-
-**What a rebuild costs.** A rebuild that changes nothing draws nothing: the
-curve groups are adopted and their points reused, the plot's own settings (grid,
-log mode, axis captions, title) are written only when one of them differs, and
-the markers and bands keep their items unless the annotations, the x channel,
-the drag mode or the curves have moved. `setLogMode` is the reason the second of
-those is worth guarding rather than merely tidy — pyqtgraph propagates it to
-every curve on the tile, invalidating each one's cached transformed points, and
-re-enables auto-range on the way.
-
-**Lists are built for the size these files actually come in.** The PARAMS filter
-refilters 400 ms after the last keystroke rather than on every one, because a
-585-channel file is several hundred rows hidden or shown per letter. The ISO
-tree shows at most 400 values per parameter and still filters on the rest. A file
-of more than 200 runs opens *closed* in DATA — expanding a node is what makes Qt
-build view items for its children — and whichever way you leave it is remembered
-by path, so it survives a reload and a rename.
+Display names are keyed by identity rather than by position — a file by its
+path, a run by the core's `<file>::<id>::<ordinal>` key — because a workspace is
+routinely opened against files that have since gained a run or lost one, and a
+name pinned to "the seventh run" would then land on whichever run happens to sit
+there. A name whose file or run is not in the data is dropped without comment.
 
 **Reusing a workspace against another study** — remove the old file, add the new
 one — keeps every tile's axes. Closing a study leaves its formulas and aliases
-defined, on purpose, so that opening the next one does not throw away the work
-set up for it; but a formula over columns that are not loaded evaluates to
-nothing and an alias resolves to a channel no file carries, so neither is a
-candidate for an axis while nothing is open. `Session.parameters` answers "what
-may the user name" and `Session.plottable_parameters` answers "what can carry an
-axis", and anything choosing a channel on the user's behalf reads the second.
-Until 2.1.1 both questions were answered by the first, so passing through zero
-open files re-pointed every tile's x axis at whichever alias sorted first, and
-the study opened next found that name valid and left it there.
+defined, so that opening the next one does not throw away the work set up for
+it; but a formula over columns that are not loaded evaluates to nothing and an
+alias resolves to a channel no file carries, so neither is a candidate for an
+axis while nothing is open.
 
-**Nothing polls the disk.** Re-reading a file happens when you press *Reload* in
-the DATA tab, and at no other time.
+Workspaces written by earlier versions open unchanged: anything they do not
+mention takes its default, and a workspace that names an interface size keeps
+the size it was saved at.
 
-Up to 2.1.0 a timer stat-ed every open file every three seconds and put up a
-dialog when one had changed. It was wrong in both directions. It interrupted
-work that had nothing to do with the file it was asking about — the question
-arrives while you are reading a plot of something else, and answering it is the
-only way back. And it could not be trusted anyway: a solver halfway through
-rewriting its output is a file that has changed and must *not* be read, so the
-prompt's best case was asking a question it had no business asking and its worst
-case was talking you into a half-written file. Whether the data on disk is
-finished is a question only the person running the solver can answer, so now
-they answer it.
+### Lists built for the size these files come in
 
-Reloading re-reads the index and drops every cached sample, so it costs a full
-parse of the files it touches and runs on the worker thread like any other. A
-renamed file keeps its name, and a run keeps its name, its colour and its
-identity: run keys are built from the name the file was *first* given, not from
-its current label, so renaming a file and then reloading it no longer renames
-every one of its runs out from under the styles attached to them.
+The PARAMS filter refilters 400 ms after the last keystroke rather than on every
+one, because a 585-channel file is several hundred rows hidden or shown per
+letter. The ISO tree shows at most 400 values per parameter and still filters on
+the rest. A file of more than 200 runs opens *closed* in DATA — expanding a node
+is what makes Qt build view items for its children — and whichever way you leave
+it is remembered by path, so it survives a reload and a rename.
+
+A rebuild that changes nothing draws nothing: the curve groups are adopted and
+their points reused, the plot's own settings are written only when one of them
+differs, and the markers and bands keep their items unless the annotations, the
+x channel, the drag mode or the curves have moved.
 
 ---
 
@@ -1052,117 +1006,21 @@ An ISO scan is cheaper still: it reads element zero of each run's dataset, one
 chunk rather than a column, which is the same shortcut the core takes on a
 parsed file through its index.
 
-A moment after the file is on screen, and only for files over 8 MB, the samples
-are fetched in the background and written out as a `.aoec` sidecar in the
-layout this program reads fastest. The status bar says so, and the file stays
-usable throughout. Every later open of that file is then served from the
-sidecar: no reading of the HDF5 at all, and the memory cap applies normally.
-If the file changes, its fingerprint stops matching and the sidecar is ignored,
-exactly as for a parsed file.
+A moment after the file is on screen, and only for files over 8 MB, a separate
+process is started to fetch the samples and write them out as a `.aoec` sidecar
+in the layout this program reads fastest. The status bar says so quietly —
+`caching 1 file in the background` — and the window is fully usable throughout,
+because that process shares no session with it. Every later open of that file is
+then served from the sidecar: no reading of the HDF5 at all, and the memory cap
+applies normally. If the file changes, its fingerprint stops matching and the
+sidecar is ignored, exactly as for a parsed file.
 
-So the trade is: the first open is instant and incremental, one later pass pays
-for the sidecar, and from then on opening is the cached path. Deleting a
-sidecar only costs speed.
+So the trade is: the first open is instant and incremental, one later pass in
+another process pays for the sidecar, and from then on opening is the cached
+path. Deleting a sidecar only costs speed.
 
 Reload works and goes back through the reader, keeping the file's index and with
 it every colour and style keyed on its runs.
-
----
-
-### SYNC — aligning the runs on an event
-
-A channel logged over several runs of the same manoeuvre carries that manoeuvre
-at a different place in each run, because each recording started at a different
-moment. Plotted against TIME the curves are the same shape smeared sideways,
-and comparing them means comparing the shapes rather than the clocks.
-
-SYNC shifts each run along the x axis so that a chosen event lands in the same
-place for all of them. Name the channel the event is about, say what counts as
-the event, and say where it should end up:
-
-| Condition | What it finds |
-| --- | --- |
-| first rises above / falls below | the first sample past a level you give, interpolated between samples |
-| first crosses | the same, in whichever direction the channel approaches it from |
-| first starts to rise / fall | no level needed: the first move of 2% of the channel's own range away from where it started |
-| reaches its maximum / minimum | the extreme of the run |
-
-| Move the event to | Result |
-| --- | --- |
-| zero | the axis reads as time since the event |
-| the first run's event | everything moves onto the first run, keeping the original axis values meaningful |
-| a value I choose | for lining two tiles up on the same reference |
-
-A car accelerating from rest, logged five times: choose SPEED, *first rises
-above*, 0.5, and *zero*. Every run is then drawn with x = 0 at the moment it
-began to move.
-
-Three things worth knowing.
-
-The event is found by interpolating between the two samples either side of it,
-not by taking the nearer sample. Two runs logged at different rates otherwise
-align only to the sampling interval, which shows up as a step between them.
-Where the crossing itself falls inside a gap — NaN, which is what an unreadable
-token becomes — the first readable sample past the level is reported instead,
-because there is nothing to interpolate across.
-
-A run in which the event never happens is left where it is, and counted: the
-panel says "7 run(s) aligned, 1 left unaligned because the event was not found
-in them", and *List the events* names them one by one with the x value found in
-each. Hiding such a run would lose data and shifting it by a guess would be a
-lie.
-
-The alignment is per tile, so one page can hold the aligned comparison beside
-the raw one — which is the arrangement that shows what the alignment did.
-*Apply to every tile on this page* copies it across when that is what you want.
-The tile title says so too: `ALT = f(TIME)  [0 = SPEED event]`.
-
-Markers and bands are evaluated in each run's own axis, so they keep meaning
-"this instant in this run" and travel with the curve they mark.
-
-Saved in the workspace. A workspace written before this feature existed opens
-unaligned, which is how it was saved; the schema version is unchanged.
-
-### Filtering the run list
-
-Runs are often named `X.Y.Z` and often number in the hundreds, so the slow part
-of the DATA tab is scrolling. The box above the tree hides what does not match:
-
-- `2.1` shows `2.1.3` and `1.2.1` alike — the match is on any part of the name,
-  because the middle field is as often the interesting one as the first.
-- `2.*.3` matches `2.1.3` and `2.57.3`: a pattern with a wildcard is matched
-  against the whole name instead.
-- Matching ignores case, and a file whose own name matches keeps all of its runs.
-
-It is a view and nothing more: hidden runs keep their tick and keep plotting.
-While a filter is typed, **Plot all** and **Plot none** say *(shown)* and act
-only on the rows on screen — "show me 2.1\*, then plot all of them" being the
-reason to have a filter at all.
-
-### Duplicating and removing pages
-
-**Duplicate** copies the current page with every tile on it, names the copy
-`<name> (2)`, inserts it straight after the original and makes it active — a
-duplicate is nearly always the start of a variation on the page it came from.
-Duplicating a duplicate gives `(3)` rather than `(2) (2)`.
-
-**−** now asks first, and says how much is on the page it is about to remove.
-It is one character wide and sits next to Add, and a mis-click used to take a
-page of configured tiles with no way back.
-
-### Fitting
-
-A tile frames itself the moment it acquires its first curve, and then leaves the
-frame alone: a rebuild happens for all sorts of reasons that say nothing about
-what should be on screen — restyling a curve, toggling the grid, coming back to
-a page — and re-fitting on every one of them would throw away whatever you had
-zoomed in on. Emptying a tile and filling it again fits the new contents, since
-an empty tile has no frame worth inheriting.
-
-Double-clicking a tile does three things in one gesture: it makes the tile
-active, fits it, and brings PARAMS forward, which is where the next click was
-going anyway. A locked axis is still respected — fitting must not quietly undo
-a limit you typed.
 
 ---
 
@@ -1307,14 +1165,12 @@ roughly two points per horizontal pixel before it crosses the boundary, so a til
 draws ~1200 points whether the channel holds ten thousand samples or ten million.
 
 **Turning a 3D cube only re-projects it.** A rotation changes two angles and
-nothing else, but it used to go through the full tile rebuild: three channels
-re-read from the core per run, their bounds recomputed, the samples re-thinned,
-every draw item destroyed and recreated — on every mouse-move of a drag. The
-normalised cube and the pen assignment are cached, and a rotation re-projects
-into the items it already has. At 25 runs of 1 814 projected points that is
-**5.2 ms → 0.7 ms** of arithmetic per step, before counting the Qt items it no
-longer builds and throws away. Zoom and pan already worked this way; rotate was
-the one that did not.
+nothing else, so that is all it costs: the normalised cube and the pen
+assignment are cached, and a rotation re-projects into the draw items already
+on the tile rather than re-reading three channels per run, recomputing their
+bounds, re-thinning the samples and rebuilding every item. At 25 runs of 1 814
+projected points that is **0.7 ms** of arithmetic per step instead of 5.2 ms,
+before counting the Qt items it does not build and throw away.
 
 **A redraw that changes nothing costs nothing.** Once a page holds a lot of
 data, what makes the window feel slow is not drawing a curve but deciding to
@@ -1498,6 +1354,29 @@ Three of those earn their place:
 - **Minimum and maximum per block** are computed once, when the sidecar is
   written. Auto-scaling asks for them on every redraw and now never rescans.
 
+### Who writes it, and when
+
+A separate process, started once the file is already open and on screen. It has
+to be: writing a sidecar is a second full pass over the file, and the core holds
+its write lock for the whole of it, so on a worker thread inside the application
+every panel and plot that wanted a channel queued behind it and the window
+stayed disabled until it finished — about five minutes for a 2.9 GB HDF5 file.
+A separate process shares no session, so there is nothing to queue behind: the
+status bar says `caching 1 file in the background` and the window stays usable.
+
+It can also be run on its own, to warm a directory of results before anyone
+opens them:
+
+```
+aoeviewer --build-cache run_001.aoe run_002.hdf5
+```
+
+Either way it opens the source read-only, writes nothing but the sidecar, holds
+no lock that would stop a solver writing to the source, and if the source
+changes while it works it abandons the sidecar and deletes it rather than leave
+one that mixes the file's before and after. The source itself is never modified
+or deleted under any circumstance.
+
 ### How staleness is caught
 
 A sidecar that disagrees with its source would put numbers on screen that are
@@ -1648,10 +1527,10 @@ assumes) because that is what each side wants; `plot_font()` is how the drawing
 code asks for one.
 
 Sizing widget text in pixels has one consequence worth knowing about: it makes
-`QFont.pointSizeF()` report **-1**. Two places used to read a font back off a
-widget and adjust it — the tab rail wanting "a little smaller", a caption
-wanting "the default" — and both were silently getting whatever their own
-fallback said instead. That is why the sizes are stated rather than derived.
+`QFont.pointSizeF()` report **-1**, so a font read back off a widget cannot be
+adjusted relative to its current size — the adjustment silently falls back to
+whatever default the caller named. Every size here is therefore stated outright
+rather than derived from another one.
 
 Indicative benchmark figures (4-core container, 3 worker threads):
 

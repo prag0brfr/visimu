@@ -149,6 +149,13 @@ def main(argv=None) -> int:
              "first when the application will not start.",
     )
     parser.add_argument(
+        "--build-cache", action="store_true",
+        help="write a .aoec sidecar for each named file and exit, without "
+             "opening a window. This is how the application builds sidecars "
+             "for large files in the background; it is also useful on its own, "
+             "to warm a directory of results before anyone opens them.",
+    )
+    parser.add_argument(
         "--memory-limit", type=float, default=2048.0, metavar="MB",
         help="cap on cached sample data (default 2048). Columns beyond this are "
              "dropped least-recently-used first and re-read on demand.",
@@ -163,6 +170,14 @@ def main(argv=None) -> int:
 
     if args.selftest:
         return selftest()
+
+    # Before --version and before the window: this path must not import Qt,
+    # both because it has no use for it and because a machine that cannot
+    # start a GUI can still perfectly well write a sidecar.
+    if args.build_cache:
+        from aoeviewer.cachebuild import main as build_caches
+
+        return build_caches([os.path.abspath(p) for p in args.files])
 
     if args.version:
         from aoeviewer import __version__

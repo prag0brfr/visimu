@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import __version__
+from .. import __version__, cachebuild
 from ..model import (
     MOUSE_MODE_HINTS,
     MOUSE_MODE_LABELS,
@@ -69,7 +69,6 @@ from .plot_toolbar import PlotToolbar
 from .sidebar import TabRail
 from .tasks import TaskRunner
 
-from .. import hdf5
 from ..logging_setup import get_logger
 
 _log = get_logger("window")
@@ -89,10 +88,23 @@ class MainWindow(QMainWindow):
         self.session = Session()
         self.state = AppState()
 
-        # Background work. The core session is not internally synchronised, so
-        # while a task runs the UI stops touching it entirely -- see tasks.py.
+        # Background work. A task moves the sample buffers the plots hold
+        # pointers into, so while one runs the UI stops touching the session
+        # entirely -- see tasks.py.
         self._stale_panels = set()
         self._focus_before_task = None
+
+        # Sidecar builds running in other processes: the source paths being
+        # written, so the same file is not handed to two builds at once, and
+        # the processes themselves, polled only to know when to take the status
+        # line down. The timer is started when there is something to watch and
+        # stopped when there is not, rather than ticking for the whole session.
+        self._task_steps = 0
+        self._cache_builds = set()
+        self._cache_processes = []
+        self._cache_timer = QTimer(self)
+        self._cache_timer.setInterval(1500)
+        self._cache_timer.timeout.connect(self._poll_cache_builds)
         # Which channels the last completed load put in memory. refresh_plots()
         # compares against it to tell a redraw that needs a read from one that
         # does not; None means "assume nothing".
@@ -100,6 +112,7 @@ class MainWindow(QMainWindow):
         self._ui_enabled = True
         self.tasks = TaskRunner(self)
         self.tasks.started.connect(self._on_task_started)
+        self.tasks.progressed.connect(self._on_task_progress)
         self.tasks.finished.connect(self._on_task_finished)
         self.tasks.failed.connect(self._on_task_failed)
 
@@ -109,6 +122,14 @@ class MainWindow(QMainWindow):
         self.memory_limit_bytes = 2 * 1024 * 1024 * 1024
 
         self.resize(1500, 920)
+
+        # Push the state's scale into the module everything measures against,
+        # before anything measures. The two agree at startup by construction --
+        # AppState and theme take the same default -- and stating it here is
+        # what keeps them agreeing: if they ever diverge, the window would be
+        # drawn at one size while the state claimed another, and the first Save
+        # would write the size that was never on screen.
+        set_ui_scale(self.state.ui_scale)
 
         self._build_toolbar()
         self._build_central()
@@ -580,6 +601,19 @@ class MainWindow(QMainWindow):
         self.progress.setTextVisible(False)
         self.progress.hide()
 
+        # Work going on in another process. Deliberately not the progress bar
+        # above: that one means "the window is waiting", and the whole point of
+        # building a sidecar outside the application is that the window is not.
+        self.cache_label = QLabel("")
+        self.cache_label.setObjectName("Hint")
+        self.cache_label.setToolTip(
+            "A faster copy of the file's samples is being written in the "
+            "background, in a separate process. The application is usable "
+            "throughout, and the next time this file is opened it will load "
+            "from that copy."
+        )
+        self.cache_label.hide()
+
         self.memory_label = QLabel("")
         self.memory_label.setObjectName("Hint")
         self.memory_label.setToolTip(
@@ -591,6 +625,7 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.status_label, 1)
         bar.addWidget(self.progress)
         bar.addPermanentWidget(self.readout_label)
+        bar.addPermanentWidget(self.cache_label)
         bar.addPermanentWidget(self.memory_label)
 
     # ------------------------------------------------------- background
@@ -621,6 +656,21 @@ class MainWindow(QMainWindow):
             return
         self._ui_enabled = enabled
 
+        # The cursor goes with the disabled state rather than with the task,
+        # and that is deliberate: a chain of queued tasks emits started() once
+        # per task and finished() once at the end, so pushing the cursor on
+        # every start would leave the override stack several deep and the
+        # hourglass on for good. This flag is already guaranteed to alternate.
+        #
+        # Freezing the window is the intended behaviour -- an action taken now
+        # would be lost -- so what matters is that it does not look like a
+        # crash. The cursor says so wherever the pointer happens to be, which
+        # the status bar cannot.
+        if enabled:
+            QApplication.restoreOverrideCursor()
+        else:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+
         if not enabled:
             focused = QApplication.focusWidget()
             self._focus_before_task = (
@@ -644,18 +694,41 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 pass
 
-    def _on_task_started(self, description: str) -> None:
+    def _on_task_started(self, description: str, steps: int = 0) -> None:
         self.status_label.setText(description)
+        self._task_steps = int(steps)
+        if steps > 0:
+            # A real count, so show a real bar. "3 of 7 files" is the
+            # difference between a wait that looks stuck and one that is
+            # visibly moving, and on three 500 MB files that matters.
+            self.progress.setRange(0, steps)
+            self.progress.setValue(0)
+            self.progress.setFormat("%v of %m")
+            self.progress.setTextVisible(True)
+        else:
+            # Nothing to count. The core reports nothing from inside a single
+            # parse, and an invented percentage would be worse than an honest
+            # "working".
+            self.progress.setRange(0, 0)
+            self.progress.setTextVisible(False)
         self.progress.show()
         self._set_ui_enabled(False)
 
+    def _on_task_progress(self, done: int) -> None:
+        if self._task_steps > 0:
+            self.progress.setValue(min(int(done), self._task_steps))
+
     def _on_task_finished(self) -> None:
         self.progress.hide()
+        self.progress.setTextVisible(False)
+        self._task_steps = 0
         self._set_ui_enabled(True)
         self._update_status()
 
     def _on_task_failed(self, message: str) -> None:
         self.progress.hide()
+        self.progress.setTextVisible(False)
+        self._task_steps = 0
         self._set_ui_enabled(True)
         QMessageBox.warning(self, "Background task failed", message)
 
@@ -716,23 +789,21 @@ class MainWindow(QMainWindow):
     def load_files(self, paths: List[str]) -> None:
         """Open files on a worker thread; a 500 MB index scan is not instant."""
 
-        def work():
+        def work(report):
             loaded = []
             failures = []
-            cached = 0
-            for path in paths:
+            for position, path in enumerate(paths):
+                report(position)
                 try:
                     handle = self.session.add_file(path)
                 except CoreError as exc:
                     failures.append("{0}: {1}".format(os.path.basename(path), exc))
                     continue
                 loaded.append((handle.index, handle.simulation_count))
-                if self._build_cache_for(path, handle.index):
-                    cached += 1
-            return loaded, failures, cached
+            return loaded, failures
 
         def done(result):
-            loaded, failures, cached = result
+            loaded, failures = result
             for index, sim_count in loaded:
                 # Select every run of the first file, so something is on screen
                 # immediately rather than an empty grid.
@@ -741,151 +812,111 @@ class MainWindow(QMainWindow):
                         self.state.set_selected(index, sim, True)
 
             self.refresh_all()
-            # After refresh_all, so the file is drawn before its samples are
-            # fetched for the sidecar.
-            self._build_pushed_caches([index for index, _count in loaded])
+            # After refresh_all, so the file is on screen and usable before any
+            # of this starts -- it happens in another process and the window
+            # does not wait for it.
+            self._spawn_cache_builds([index for index, _count in loaded])
             if failures:
                 QMessageBox.warning(
                     self, "Some files could not be read", "\n".join(failures[:10])
                 )
-            message = "{0} file(s) loaded, {1} total".format(
-                len(loaded), self.session.file_count)
-            if cached:
-                message += "  (cached {0} for faster reopening)".format(cached)
-            self.status_label.setText(message)
+            self.status_label.setText("{0} file(s) loaded, {1} total".format(
+                len(loaded), self.session.file_count))
 
-        # Say what is actually about to happen. The first open of a large file
-        # also writes its sidecar, which is a second full parse -- on three
-        # 550 MB files that is most of the wait, and a progress message reading
-        # "Opening 3 file(s)..." for the whole of it makes a one-off cost look
-        # like the normal speed of opening a file.
-        pending = sum(1 for path in paths if self._cache_would_be_built(path))
-        if pending:
-            description = ("Opening {0} file(s) and building {1} cache(s) — "
-                           "this happens once; later opens are much faster..."
-                           ).format(len(paths), pending)
-        else:
-            description = "Opening {0} file(s)...".format(len(paths))
-        self.tasks.submit(description, work, done)
-
-    def _cache_would_be_built(self, path: str) -> bool:
-        """Whether opening `path` will also write a sidecar, near enough.
-
-        A guess, and only ever used to word a progress message. It cannot see a
-        sidecar that lives in the per-user fallback directory, so it errs
-        towards announcing work that turns out to be already done -- which is
-        the harmless direction.
-        """
-        if not self.session.cache_enabled:
-            return False
-        # A file read outside the core has no parse to rewrite, so no sidecar
-        # is ever written for one and none should be announced.
-        if hdf5.looks_like_hdf5(path):
-            return False
-        try:
-            if os.path.getsize(path) < self.CACHE_THRESHOLD_BYTES:
-                return False
-        except OSError:
-            return False
-        return not os.path.exists(path + ".aoec")
+        self.tasks.submit(
+            "Opening {0} file(s)...".format(len(paths)), work, done,
+            steps=len(paths))
 
     # Below this, parsing the file is quick enough that a sidecar would save
     # nothing measurable and would just leave an extra file beside the results.
     CACHE_THRESHOLD_BYTES = 8 * 1024 * 1024
 
-    def _build_cache_for(self, path: str, index: int) -> bool:
-        """Write a `.aoec` sidecar for a freshly opened file, if it is worth it.
+    def _spawn_cache_builds(self, indices) -> None:
+        """Have the sidecars for these files written in another process.
 
-        Runs on the worker thread, inside the same task that opened the file,
-        which is deliberate: the user is already waiting, and doing it here
-        costs one extra parse *once* rather than locking the window later for a
-        file they may be in the middle of using.
+        Until 2.2.1 this happened on a worker thread inside the application,
+        and for a large file that was the wrong place for it. A sidecar is a
+        second full pass over the file -- read it all, write it all again in
+        the order the viewer reads -- and the core holds its write lock for the
+        whole of that pass, so every panel and plot that wanted a channel
+        queued behind it and the window stayed disabled throughout. On a 2.9 GB
+        HDF5 file that was about five minutes between asking for the file and
+        being able to use it.
 
-        Every reason to skip is silent. A sidecar is an optimisation the user
-        did not ask for, so failing to write one -- results on a read-only
-        share, a full disk, caching switched off -- is not a problem to report;
-        the file has already opened and works.
-        """
-        if not self.session.cache_enabled:
-            return False
-        # Already served from a cache: this open was the fast path.
-        if self.session.cache_active(index):
-            return False
-        try:
-            if os.path.getsize(path) < self.CACHE_THRESHOLD_BYTES:
-                return False
-        except OSError:
-            return False
-        # A pushed file is not cached here. Its columns are fetched as they are
-        # wanted, so writing a sidecar means fetching all of them first -- and
-        # doing that inside the open would reinstate exactly the wait the lazy
-        # reader removes. It happens afterwards instead, with the file already
-        # on screen: see _build_pushed_caches.
-        if self.session.is_pushed_index(index):
-            return False
-        try:
-            return bool(self.session.build_cache(index))
-        except CoreError:
-            return False
+        A separate process shares no session, so there is nothing to queue
+        behind: the file is already open and the window already usable when
+        this starts, and the only sign of it is a line in the status bar. The
+        sidecar it leaves behind is what makes the *next* open fast; this one
+        has already happened.
 
-    def _build_pushed_caches(self, indices) -> None:
-        """Write sidecars for files read outside the core, in the background.
+        Both kinds of file come through here. The .aoe route needs the parse;
+        the pushed route needs every column fetched first, which is why doing
+        it in-process reinstated exactly the wait that reading HDF5 lazily
+        removes.
 
-        The point of the whole arrangement: a large HDF5 file opens at once
-        because nothing is read until it is drawn, and a moment later -- while
-        it is already usable -- its samples are written out in the layout this
-        program reads fastest. Every later open of that file then takes the
-        cached path and needs the reader for nothing.
-
-        Everything here is best-effort and silent on failure. A sidecar is an
-        optimisation the user did not ask for, and the file is already open and
-        working without it.
+        Silent on failure throughout. A sidecar is an optimisation nobody asked
+        for, and the file works without one.
         """
         if not self.session.cache_enabled:
             return
         wanted = []
         for index in indices:
-            if not self.session.is_pushed_index(index):
+            handle = self.session.file(index)
+            if handle is None:
                 continue
+            path = getattr(handle, "path", "")
+            # Already being written, by a build this window started earlier.
+            if not path or path in self._cache_builds:
+                continue
+            # Already served from a sidecar: this open was the fast path.
             if self.session.cache_active(index):
                 continue
             try:
-                if os.path.getsize(self.session.file(index).path) \
-                        < self.CACHE_THRESHOLD_BYTES:
+                if os.path.getsize(path) < self.CACHE_THRESHOLD_BYTES:
                     continue
-            except (OSError, AttributeError):
+            except OSError:
                 continue
-            wanted.append(index)
+            wanted.append(path)
         if not wanted:
             return
 
-        def work():
-            done = 0
-            for index in wanted:
-                try:
-                    if not self.session.fill_pushed_completely(index):
-                        continue
-                    if self.session.build_cache(index):
-                        done += 1
-                except (CoreError, OSError, ValueError):
-                    continue
-            return done
+        process = cachebuild.spawn(wanted)
+        if process is None:
+            return
+        self._cache_builds.update(wanted)
+        self._cache_processes.append((process, list(wanted)))
+        self._cache_timer.start()
+        self._update_cache_label()
 
-        def finished(count):
-            if count:
-                self.status_label.setText(
-                    "Cached {0} file(s) for faster reopening".format(count))
-                # Filling every column to write the sidecar left the whole file
-                # resident, which for a large one is most of the memory budget
-                # spent on samples nothing is drawing. They are on disk now and
-                # come back from there in milliseconds, so the cap is applied
-                # straight away rather than at the next redraw.
-                self._enforce_memory_limit()
-                self._update_memory_label()
+    def _poll_cache_builds(self) -> None:
+        """Notice a finished build and stop saying it is running.
 
-        self.tasks.submit(
-            "Caching {0} file(s) for faster reopening — the file is already "
-            "usable...".format(len(wanted)), work, finished)
+        Polling rather than waiting on the process: there is nothing to collect
+        from it -- the sidecar is on disk or it is not -- and the only reason to
+        care that it ended is to take the label down.
+        """
+        still_running = []
+        for process, paths in self._cache_processes:
+            if process.poll() is None:
+                still_running.append((process, paths))
+                continue
+            for path in paths:
+                self._cache_builds.discard(path)
+        self._cache_processes = still_running
+        if not self._cache_processes:
+            self._cache_timer.stop()
+        self._update_cache_label()
+
+    def _update_cache_label(self) -> None:
+        count = len(self._cache_builds)
+        if not count:
+            self.cache_label.hide()
+            self.cache_label.setText("")
+            return
+        self.cache_label.setText(
+            "caching {0} file{1} in the background".format(
+                count, "" if count == 1 else "s"))
+        self.cache_label.show()
 
     def reload_files(self, indices=None) -> None:
         """Re-read files from disk, because the user asked.
@@ -918,9 +949,10 @@ class MainWindow(QMainWindow):
         names = self._collect_display_names()
         paths = {index: self.session.file(index).path for index in targets}
 
-        def work():
+        def work(report):
             reloaded, failed = [], []
-            for index in targets:
+            for position, index in enumerate(targets):
+                report(position)
                 handle = self.session.file(index)
                 if handle is None:
                     continue
@@ -935,11 +967,6 @@ class MainWindow(QMainWindow):
                         os.path.basename(paths.get(index, ""))))
                     continue
                 reloaded.append(index)
-                # The file on disk is not the one the old sidecar describes,
-                # so the reload will have fallen back to parsing the text.
-                # Writing the new sidecar here costs the parse the user is
-                # already waiting for, rather than the next open.
-                self._build_cache_for(paths.get(index, ""), index)
             # Put the run names back, on whatever runs still answer to the
             # keys they were given to.
             self._apply_display_names({
@@ -959,13 +986,17 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(
                     self, "Some files could not be reloaded",
                     "\n".join(failed[:10]))
+            # The file on disk is not the one the old sidecar described, so
+            # the reload fell back to reading the source. A new sidecar is
+            # written outside the application, as on first open.
+            self._spawn_cache_builds(reloaded)
             self.status_label.setText(
                 "{0} file(s) reloaded from disk.".format(len(reloaded))
                 if reloaded else "No file was reloaded.")
 
         self.tasks.submit(
             "Re-reading {0} file(s) from disk...".format(len(targets)),
-            work, done)
+            work, done, steps=len(targets))
 
     # ----------------------------------------------------------- refresh
 
@@ -1597,16 +1628,18 @@ class MainWindow(QMainWindow):
         # on the GUI thread -- a workspace naming three 500 MB files froze the
         # window for seconds -- and unguarded against a preload still running,
         # whose datasets session.clear() would have pulled out from under it.
-        def work():
+        def work(report):
             self.session.clear()
             missing = []
-            for file_path in data.get("files", []):
+            opened = []
+            for position, file_path in enumerate(data.get("files", [])):
+                report(position)
                 try:
                     handle = self.session.add_file(file_path)
                 except CoreError:
                     missing.append(file_path)
                     continue
-                self._build_cache_for(file_path, handle.index)
+                opened.append(handle.index)
 
             # Before anything else reads a name: the panels and the legend all
             # ask the session what a file is called.
@@ -1662,10 +1695,10 @@ class MainWindow(QMainWindow):
                 for name in installed:
                     pending.pop(name, None)
 
-            return missing, failed_formulas, unresolved_aliases
+            return missing, failed_formulas, unresolved_aliases, opened
 
         def done(report):
-            missing, failed_formulas, unresolved_aliases = report
+            missing, failed_formulas, unresolved_aliases, opened = report
             # Replacing the state is a GUI-side operation and belongs here, not
             # in the worker: the panels and tiles must be rebound to the new one
             # in the same turn of the event loop that starts using it.
@@ -1682,6 +1715,10 @@ class MainWindow(QMainWindow):
             self.refresh_all()
             self._update_window_title()
             self._update_workspace_actions()
+
+            # After the workspace is on screen: a sidecar is written outside
+            # the application and nothing here waits for it.
+            self._spawn_cache_builds(opened)
 
             # One dialog for everything the workspace asked for and this data
             # cannot give, rather than three in a row. Nothing here stops the
@@ -1718,7 +1755,9 @@ class MainWindow(QMainWindow):
                     "everywhere.\n\n" + "\n\n".join(notes),
                 )
 
-        self.tasks.submit("Loading workspace...", work, done)
+        self.tasks.submit(
+            "Loading workspace...", work, done,
+            steps=len(data.get("files", []) or []))
 
     def _rebind_state(self) -> None:
         for _name, panel in self._panels:

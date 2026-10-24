@@ -158,3 +158,121 @@ class TestWorkspaceStyleFields(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestWorkspacesFromEveryEarlierVersion(unittest.TestCase):
+    """A workspace file written by an older build must still open.
+
+    These files are the user's work -- a grid of thirty tiles, every curve
+    styled, the ISO filters set up -- so losing one to a schema change is
+    losing an afternoon. The reader is tolerant by construction: it asks
+    `data.get(name, default)` for everything and never reads the version
+    number. This pins that down version by version, because tolerance is the
+    kind of property that is true until someone adds a required field.
+
+    Each dictionary below is what that version actually wrote, trimmed to the
+    keys that matter. The assertions are about the fields those versions had
+    never heard of: they must arrive at their documented defaults rather than
+    None, and nothing may raise.
+    """
+
+    def _load(self, data):
+        handle, path = tempfile.mkstemp(suffix=".aoews")
+        os.close(handle)
+        self.addCleanup(os.remove, path)
+        import json
+
+        with open(path, "w") as fh:
+            json.dump(data, fh)
+        state = AppState()
+        state.load_dict(load_workspace(path))
+        return state
+
+    def test_a_version_1_workspace_loads(self):
+        state = self._load({
+            "version": 1,
+            "pages": [{"name": "Page 1", "rows": 1, "cols": 1,
+                       "tiles": [{"y_params": ["ALPHA"]}]}],
+            "selected_sims": [[0, 0]],
+        })
+        tile = state.pages[0].tiles[0]
+        self.assertEqual(tile.y_params, ["ALPHA"])
+        self.assertEqual(state.selected_sims, {(0, 0)})
+
+    def test_a_version_2_workspace_loads(self):
+        state = self._load({
+            "version": 2,
+            "app_version": "2.0.0",
+            "pages": [{"name": "Sweep", "rows": 2, "cols": 2,
+                       "tiles": [{"y_params": ["ALPHA", "MACH"],
+                                  "legend": True,
+                                  "show_3d_box": True}]}],
+            "colors": {"ALPHA": "#ff0000"},
+            "active_page": 0,
+        })
+        page = state.pages[0]
+        self.assertEqual(page.name, "Sweep")
+        tile = page.tiles[0]
+        self.assertEqual(tile.y_params, ["ALPHA", "MACH"])
+        # The old key for the 3D reference, honoured rather than dropped.
+        self.assertTrue(tile.show_3d_axes)
+
+    def test_a_workspace_without_the_sync_fields_defaults_them_off(self):
+        """SYNC arrived in 2.2.0; every workspace before it has no such keys.
+
+        Off, with the condition and target at the values a fresh tile uses, so
+        that opening an old workspace and ticking Align does the obvious thing
+        rather than starting from a half-set state.
+        """
+        state = self._load({
+            "version": 3,
+            "app_version": "2.1.2",
+            "pages": [{"name": "Page 1", "rows": 1, "cols": 1,
+                       "tiles": [{"y_params": ["SPEED"]}]}],
+        })
+        tile = state.pages[0].tiles[0]
+        self.assertFalse(tile.sync_enabled)
+        self.assertEqual(tile.sync_param, "")
+        self.assertEqual(tile.sync_condition, "above")
+        self.assertEqual(tile.sync_level, 0.0)
+        self.assertEqual(tile.sync_target, "zero")
+        self.assertEqual(tile.sync_target_value, 0.0)
+
+    def test_an_empty_workspace_is_not_an_error(self):
+        state = self._load({})
+        self.assertEqual(len(state.pages), 1)
+
+    def test_an_unknown_future_field_is_ignored_rather_than_fatal(self):
+        # The same tolerance in the other direction: a workspace written by a
+        # later build should open here, minus whatever this build cannot do.
+        state = self._load({
+            "version": 99,
+            "pages": [{"name": "Page 1", "rows": 1, "cols": 1,
+                       "tiles": [{"y_params": ["ALPHA"],
+                                  "something_invented_later": 42}]}],
+            "a_whole_new_section": {"x": 1},
+        })
+        self.assertEqual(state.pages[0].tiles[0].y_params, ["ALPHA"])
+
+    def test_what_this_build_writes_still_reads_back(self):
+        state = AppState()
+        tile = state.pages[0].tiles[0]
+        tile.y_params = ["ALPHA"]
+        tile.sync_enabled = True
+        tile.sync_param = "SPEED"
+        tile.sync_condition = "rises"
+        tile.sync_level = 0.5
+
+        handle, path = tempfile.mkstemp(suffix=".aoews")
+        os.close(handle)
+        self.addCleanup(os.remove, path)
+        save_workspace(path, state, [], {}, {})
+
+        back = AppState()
+        back.load_dict(load_workspace(path))
+        tile = back.pages[0].tiles[0]
+        self.assertEqual(tile.y_params, ["ALPHA"])
+        self.assertTrue(tile.sync_enabled)
+        self.assertEqual(tile.sync_param, "SPEED")
+        self.assertEqual(tile.sync_condition, "rises")
+        self.assertEqual(tile.sync_level, 0.5)

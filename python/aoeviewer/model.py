@@ -16,6 +16,10 @@ from enum import IntEnum
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from . import isogroups
+# One name, one value: the size a fresh session starts at. theme.py is free of
+# Qt imports at module level -- the one QFont it builds is imported inside the
+# function that needs it -- so taking this from there keeps the promise above.
+from .theme import UI_SCALE_DEFAULT
 
 MAX_TILES = 25  # a 5x5 grid
 
@@ -94,7 +98,11 @@ MOUSE_MODE_HINTS = {
     MouseMode.PAN: "Drag to move the view; the wheel is disabled. On a 3D tile: "
                    "drag turns it, middle-drag or shift-drag slides it, "
                    "right-drag or the wheel zooms.",
-    MouseMode.ZOOM: "Wheel zooms; drag a rectangle to zoom into it.",
+    # Three gestures, not one, and the hint has to say so: nothing on screen
+    # suggests that the shape of the drag means anything.
+    MouseMode.ZOOM: "Wheel zooms. Drag an area to zoom into it, a flat line "
+                    "across to zoom the x axis only, or a line up and down "
+                    "for the y axis only.",
 }
 
 
@@ -881,7 +889,7 @@ class AppState:
         # scale. A view preference like the theme, and saved with it: someone
         # who has set the window to suit their screen should not have to set
         # it again every time they open a workspace.
-        self.ui_scale: float = 1.0
+        self.ui_scale: float = UI_SCALE_DEFAULT
         self.workspace_path: Optional[str] = None
         self.dirty: bool = False
         self.mouse_mode: MouseMode = MouseMode.SELECT
@@ -1545,7 +1553,7 @@ class AppState:
     def to_dict(self) -> dict:
         return {
             "version": 3,
-            "app_version": "2.2.0",
+            "app_version": "2.2.1",
             "pages": [p.to_dict() for p in self.pages],
             "active_page": self.active_page,
             "selected_sims": sorted(list(self.selected_sims)),
@@ -1590,7 +1598,12 @@ class AppState:
         self.styles.load_dict(data.get("styles", {}))
         self.dark_mode = bool(data.get("dark_mode", True))
         # Absent from every workspace written before 2.1.2, and from one
-        # written by hand; 1.0 is the size those were laid out at.
+        # written by hand. Those open at 1.0 rather than at UI_SCALE_DEFAULT,
+        # and the difference is deliberate: 1.0 is the size they were laid out
+        # at, and silently re-scaling somebody's saved layout because the
+        # default for *new* sessions changed would move every caption and
+        # legend on it. A workspace that does name a scale is honoured as
+        # written, whatever the default happens to be.
         try:
             self.ui_scale = float(data.get("ui_scale", 1.0))
         except (TypeError, ValueError):

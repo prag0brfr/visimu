@@ -116,11 +116,26 @@ UI_SCALE_MIN = 0.70
 UI_SCALE_MAX = 1.60
 UI_SCALE_STEP = 0.10
 
-_ui_scale = 1.0
+# What a session starts at, and the one place to change it.
+#
+# 0.90 rather than 1.00 since 2.2.1. The base figures above were chosen against
+# a 1080-high screen and are a little generous on most of the screens this is
+# actually used on: at 100 % the panels want more height than a 1050-high laptop
+# with a desktop panel has to give, which is the problem the scroll areas were
+# added to contain. Starting one step down fits the whole interface on every
+# screen it has been run on, and the toolbar's two buttons move it either way
+# for anyone who would rather have the larger type.
+UI_SCALE_DEFAULT = 0.90
+
+_ui_scale = UI_SCALE_DEFAULT
 
 
 def ui_scale() -> float:
-    """The current multiplier. 1.0 is the base size scale above."""
+    """The current multiplier.
+
+    1.0 means the base sizes above, unscaled; it is the unit of the scale, not
+    the value a session starts at -- that is UI_SCALE_DEFAULT.
+    """
     return _ui_scale
 
 

@@ -2219,13 +2219,69 @@ class TestUiScale(unittest.TestCase):
         from aoeviewer import theme
 
         self.theme = theme
-        self.addCleanup(theme.set_ui_scale, 1.0)
+        # Restored to the default rather than to 1.0: this is a module global,
+        # and leaving it at a value no session starts at would make every later
+        # test in the process measure against the wrong scale.
+        self.addCleanup(theme.set_ui_scale, theme.UI_SCALE_DEFAULT)
         theme.set_ui_scale(1.0)
 
-    def test_it_starts_at_one(self):
+    def test_at_a_scale_of_one_the_figures_are_the_base_ones(self):
         self.assertEqual(self.theme.ui_scale(), 1.0)
         self.assertEqual(self.theme.px(10), 10)
         self.assertEqual(self.theme.pt(7.5), 7.5)
+
+    def test_a_session_starts_one_step_below_the_base_size(self):
+        """0.90 since 2.2.1, and the two defaults must not drift apart.
+
+        The scale lives in two places that have to agree: the module every
+        widget measures against, and the AppState field that gets saved to the
+        workspace. They agree by both taking UI_SCALE_DEFAULT, and if they ever
+        stopped, the window would be drawn at one size while the state claimed
+        another -- and the first Save would write a size that was never on
+        screen.
+        """
+        from aoeviewer.model import AppState
+
+        self.assertEqual(self.theme.UI_SCALE_DEFAULT, 0.90)
+        self.assertEqual(AppState().ui_scale, self.theme.UI_SCALE_DEFAULT)
+
+    def test_the_default_is_a_scale_the_buttons_can_reach(self):
+        # Inside the range, and on a step boundary, so that pressing Larger
+        # from a fresh session lands on 1.00 exactly rather than 0.95.
+        default = self.theme.UI_SCALE_DEFAULT
+        self.assertGreaterEqual(default, self.theme.UI_SCALE_MIN)
+        self.assertLessEqual(default, self.theme.UI_SCALE_MAX)
+        steps = (default - self.theme.UI_SCALE_MIN) / self.theme.UI_SCALE_STEP
+        self.assertAlmostEqual(steps, round(steps), places=6)
+
+    def test_the_module_starts_at_the_default_before_anything_sets_it(self):
+        # Read from the source, because by the time this runs the module has
+        # been imported and other tests have moved the global.
+        import inspect
+
+        source = inspect.getsource(self.theme)
+        self.assertIn("_ui_scale = UI_SCALE_DEFAULT", source,
+                      "the module global no longer starts at the default")
+
+    def test_the_state_model_stays_free_of_qt(self):
+        """model.py takes the default from theme.py, which must stay cheap.
+
+        theme.py builds exactly one QFont and imports Qt inside the function
+        that does it, so importing it from the state model costs nothing and
+        keeps model.py's promise. A module-level Qt import added to theme would
+        break that silently -- the workspace could no longer be saved, restored
+        or tested without a display -- so it is asserted here.
+        """
+        import subprocess
+
+        code = ("import sys; import aoeviewer.model; "
+                "sys.exit(1 if 'PySide6' in sys.modules else 0)")
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        environment = dict(os.environ)
+        environment["PYTHONPATH"] = (os.path.join(root, "python") + os.pathsep
+                                     + environment.get("PYTHONPATH", ""))
+        result = subprocess.call([sys.executable, "-c", code], env=environment)
+        self.assertEqual(result, 0, "importing aoeviewer.model pulled in Qt")
 
     def test_it_scales_pixels_and_points(self):
         self.theme.set_ui_scale(1.4)

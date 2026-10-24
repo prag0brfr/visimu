@@ -62,7 +62,9 @@ from ..scales import (  # noqa: F401
     POINTS_PER_PIXEL,
     resample_key,
     resample_target,
+    tick_row_height,
 )
+from .zoombox import DirectionalViewBox
 
 # Stacking order of the things drawn on a tile. pyqtgraph puts plot curves at
 # z = 0, so anything meant to be read *over* the data has to be above that.
@@ -193,6 +195,41 @@ def _axis_label_style() -> dict:
     read.
     """
     return {"font-size": "{0}pt".format(pt(PLOT_AXIS_PT))}
+
+def _fit_tick_row(axis, font) -> None:
+    """Give the bottom axis the height its tick numbers measure.
+
+    pyqtgraph sizes the axis from the text of the *previous* paint, so the
+    first layout after the tick font changes reserves the old font's height
+    and clips the numbers when the new one is taller -- which is what hid the
+    x values on Linux, where the default font is taller than on Windows.
+
+    Measured here instead, from the font itself, and fixed: right on the first
+    paint, on every platform and at every interface scale.
+
+    Best-effort by design. If any of this is unavailable, pyqtgraph's own
+    sizing is left in place: slightly cramped numbers are better than a tile
+    that fails to build.
+    """
+    try:
+        from PySide6.QtGui import QFontMetricsF
+
+        metrics = QFontMetricsF(font)
+        style = getattr(axis, "style", {}) or {}
+        offset = style.get("tickTextOffset", (5, 2))
+        try:
+            offset = float(offset[1])
+        except (TypeError, IndexError, ValueError):
+            offset = 2.0
+        axis.setHeight(tick_row_height(
+            metrics.height(),
+            tick_length=float(style.get("tickLength", 0) or 0),
+            offset=offset,
+            scale=ui_scale(),
+        ))
+    except (AttributeError, RuntimeError, TypeError, ValueError, ImportError):
+        pass
+
 
 _PEN_STYLES = {
     "solid": Qt.PenStyle.SolidLine,
@@ -786,7 +823,12 @@ class PlotTile(pg.PlotWidget):
 
     def __init__(self, session: Session, state: AppState, index: int,
                  theme: Theme, parent=None):
-        super().__init__(parent=parent)
+        # A view box of our own, for one reason: its rectangle zoom reads the
+        # direction of the drag, so a flat drag takes x and leaves y alone.
+        # It has to be given at construction -- the PlotItem builds its own
+        # otherwise, and swapping one in afterwards leaves the axes linked to
+        # the box that was replaced.
+        super().__init__(parent=parent, viewBox=DirectionalViewBox())
         self._session = session
         self._state = state
         self._index = index
@@ -945,7 +987,10 @@ class PlotTile(pg.PlotWidget):
             # Tick numbers default to the widget font, which is set for the
             # panels; on a page of tiles they then take more room than the
             # curves they are labelling.
-            axis.setStyle(tickFont=plot_font(PLOT_AXIS_PT))
+            font = plot_font(PLOT_AXIS_PT)
+            axis.setStyle(tickFont=font)
+            if axis_name == "bottom":
+                _fit_tick_row(axis, font)
         self._crosshair_label.setColor(theme.plot_foreground)
         self.rebuild()
 
@@ -1171,8 +1216,16 @@ class PlotTile(pg.PlotWidget):
         # so a caption beside the axis repeated it and spent a strip of a tile
         # that is often one ninth of a page. The unit reaches the reader
         # through the tick values and the INSPECT tables instead.
-        plot.setLabel("bottom", "", **_axis_label_style())
-        plot.setLabel("left", "", **_axis_label_style())
+        # Hidden rather than set to an empty string. setLabel() shows the
+        # label whatever text it is given, so an empty caption still reserved a
+        # whole line beside the axis -- a strip of a tile that is often one
+        # ninth of a page, spent on nothing, and part of why the tick numbers
+        # along the bottom had no room.
+        for axis_name in ("bottom", "left"):
+            try:
+                plot.getAxis(axis_name).showLabel(False)
+            except (AttributeError, RuntimeError):
+                plot.setLabel(axis_name, "", **_axis_label_style())
         plot.setTitle(title, color=self._theme.plot_foreground,
                       size="{0}pt".format(pt(PLOT_TITLE_PT)))
 

@@ -34,6 +34,18 @@ import os
 import re
 from typing import Dict, List, Optional, Sequence, Tuple
 
+# Set before h5py -- and therefore before the HDF5 library -- is imported
+# anywhere, because the library reads it once at initialisation.
+#
+# HDF5 1.10 and later take a lock on a file it opens, even read-only, and that
+# lock stops the program that produces these files from writing to it. This
+# tool is a viewer: it must never be the reason a solver cannot write its own
+# output. Nothing is read twice without checking, and the sidecar writer
+# fingerprints the source before and after and throws away a sidecar whose
+# source moved underneath it, so a file being rewritten while we read it is
+# detected rather than relied upon not to happen.
+os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
+
 import numpy as np
 
 from .logging_setup import get_logger
@@ -52,6 +64,19 @@ _UNIT_KEYS = ("units", "unit", "UNITS", "UNIT", "Units", "Unit")
 _W_CHANNEL_MATCHES_PARENT = 3.0
 _W_RUNS_ORTHOGONAL = 2.0
 _W_SEVERAL_RUNS = 0.5
+
+# How many dataset paths the ranking looks at. A file of 50 runs x 1000
+# channels holds 50,000 of them, and an exporter's naming convention is uniform
+# across a file: a few thousand paths spanning the whole tree settle which
+# convention is in force exactly as conclusively as all of them, and ranking
+# nine candidate readings over 50,000 paths each was seconds of work to reach
+# the same answer.
+#
+# The ranking is a heuristic and this only makes it a cheaper one. The reading
+# it picks is then applied to -- and checked against -- every path in the file,
+# so nothing is dropped and no run goes missing because it fell outside a
+# sample.
+MAX_RANKING_PATHS = 4000
 
 
 def available() -> bool:
@@ -150,8 +175,44 @@ def _natural_key(text: str):
             for part in re.split(r"(\d+)", str(text))]
 
 
-def _score(layout: Layout, parents: Dict[str, str]) -> float:
-    """How much the tree itself supports this reading of it.
+def _partition(rule, paths: Sequence[str]):
+    """Group paths into {run key: {channel key: path}}, or None if the rule
+    cannot read them at all.
+
+    None means the reading is impossible rather than merely poor: a dataset
+    name with too few tokens for the rule, or two datasets claiming to be the
+    same channel of the same run.
+    """
+    grouped: Dict[str, Dict[str, str]] = {}
+    for path in paths:
+        keyed = rule(path)
+        if keyed is None:
+            return None
+        run_key, channel_key = keyed
+        if not channel_key:
+            return None
+        if channel_key in grouped.setdefault(run_key, {}):
+            return None
+        grouped[run_key][channel_key] = path
+    return grouped or None
+
+
+def _ranking_sample(members: Sequence[str]) -> Sequence[str]:
+    """Paths to rank the readings on: a stride across the whole tree.
+
+    A stride rather than the first few thousand. The second signal in `_score`
+    is whether the run keys are the same under every parent group, and the
+    first few thousand sorted paths all sit under the first few groups -- a
+    sample that cannot see that signal at all.
+    """
+    if len(members) <= MAX_RANKING_PATHS:
+        return members
+    step = len(members) // MAX_RANKING_PATHS + 1
+    return members[::step]
+
+
+def _score_grouped(grouped, parents) -> float:
+    """How much the tree itself supports one reading of it.
 
     Three signals, in descending order of how much they settle:
 
@@ -166,14 +227,19 @@ def _score(layout: Layout, parents: Dict[str, str]) -> float:
        run.
     3. Having found more than one run at all, as a tie-break only -- a file
        really can hold one.
+
+    Deliberately tolerant: this is given a sample of the paths, where a run
+    legitimately appears to be missing channels that the rest of the file
+    carries. Strictness belongs in `_finalise`, which sees everything.
     """
     total = 0
     matching = 0
     by_parent: Dict[str, set] = {}
-    for run_key, channels in layout.runs.items():
+    for run_key, channels in grouped.items():
         for channel_key, dataset_path in channels.items():
             total += 1
-            parent = parents[dataset_path]
+            parent = parents.get(dataset_path) or \
+                (dataset_path.rpartition("/")[0] or "/")
             if channel_key and parent.rpartition("/")[2] == channel_key:
                 matching += 1
             by_parent.setdefault(parent, set()).add(run_key)
@@ -181,75 +247,90 @@ def _score(layout: Layout, parents: Dict[str, str]) -> float:
     score = _W_CHANNEL_MATCHES_PARENT * (matching / float(total or 1))
     if len(by_parent) > 1 and len(set(map(frozenset, by_parent.values()))) == 1:
         score += _W_RUNS_ORTHOGONAL
-    if len(layout.runs) > 1:
+    if len(grouped) > 1:
         score += _W_SEVERAL_RUNS
     return score
 
 
+def _finalise(rule_name: str, grouped, length: int) -> Optional[Layout]:
+    """Turn a grouping of every path into a Layout, or None if it is ragged.
+
+    Only the channels every run carries can be given a stable column index, and
+    a stable index is what lets a tile ask for "channel 7" of any run.
+    """
+    shared = None
+    for channels in grouped.values():
+        keys = set(channels)
+        shared = keys if shared is None else (shared & keys)
+    if not shared:
+        return None
+
+    ordered = sorted(shared, key=_natural_key)
+    trimmed = {run_key: {key: channels[key] for key in ordered}
+               for run_key, channels in grouped.items()}
+    return Layout(rule_name, trimmed, ordered, length)
+
+
 def _layouts(vectors: Dict[str, int]) -> List[Tuple[float, Layout]]:
-    """Every consistent reading of a set of 1-D datasets, best first."""
+    """Every consistent reading of a set of 1-D datasets, best first.
+
+    Two stages, because ranking is a heuristic and correctness is not. The
+    readings are ranked on a sample of the paths -- cheap, and as conclusive as
+    the whole file for a convention that does not vary within it -- and then the
+    winner is built over every path and checked. A reading that cannot describe
+    the whole file is dropped and the next one tried, so the sample can only
+    cost a worse choice, never a wrong one.
+    """
     parents = {path: path.rpartition("/")[0] or "/" for path in vectors}
 
     by_length: Dict[int, List[str]] = {}
     for path, length in vectors.items():
         by_length.setdefault(length, []).append(path)
 
-    found = []
-    seen = set()
     # Longest family first: a file usually carries one set of channels plus a
     # short vector or two of metadata, and the channels are the long ones.
     for length, members in sorted(by_length.items(),
                                   key=lambda kv: (-len(kv[1]), -kv[0])):
         if len(members) < 2:
             continue
+        members = sorted(members)
+        sample = _ranking_sample(members)
+
+        ranked = []
         for rule_name, rule in _RULES:
-            grouped: Dict[str, Dict[str, str]] = {}
-            ok = True
-            for path in members:
-                keyed = rule(path)
-                if keyed is None:
-                    ok = False
-                    break
-                run_key, channel_key = keyed
-                if not channel_key:
-                    ok = False
-                    break
-                if channel_key in grouped.setdefault(run_key, {}):
-                    # Two datasets claiming to be the same channel of the same
-                    # run: this reading cannot be the right one.
-                    ok = False
-                    break
-                grouped[run_key][channel_key] = path
-            if not ok or not grouped:
+            grouped = _partition(rule, sample)
+            if grouped is None:
                 continue
+            ranked.append((_score_grouped(grouped, parents), rule_name, rule))
+        if not ranked:
+            continue
+        # A stable sort, so that among readings the evidence cannot separate,
+        # the one declared first in _RULES wins. That ordering is deliberate:
+        # the plainest convention should be preferred when nothing argues
+        # against it.
+        ranked.sort(key=lambda item: -item[0])
 
-            shared = None
-            for channels in grouped.values():
-                keys = set(channels)
-                shared = keys if shared is None else (shared & keys)
-            if not shared:
+        found = []
+        seen = set()
+        for score, rule_name, rule in ranked:
+            grouped = _partition(rule, members)
+            if grouped is None:
                 continue
-
-            ordered = sorted(shared, key=_natural_key)
-            trimmed = {run_key: {key: channels[key] for key in ordered}
-                       for run_key, channels in grouped.items()}
-            signature = (tuple(sorted(trimmed)), tuple(ordered))
+            layout = _finalise(rule_name, grouped, length)
+            if layout is None:
+                continue
+            signature = (tuple(sorted(layout.runs)), tuple(layout.channels))
             if signature in seen:
                 continue
             seen.add(signature)
+            found.append((score, layout))
 
-            layout = Layout(rule_name, trimmed, ordered, length)
-            found.append((_score(layout, parents), layout))
         if found:
             # A shorter family cannot describe the file better than the one
             # holding most of its datasets.
-            break
+            return found
 
-    # A stable sort, so that among readings the evidence cannot separate, the
-    # one declared first in _RULES wins. That ordering is deliberate: the
-    # plainest convention should be preferred when nothing argues against it.
-    found.sort(key=lambda item: -item[0])
-    return found
+    return []
 
 
 # --------------------------------------------------------------------------
@@ -297,7 +378,6 @@ def inspect(path: str) -> Hdf5File:
             "installed")
 
     vectors: Dict[str, int] = {}
-    units: Dict[str, str] = {}
 
     with h5py.File(path, "r") as handle:
         def visit(name, obj):
@@ -307,13 +387,14 @@ def inspect(path: str) -> Hdf5File:
                 return None
             if obj.shape[0] < 2:
                 return None
-            full = "/" + name
-            vectors[full] = int(obj.shape[0])
-            unit = _unit_of(obj)
-            if unit:
-                units[full] = unit
+            vectors["/" + name] = int(obj.shape[0])
             return None
 
+        # Units are deliberately NOT read here. Probing six attribute names on
+        # every dataset is 300,000 HDF5 metadata calls on a file of 50 runs x
+        # 1000 channels, to build a list of 1000 units of which 980 are the
+        # same answer repeated once per run. They are read from one run below,
+        # once the layout says which datasets that run owns.
         handle.visititems(visit)
 
         if not vectors:
@@ -335,8 +416,19 @@ def inspect(path: str) -> Hdf5File:
                   len(layout.channels), layout.samples, score,
                   ", ".join(alternatives) or "nothing else fitted")
 
+        # One run's datasets, which is where a unit is declared once per
+        # channel rather than once per channel per run.
         first = layout.runs[layout.run_keys[0]]
-        channel_units = [units.get(first[key], "") for key in layout.channels]
+        channel_units = []
+        for key in layout.channels:
+            dataset_path = first.get(key)
+            if dataset_path is None:
+                channel_units.append("")
+                continue
+            try:
+                channel_units.append(_unit_of(handle[dataset_path]))
+            except (KeyError, OSError):
+                channel_units.append("")
 
     return Hdf5File(path, layout, channel_units,
                     [other.rule for _, other in ranked[1:]])

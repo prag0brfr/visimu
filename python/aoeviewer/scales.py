@@ -157,3 +157,53 @@ def resample_key(x_range: Optional[Tuple[float, float]], target: int,
         return (None, None, int(target), bool(log))
     bucket = span / max(1, int(target))
     return (round(low / bucket), significant(span), int(target), bool(log))
+
+
+# ---------------------------------------------------------------------------
+# How much room the tick numbers need
+# ---------------------------------------------------------------------------
+#
+# pyqtgraph works the height of the bottom axis out for itself, from the text
+# it drew the last time it painted. That is one paint behind: the height it
+# reserves is right for the font the axis had before, so the first layout after
+# the tick font changes -- which is every change of interface scale, and the
+# first paint of every tile -- reserves the previous font's height. When the
+# new font is taller the numbers are drawn below the space reserved for them
+# and the tile clips them, which is what hides the time values along the bottom
+# of a plot.
+#
+# It shows up on Linux and not on Windows because the default font differs:
+# DejaVu Sans at the same point size is taller than Segoe UI, so the figure
+# pyqtgraph starts from is too small there and close enough to right here.
+#
+# The fix is to stop asking it to guess. The height below is computed from the
+# font's own metrics, measured on the machine that will draw it, and set as a
+# fixed height -- so it is right on the first paint, on every platform, at
+# every scale.
+
+# Breathing room under the numbers, in pixels at a scale of 1.0. Without any,
+# a descender on the longest tick label sits exactly on the tile's edge.
+TICK_ROW_PAD = 2.0
+
+
+def tick_row_height(text_height: float, tick_length: float = 0.0,
+                    offset: float = 2.0, scale: float = 1.0) -> int:
+    """Pixels the bottom axis needs for one row of tick numbers.
+
+    `text_height` is the font's full line height including descenders, which
+    is what QFontMetrics.height() gives; measuring the glyphs of the labels
+    actually drawn would be smaller and would clip the first label containing
+    a minus sign or a digit with a descender.
+
+    `tick_length` is pyqtgraph's, and is negative when the ticks are drawn
+    inside the plot -- which is the default, and costs the axis no height at
+    all, so a negative value contributes nothing rather than subtracting.
+    """
+    scale = float(scale) if scale and scale > 0 else 1.0
+    height = max(0.0, float(text_height))
+    height += max(0.0, float(offset))
+    height += max(0.0, float(tick_length))
+    height += TICK_ROW_PAD * scale
+    # One pixel is the floor: a height of zero makes pyqtgraph hide the axis
+    # rather than draw it small.
+    return max(1, int(math.ceil(height)))

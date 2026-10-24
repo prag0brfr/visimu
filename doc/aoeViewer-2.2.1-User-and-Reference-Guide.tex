@@ -1,12 +1,11 @@
 % aoeViewer -- User and Reference Guide
 % Author: Paulo R. A. Gilz
 %
-% This document supersedes both the 2.0.0 User and Reference Guide and the
-% 2.1.1 user-guide addendum: everything those two said is here, with the
-% passages the 2.1.0 and 2.1.1 releases invalidated rewritten rather than
+% A single reference for the current version. Nothing here describes an
+% earlier one: where behaviour has changed, the text was rewritten rather than
 % appended to.
 %
-% Build:  pdflatex aoeViewer-2.2.0-User-and-Reference-Guide.tex   (three times,
+% Build:  pdflatex aoeViewer-2.2.1-User-and-Reference-Guide.tex   (three times,
 %         so the table of contents and the cross-references settle)
 
 \documentclass[11pt,a4paper,oneside]{report}
@@ -43,13 +42,13 @@
 \definecolor{aoeshade}{HTML}{F4F6F8}
 
 \hypersetup{
-  pdftitle={aoeViewer 2.2.0 -- User and Reference Guide},
+  pdftitle={aoeViewer 2.2.1 -- User and Reference Guide},
   pdfauthor={Paulo R. A. Gilz},
   pdfsubject={The interface, the algorithms, the file format, the C ABI and the scripting API},
   colorlinks=false,
 }
 
-\newcommand{\appver}{2.2.0}
+\newcommand{\appver}{2.2.1}
 
 \pagestyle{fancy}
 \fancyhf{}
@@ -63,9 +62,9 @@
 \setlist[itemize]{itemsep=2pt,topsep=4pt,parsep=0pt}
 \setlist[description]{itemsep=3pt,topsep=4pt,parsep=0pt}
 
-% Boxes, carried over from the 2.0.0 guide's conventions.
-% A grey box records something the source says and the prose might not have.
-% A red box records a genuine limitation.
+% Boxes.
+% A grey box records a design decision worth knowing about to use the program
+% well. A red box records a genuine limitation.
 \newtcolorbox{aoenote}[1]{%
   enhanced, breakable, colback=aoeshade, colframe=aoerule,
   boxrule=0.5pt, arc=1.5pt, left=8pt, right=8pt, top=6pt, bottom=6pt,
@@ -76,12 +75,6 @@
   boxrule=0.7pt, arc=1.5pt, left=8pt, right=8pt, top=6pt, bottom=6pt,
   fonttitle=\bfseries\small, title={#1}, coltitle=white,
   colbacktitle=aoered}
-\newtcolorbox{aoenew}[1]{%
-  enhanced, breakable, colback=white, colframe=aoeaccent,
-  boxrule=0.7pt, arc=1.5pt, left=8pt, right=8pt, top=6pt, bottom=6pt,
-  fonttitle=\bfseries\small, title={#1}, coltitle=white,
-  colbacktitle=aoeaccent}
-
 \newcommand{\code}[1]{\texttt{#1}}
 \newcommand{\key}[1]{\textsf{\small\fbox{#1}}}
 \newcommand{\tab}[1]{\textsc{#1}}
@@ -117,123 +110,27 @@ the C ABI and the scripting API\par}
 \vspace{3cm}
 {\large Paulo R. A. Gilz\par}
 \vfill
-{\small This edition replaces the 2.0.0 guide and the 2.1.x addenda.\par}
 \end{titlepage}
 
 \tableofcontents
 \clearpage
 
-\chapter*{About this edition}
-\addcontentsline{toc}{chapter}{About this edition}
-\markboth{About this edition}{}
+\chapter*{About this guide}
+\addcontentsline{toc}{chapter}{About this guide}
+\markboth{About this guide}{}
 
-This is a single document. It replaces two: the \emph{2.0.0 User and Reference
-Guide} and the \emph{2.1.1 user-guide addendum}, which existed only because
-the guide had not been revised. Everything those two said is here. Where the
-2.1.0 and \appver{} releases changed behaviour the 2.0.0 text described, the
-text has been rewritten rather than annotated, so nothing in this guide has to
-be read against a correction printed elsewhere.
+This guide describes version \appver{} and nothing else. Every label, default,
+range and limit quoted here was read from the source of that version; where a
+genuine limitation exists it is recorded in a red box, and where a design
+decision is worth knowing about to use the program well, in a grey one.
 
-Passages that describe behaviour introduced or changed after 2.0.0 are marked
-with a blue box naming the version, so a reader who knows 2.0.0 can find what
-moved without reading the whole guide again. Chapter~\ref{ch:whatsnew}
-summarises the same ground in two pages.
-
-Every label, default, range and limit quoted here was read from the source of
-version \appver. Where the code and an earlier edition of this guide
-disagreed, the code won, and the discrepancy is recorded in a grey box. Where a
-genuine limitation exists, it is recorded in a red box. This edition carries no
-figures: it is a text reference, and the screenshots of the 2.0.0 edition
-described an interface that has since moved.
+It carries no figures: it is a text reference.
 
 One version number is worth separating from the others before it causes
-confusion. \textbf{The application is at \appver; the core library is still at
-2.0.0}, which is what \code{aoe\_version()} returns and what
-\code{-version} prints as the core version. Nothing in the C ABI changed
-across the 2.1 releases --- every change was above the seam --- so the core did
-not need a new number.
-
-\chapter{What changed since 2.0.0}
-\label{ch:whatsnew}
-
-\section{In 2.1.0}
-
-\begin{description}
-\item[Dual encoding.] A curve now carries two independent identities. \emph{Colour by}
-  --- Parameter, Simulation or ISO --- decides the colour and nothing else.
-  \emph{Style by} --- None, File, Simulation or ISO --- decides the dash pattern
-  and the marker. \emph{None} is the 2.0.0 behaviour, in which dash and marker
-  hang off the colour key. See \S\ref{sec:style}.
-\item[Two style tables.] The single \emph{Curves} table of 2.0.0 became two: \emph{Colour},
-  with one row per coloured identity, and \emph{Line}, with one row per styled
-  identity. Both scroll.
-\item[Titles carry the names; axes do not.] The captions beside Y and under X are
-  blank. The tile title names every selected parameter, as
-  \code{ALPHA, NZ = f(TIME)}, and wraps onto two lines rather than truncating.
-\item[PARAMS puts the selection first.] On the active tile, the ticked Y parameters
-  are listed before the rest, in the order they were ticked. The filter still
-  only hides names.
-\item[Workspaces record more.] The schema is still version~3, and files also carry
-  \code{app\_version} and, per tile, \code{style\_mode} and
-  \code{style\_iso\_param}.
-\end{description}
-
-\section{In \appver}
-
-\begin{description}
-\item[Renamed files and runs survive a workspace.] A name given in \tab{data} is saved
-  and restored. See \S\ref{sec:workspaces}.
-\item[\emph{Style by ISO} reaches the legend.] Ticking \emph{ISO} in the legend row now
-  writes every ISO identity a curve carries, not only the colour's. Colouring
-  by parameter while styling by ISO used to produce one row per parameter with
-  no ISO value in it. See \S\ref{sec:legend}.
-\item[The ISO parameter checkbox selects values.] It is a select-all over the values
-  beneath it, tri-state, rather than the filter's own on/off flag --- which
-  moved to the row's context menu as \emph{Use this filter}. See \S\ref{sec:iso}.
-\item[Unticking a parameter returns it to its place.] It no longer stays at the top of
-  the \tab{params} list once it is no longer selected.
-\item[Legends are smaller.] One point less, less padding inside the frame and less
-  space between a swatch and its text. The row that reports a capped legend
-  now names the cap instead of only counting what it left out.
-\item[Files are reloaded on request, not on a timer.] The three-second disk poll and
-  its \emph{Files changed on disk} dialog are gone; \emph{Reload} in the
-  \tab{data} tab re-reads what you ask it to. See \S\ref{sec:reload}.
-\item[A run keeps its identity across a reload.] Run keys are built from the name a
-  file was first given rather than from its current label, so renaming a file
-  and then reloading it no longer detaches every colour and dash set for its
-  runs.
-\item[Reusing a workspace against another study keeps the axes.] Removing one file and
-  adding another used to lose every tile's x axis on the way through zero open
-  files. See \S\ref{sec:swap}.
-\item[Colour by Parameter is the default,] and leads the row.
-\item[Rebuilds that change nothing cost less.] The plot's own settings and the drawn
-  annotations are written only when they differ; the \tab{params} filter waits
-  for the typing to stop; a file of more than 200 runs opens closed in
-  \tab{data}. None of this changes what is drawn --- see \S\ref{sec:redrawcache}.
-\end{description}
-
-\section{In \appver}
-
-\begin{description}
-\item[The interface has a size.] Two buttons in the toolbar make the text and the
-  spacing around it larger or smaller --- everywhere: the tab rail, the
-  panels, the bar itself, and the titles, axes and legends on the plots. The
-  setting is saved with the workspace. See \S\ref{sec:uiscale}.
-\item[The panels scroll.] Each one sits in a scroll area, so the window's minimum
-  height no longer depends on the tallest panel. On a screen shorter than
-  about 1000 usable pixels the window previously could be neither shrunk nor
-  maximised.
-\item[The colour picker no longer paints itself in the colour being edited.] Its OK,
-  Cancel and two other buttons took the swatch's colour and disappeared into
-  it on a light one.
-\item[\emph{Fit} moved to the page and tile bar,] with the rest of what acts on the
-  tiles. \key{Ctrl+0} still works from anywhere in the window.
-\item[The light/dark toggle moved to the toolbar,] out of the foot of the tab rail
-  where it took vertical space from the tabs and selected no panel.
-\item[Building the executable writes \code{sample/}.] Two 250\,MB flight files and one
-  small one, beside \code{build/} and \code{dist/}, generated once and never
-  rewritten. See \S\ref{sec:samples}.
-\end{description}
+confusion. \textbf{The application is at \appver; the core library is at
+2.0.0}, which is what \code{aoe\_version()} returns and what \code{-version}
+prints as the core version. The C ABI has not changed since then --- every
+change has been above the seam --- so the core has not needed a new number.
 
 \chapter{What aoeViewer is}
 
@@ -278,7 +175,7 @@ with a C foreign-function interface can drive equally well.
   workspace file format. Contains no Qt. \\
 \addlinespace
 \code{python/aoeviewer/ui/} &
-  The Qt layer: the main window, the twelve side panels, the plot grid and the
+  The Qt layer: the main window, the thirteen side panels, the plot grid and the
   plot tiles. \\
 \bottomrule
 \end{tabular}
@@ -372,11 +269,9 @@ PYTHONPATH=python python -m aoeviewer sample.aoe
 \subsection{Sample data}
 \label{sec:samples}
 
-\begin{aoenew}{New in \appver}
 Building the executable also writes \code{sample/}, beside \code{build/} and
 \code{dist/}: two flight files of about 250\,MB with twenty-five runs each, and
 one of 12\,MB for a quick look.
-\end{aoenew}
 
 The sizes are the point. A few megabytes exercises none of what this program is
 built around: the \code{.aoec} sidecar is not written below 8\,MB, decimation
@@ -475,11 +370,12 @@ tab, where the x axis has already defaulted to the first channel whose name
 begins with \code{TIME}, and tick one or more y channels. The tile draws as soon
 as it has both an x channel and at least one y channel.
 
-Opening a file of any size is done on a worker thread, and for files of 8\,MB or
-more the same task also writes an \code{.aoec} sidecar beside the result file.
-That happens once; subsequent opens of the same file skip the index scan
-entirely and are several times faster. Chapter~\ref{ch:reading} describes the
-mechanism.
+Opening a file of any size is done on a worker thread. For files of 8\,MB or
+more, once the file is open and on screen a \emph{separate process} is started
+to write an \code{.aoec} sidecar beside the result file; the status bar says so
+and the window stays usable throughout. That happens once; subsequent opens of
+the same file skip the index scan entirely and are several times faster.
+Chapter~\ref{ch:reading} describes the mechanism.
 
 \chapter{The window}
 
@@ -490,17 +386,17 @@ workspace load, save and save-as, the two exports, the auto-fit button and ---
 pushed to the right edge --- the four mouse modes. The title bar above it names
 the workspace currently open, with a leading asterisk while there are unsaved
 changes. Down the left edge runs the tab rail, a 21-pixel strip of vertically
-painted labels which selects which of the twelve panels is shown beside it.
-It holds tabs and nothing else: up to 2.1.1 the light/dark toggle was pinned to
-its foot, where it competed with the tabs for the one dimension a short screen
-is short of, and where it was the only button in the column that selected no
-panel. The
+painted labels which selects which of the thirteen panels is shown beside it.
+It holds tabs and nothing else --- the light/dark toggle is in the toolbar,
+where it does not compete with the tabs for the one dimension a short screen is
+short of. The
 panel itself occupies a splitter pane that can be dragged between 230 and 600
 pixels wide. To its right, the plot area is divided into the page and tile bar
 along its top and the grid of tiles below. The status bar along the bottom
 carries, from left to right, the description of any running background task or
-the standing summary of what is loaded, an indeterminate progress bar while a
-task runs, the crosshair readout, and the size of the sample cache.
+the standing summary of what is loaded, a progress bar while a task runs, the
+crosshair readout, a note of any sidecar being built in another process, and the
+size of the sample cache.
 
 The active tile is the one every per-tile control acts on, and it is marked by a
 two-pixel accent border rather than a one-pixel neutral one. Clicking any tile
@@ -535,7 +431,7 @@ Light / Dark & --- & Switches the theme. Its label and icon name the theme a pre
 Select & \key{Ctrl+1} & Mouse mode: click to activate a tile; drag annotations. \\
 Inspect & \key{Ctrl+2} & Mouse mode: click a curve to read every channel; drag to measure a slope. \\
 Pan & \key{Ctrl+3} & Mouse mode: drag to move the view. \\
-Zoom & \key{Ctrl+4} & Mouse mode: wheel zooms, drag a rectangle to zoom into it. \\
+Zoom & \key{Ctrl+4} & Mouse mode: the wheel zooms; a drag zooms the area, the x axis or the y axis according to its shape. \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -581,14 +477,64 @@ frozen.
 Select & Moves markers and the edges of shaded areas; moves the legend and text captions. & inert & movable \\
 Inspect & Rubber-bands a slope line; a drag shorter than six pixels counts as a click and inspects instead. & inert & frozen \\
 Pan & Pans the view. On a 3D tile: turns it; middle-drag or \key{Shift}+drag slides it; right-drag or \key{Ctrl}+drag zooms. & inert & frozen \\
-Zoom & Rubber-bands a rectangle to zoom into. & zooms & frozen \\
+Zoom & Rubber-bands a region to zoom into --- the area, the x axis alone or the y axis alone, according to the shape of the drag. & zooms & frozen \\
 \bottomrule
 \end{tabular}
 \end{center}
 
 Annotations are movable only in Select mode and only on a two-dimensional tile.
 
+\subsection{What a zoom drag zooms}
+\label{sec:zoomdrag}
+
+In Zoom mode the shape of the drag decides which axes it applies to.
+
+\begin{center}
+\small
+\begin{tabular}{@{}p{0.30\textwidth}p{0.60\textwidth}@{}}
+\toprule
+\textbf{Drag} & \textbf{Result} \\
+\midrule
+An area & Zooms into that rectangle. \\
+A flat line across & Zooms the \textbf{x axis only}; y is left exactly as it was. \\
+A line up and down & Zooms the \textbf{y axis only}; x is left exactly as it was. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+A drag counts as a line when its minor dimension is at most 18 pixels at a
+scale of 1.0 \emph{and} at least four times shorter than its major one. Both
+tests are needed: the ceiling alone would call a $20 \times 16$ drag
+horizontal, and the ratio alone would call a $400 \times 60$ one horizontal
+when whoever drew it plainly meant a region. The ceiling follows the interface
+scale, so a line means the same thing to the eye at 70\,\% as at 160\,\%.
+A drag smaller than six pixels in both directions does nothing at all, so a
+twitch while clicking cannot zoom the view by a factor of a hundred.
+
+The rubber band shows the decision as it is made --- spanning the full height of
+the tile for an x-only zoom and the full width for a y-only one --- so the
+gesture is confirmed before the button is released rather than after. There is
+no mode to select and nothing to hold down.
+
+\begin{aoenote}{Why the constrained gestures exist}
+The unconstrained one is usually not what is wanted. A stretch of x with y
+untouched is the common case --- a manoeuvre between two instants, every channel
+of it still in frame --- and doing that with a rectangle means dragging the full
+height of the tile by eye and getting it slightly wrong, which rescales y by a
+few per cent for no reason and makes two tiles that should be comparable no
+longer comparable.
+
+Internally all three are the same operation. An x-only drag is widened to the
+full height of the view before it is mapped into data coordinates, and such a
+rectangle gives back exactly the y range the axis already had --- so there is
+one code path rather than three, and it is the one that was already correct.
+\end{aoenote}
+
+Dragging on an axis itself still means ``this axis only'', and is handled by
+pyqtgraph as before.
+
 \section{The status bar}
+\label{sec:statusbar}
 
 The standing summary reads \emph{N file(s), P run(s) plotted, M parameter(s)}.
 When an ISO filter is holding runs back it becomes more explicit ---
@@ -596,32 +542,48 @@ When an ISO filter is holding runs back it becomes more explicit ---
 parameter(s)} --- which is the shortest honest description of a state that would
 otherwise look like lost data.
 
-The progress bar is deliberately indeterminate: it has range 0 to 0, a fixed
-width of 120 pixels and no text. The core reports no progress from inside a
-parse, and a fabricated percentage would be worse than an honest working. On the
-right, \emph{cache NN MB} is the sample data the core is holding; its tooltip
-explains that columns are dropped automatically when the figure exceeds the
-limit and re-read when needed again.
+The progress bar is 120 pixels wide and takes one of two forms, according to
+whether there is anything honest to count.
+
+A task with a known number of steps --- opening seven files, re-reading four,
+loading a workspace that names three --- gets a determinate bar reading
+\emph{3 of 7}, which advances as each file is finished. A task with no step
+count gets range 0 to 0, Qt's indeterminate form, with no text at all: the core
+reports no progress from inside a single parse, and a fabricated percentage
+would be worse than an honest \emph{working}.
+
+Freezing the interface during a task is deliberate: an action taken while a
+task runs would be lost, so it is better refused than accepted and dropped.
+What matters is that the difference between \emph{busy} and \emph{dead} is
+visible, which on a five-minute task is the difference between waiting and
+reaching for the task manager.
+
+So the pointer becomes a wait cursor for as long as the interface is disabled
+--- wherever it happens to be, which the status bar cannot reach --- and the bar
+counts steps whenever steps are countable. The cursor is tied to the disabled
+state rather than to the task, because a chain of queued tasks starts several
+times and finishes once, and pushing a cursor per task would leave the hourglass
+on for good.
+
+Further right, \emph{caching N files in the background} appears while a sidecar
+is being written in another process. It is deliberately not the progress bar:
+the bar means \emph{the window is waiting}, and the whole point of building a
+sidecar outside the application is that the window is not. Its tooltip says as
+much. On the right, \emph{cache NN MB} is the sample data the core is holding;
+its tooltip explains that columns are dropped automatically when the figure
+exceeds the limit and re-read when needed again.
 
 \section{Files that change underneath you}
 \label{sec:reload}
 
-\begin{aoenew}{Changed in \appver{} --- nothing polls the disk}
-Up to 2.1.0 a timer fired every three seconds, asked the core which open files
-had changed, and put up a dialog titled \emph{Files changed on disk} offering
-to reload them.
+\textbf{Nothing polls the disk.} Whether the data on disk is finished is a
+question only the person running the solver can answer, so they answer it: a
+file is re-read when you press \emph{Reload}, and at no other time.
 
-It was wrong in both directions. It interrupted work that had nothing to do
-with the file it was asking about --- the question arrives while you are
-reading a plot of something else, and answering it is the only way back. And it
-could not be trusted anyway: a solver halfway through rewriting its output is a
-file that has changed and must \emph{not} be read, so the prompt's best case
-was asking a question it had no business asking, and its worst case was talking
-you into a half-written file.
-
-Whether the data on disk is finished is a question only the person running the
-solver can answer. Now they answer it.
-\end{aoenew}
+A solver halfway through rewriting its output is a file that has changed and
+must \emph{not} be read, so a prompt offering to reload it would be asking a
+question it has no business asking --- and asking it while you are reading a
+plot of something else, where answering is the only way back.
 
 \emph{Reload}, in the \tab{data} tab, re-reads the selected file or files from
 disk; with nothing selected it re-reads every open file, which is what ``the
@@ -637,15 +599,12 @@ spends the parse the user is already waiting for rather than the next open's.
 Names survive it. The file keeps the name you gave it, every run keeps its own,
 and so do their colours and dashes.
 
-\begin{aoenote}{Why a reload used to lose the styles of a renamed file}
+\begin{aoenote}{Why a reload keeps the styles of a renamed file}
 A run's key is \code{<file>::<id>::<ordinal>}, and \code{reload()} re-opens the
-dataset and rebuilds every key. While the \code{<file>} part was the
-\emph{display} name, renaming a file and then reloading it renamed every one of
-its run keys with it --- and every colour, dash and marker the user had chosen
-was suddenly attached to a key nothing answered to.
-
-It was invisible while reloading was something a timer occasionally offered.
-Making it a button people press on purpose is what brought it out. The key is
+dataset and rebuilds every key. If the \code{<file>} part were the
+\emph{display} name, renaming a file and then reloading it would rename every
+one of its run keys with it --- and every colour, dash and marker chosen for
+them would suddenly be attached to a key nothing answered to. The key is
 built from the name the file was \emph{first} given, which renaming does not
 touch and a reload does not change.
 \end{aoenote}
@@ -663,12 +622,10 @@ The theme button is in the toolbar's interface group (\S\ref{sec:uiscale}),
 and flips the whole application: the plot canvases, the legend grounds, the
 painted toolbar icons and the text captions.
 
-\begin{aoenew}{Changed in \appver}
-It was at the foot of the tab rail, labelled \emph{L / D}. Its label and icon
-now name the theme a press would give rather than the one already on screen ---
-a sun while the dark theme is on --- because a toggle labelled with its current
-state reads as a description, and a button is an offer.
-\end{aoenew}
+The toggle's label and icon name the theme a press would give rather than the
+one already on screen --- a sun while the dark theme is on --- because a toggle
+labelled with its current state reads as a description, and a button is an
+offer.
 
 The stylesheet sets every colour it depends on instead of inheriting from the
 desktop, because Qt's default palette differs enough between Linux and Windows
@@ -684,22 +641,20 @@ captions), because a stylesheet that sets a pixel size makes
 \code{QFont.pointSizeF()} report $-1$ and any code that reads a font back would
 have to guess.
 
-\begin{aoenew}{Changed in \appver{} --- legend type}
-Legend rows were 7\,pt, the same as the axes, until \appver. They are 6\,pt now,
-with less padding inside the legend's frame and less space between a row's
-swatch and its text. A legend is a key that is read once and glanced at
-thereafter, and at the axis size it was taking a visible corner out of every
-tile on a $3 \times 3$ page.
-\end{aoenew}
+Legend rows are 6\,pt, a point below the axes, with little padding inside the
+legend's frame and little space between a row's swatch and its text. A legend is
+a key that is read once and glanced at thereafter, and at the axis size it took
+a visible corner out of every tile on a $3 \times 3$ page.
 
 \section{Interface size}
 \label{sec:uiscale}
 
-\begin{aoenew}{New in \appver}
-\emph{Smaller} and \emph{Larger} in the toolbar scale the whole interface,
-from 70\,\% to 160\,\% in steps of ten points. The setting is saved with the
-workspace, like the theme.
-\end{aoenew}
+\emph{Smaller} and \emph{Larger} in the toolbar scale the whole interface, from
+70\,\% to 160\,\% in steps of ten points. A session starts at 90\,\%: the base
+figures were chosen against a 1080-high screen and are a little generous on most
+of the screens this is used on, and one step down fits the whole interface on
+every screen it has been run on. The setting is saved with the workspace, like
+the theme, and a workspace that names a size opens at the size it was saved at.
 
 One knob rather than a set of them. Text set two pixels smaller inside
 unchanged padding looks shrunken rather than roomier, so the padding, the tick
@@ -736,32 +691,31 @@ at 100\,\% has the opposite problem. Scrollable panels (below) make the window
 fit on any screen; this makes it \emph{comfortable} on one.
 \end{aoenote}
 
-\chapter{The twelve panels}
+\chapter{The thirteen panels}
 
-The tab rail selects one of twelve panels. Selecting a tab refreshes that panel
+The tab rail selects one of thirteen panels. Selecting a tab refreshes that panel
 immediately and marks the others stale, so they are refreshed lazily when next
 shown --- which is why no panel is allowed to write application state while
-refreshing. Five of the panels act on the active tile only (\tab{params},
-\tab{style}, \tab{scale}, \tab{3d}, \tab{text}); the rest are global.
+refreshing. Six of the panels act on the active tile only (\tab{params},
+\tab{style}, \tab{scale}, \tab{sync}, \tab{3d}, \tab{text}); the rest are
+global.
 
-\begin{aoenew}{New in \appver{} --- the panels scroll}
 Each panel sits in a scroll area, and the reason is the window's minimum size
 rather than the panel's own.
 
-A plain widget's minimum height is the sum of its children's, and \tab{style}
-is tall: four switches, two encodings with their combos and hints, two tables
-and a legend group. Added to the toolbar, the page bar and the status bar, the
-window's minimum height came out near 950 px --- fine on a 1080-high screen,
-and taller than the usable area of a 1050-high one once a desktop panel takes
-its share. The window could then neither be shrunk nor maximised, because a
-maximise that cannot satisfy the minimum is refused outright.
+A plain widget's minimum height is the sum of its children's, and \tab{style} is
+tall: four switches, two encodings with their combos and hints, two tables and a
+legend group. Added to the toolbar, the page bar and the status bar, that would
+put the window's minimum height near 950\,px --- fine on a 1080-high screen, and
+taller than the usable area of a 1050-high one once a desktop panel takes its
+share. The window could then be neither shrunk nor maximised, because a maximise
+that cannot satisfy the minimum is refused outright.
 
 A scroll area does not propagate its child's minimum height, so the window's
-minimum stops depending on the tallest panel. Nothing is hidden: a panel keeps
-its full height and scrolls only when the pane is shorter than it, which on any
-screen that fitted before never happens. Horizontal scrolling is off, so a
-control can never be parked off to the side where it cannot be found.
-\end{aoenew}
+minimum does not depend on the tallest panel. Nothing is hidden: a panel keeps
+its full height and scrolls only when the pane is shorter than it. Horizontal
+scrolling is off, so a control can never be parked off to the side where it
+cannot be found.
 
 \section{DATA --- choosing runs}
 \label{sec:data}
@@ -783,30 +737,23 @@ driven from the session rather than from the tree. \emph{Reload}, beside
 \emph{Rename}, re-reads files from disk; \S\ref{sec:reload} describes what it
 does and why nothing does it on its own.
 
-\begin{aoenew}{Changed in \appver{} --- a very large file opens closed}
 A file of more than 200 runs arrives with its runs hidden until you open it.
-Expanding a node is what makes Qt lay out and build view items for its
-children, so a twelve-hundred-run study --- the size the performance chapter
-measures --- paid for all twelve hundred rows on load, before anyone had looked
-at one. Nobody scrolls through twelve hundred rows to find a run either.
+Expanding a node is what makes Qt lay out and build view items for its children,
+so a twelve-hundred-run study --- the size the performance chapter measures ---
+would otherwise pay for all twelve hundred rows on load, before anyone had
+looked at one. Nobody scrolls through twelve hundred rows to find a run either.
 
 Nothing is missing: every run is in the tree, its tick is in force, and
 \emph{Plot all} still reaches it. Whichever way you leave a file, open or
 closed, is remembered --- by path, so it survives a reload and a rename.
-\end{aoenew}
 
 Renaming, by double-click or from the menu, changes the display name only. The
 identity a style attaches to is a separate key that never changes, so
 recolouring does not follow a rename; the tooltip of a renamed run records what
 the file calls it.
 
-\begin{aoenew}{New in \appver{} --- names are saved}
 A name given here is written into the workspace and restored when it is loaded.
-Before \appver{} it lived only for the session, so a study whose files had been
-given readable names came back as \code{flight\_b.aoe} the next morning.
-\S\ref{sec:workspaces} describes how the names are keyed and what an older
-workspace does.
-\end{aoenew}
+\S\ref{sec:workspaces} describes how the names are keyed.
 
 \begin{aoenote}{Why the list does not blink}
 The tree is rebuilt only when its structure changes --- a signature over each
@@ -822,11 +769,8 @@ tooltip gains a sentence explaining that it is held back rather than unselected.
 That greying is the visible half of the two-constraint model described in
 \S\ref{sec:iso}.
 
-\section{Filtering the run list}
+\subsection{Filtering the run list}
 
-\begin{aoenew}{New in 2.2.0}
-The box above the DATA tree.
-\end{aoenew}
 
 Runs are often named \code{X.Y.Z} and often number in the hundreds, so the slow
 part of this panel is scrolling. Typing in the box hides what does not match.
@@ -870,24 +814,19 @@ Right-clicking a channel offers \emph{Create alias for NAME\ldots}, \emph{Use as
 X axis} and \emph{Copy name}. The alias dialog is pre-filled with a readable
 guess made by replacing underscores with spaces and capitalising words.
 
-\begin{aoenew}{Changed in 2.1.0 and \appver{} --- the order of the list}
-In 2.0.0 the y list was in file order and the tile's y list took the channels in
-the order they appeared in the list, not the order you ticked them.
+The ticked channels of the active tile are listed \emph{first}, in the order
+they were ticked, and the rest follow in file order. That order is also the
+tile's y list, so it is the order the title names them in and the order the
+legend and the CSV export use.
 
-Since 2.1.0 the ticked channels of the active tile are listed \emph{first}, in
-the order they were ticked, and the rest follow in file order. That order is
-also the tile's y list, so it is the order the title names them in and the order
-the legend and the CSV export use. The filter still only hides rows: a selected
-name that does not match stays selected and stays at the top, hidden until the
-filter lets it through.
+Unticking a channel returns it to its place among the unselected ones, because
+the promotion is recomputed from the file order on every tick rather than
+applied to the list's own order --- which would have no way back, since once a
+name has been moved to the top, ``the order as given'' \emph{is} the promoted
+one.
 
-\appver{} fixed the other half of that. Unticking a channel now returns it to its
-place among the unselected ones. In 2.1.0 the promotion was applied to the
-list's own order, which has no way back --- once a name had been moved to the
-top, ``the order as given'' \emph{was} the promoted one --- so an unticked
-channel stayed at the top until something else rebuilt the list. The promotion
-is recomputed from the file order on every tick now.
-\end{aoenew}
+The filter only hides rows: a selected name that does not match stays selected
+and stays at the top, hidden until the filter lets it through.
 
 \begin{aoenote}{Displayed default versus committed default}
 Refreshing the panel displays a sensible x channel --- the first whose name
@@ -967,23 +906,17 @@ remembering.
  > INITIAL_MASS   2/3   paused   grouped
 \end{aoecode}
 
-\begin{aoenew}{Changed in \appver{} --- what a parameter's checkbox does}
-It is a \textbf{select-all over the values beneath it}. Ticking it ticks every
-value --- or every interval, when the parameter is grouped --- unticking it
-unticks them all, and it shows a partial tick when some but not all are on.
-That is the same thing the \emph{All} and \emph{None} buttons do to the selected
-parameter, reachable now from the row itself.
+A parameter's checkbox is a \textbf{select-all over the values beneath it}.
+Ticking it ticks every value --- or every interval, when the parameter is
+grouped --- unticking it unticks them all, and it shows a partial tick when some
+but not all are on. That is the same thing the \emph{All} and \emph{None}
+buttons do to the selected parameter, reachable from the row itself.
 
-Up to 2.1.0 that box carried the filter's own on/off flag, so the obvious
-reading of a checkbox sitting above a list of checkboxes did something else
-entirely, and clicking it appeared to leave the values alone.
-
-\textbf{The on/off flag moved to the row's right-click menu}, as \emph{Use this
-filter}, where it is named rather than guessed at. Switching it off keeps the
-values you ticked --- which is what makes ``with and without this'' a two-click
-comparison --- and the row says \emph{paused}, so a filter that is not narrowing
-anything still accounts for itself in the tree.
-\end{aoenew}
+\textbf{The filter's own on/off flag is on the row's right-click menu}, as
+\emph{Use this filter}, where it is named rather than guessed at. Switching it
+off keeps the values you ticked --- which is what makes ``with and without
+this'' a two-click comparison --- and the row says \emph{paused}, so a filter
+that is not narrowing anything still accounts for itself in the tree.
 
 Four buttons act on the selected parameter: \emph{Group\ldots} opens the interval
 editor, \emph{All} and \emph{None} tick or untick every value, and \emph{Remove}
@@ -1032,12 +965,12 @@ changing an ISO filter never re-ticks the \tab{data} tab. The panel's summary
 line says how many of the \tab{data} tab's runs are being held back, and the
 status bar repeats it.
 
-\begin{aoenote}{What this replaced}
-An earlier version wrote the filter result into the run selection. Applying a
-mass filter then silently re-ticked the \tab{data} tab, and re-ticking a run in
-\tab{data} appeared to widen the filter: two controls, one piece of state, each
-overwriting the other's answer. The intersection is now computed only where
-curves are actually drawn, and memoised, because every tile asks the same
+\begin{aoenote}{Two controls, two pieces of state}
+The filter result is never written into the run selection. Were it, applying a
+mass filter would silently re-tick the \tab{data} tab and re-ticking a run in
+\tab{data} would appear to widen the filter: two controls over one piece of
+state, each overwriting the other's answer. The intersection is computed only
+where curves are actually drawn, and memoised, because every tile asks the same
 question on every rebuild.
 \end{aoenote}
 
@@ -1076,13 +1009,12 @@ The column is there but a run's value is not a number & That run alone is exclud
 \end{center}
 
 \begin{aoenote}{A filter with nothing to say says nothing}
-The first row of that table used to read the other way: a filter on a parameter a
-file did not carry excluded every one of that file's runs. That is defensible
-read on its own and wrong in every case it actually arises. It made a filter on a
-parameter only some files carry hide every run of the others, and --- once
-filters became part of a saved workspace --- it made a workspace whose ISO
-parameter had since disappeared open to an empty plot with nothing at all to
-explain it.
+The first row of that table is the one worth dwelling on. Reading it the other
+way --- a filter on a parameter a file does not carry excludes every one of that
+file's runs --- is defensible in the abstract and wrong in every case it
+actually arises: it would make a filter on a parameter only some files carry
+hide every run of the others, and it would make a workspace whose ISO parameter
+has since disappeared open to an empty plot with nothing at all to explain it.
 \end{aoenote}
 
 Entries that cannot be read at all are skipped individually rather than failing
@@ -1108,14 +1040,10 @@ marker of its own; a per-curve marker overrides it.
 
 \subsection{Two encodings, chosen separately}
 
-\begin{aoenew}{New in 2.1.0 --- Colour by and Style by}
-In 2.0.0 there was one choice, \emph{Colour by}, and the dash pattern and marker
-hung off whatever key it produced. A curve therefore had one identity, and a tile
-showing the same three channels from three files could distinguish the channels
-or the files but not both.
-
-There are two choices now, made independently on each tile.
-\end{aoenew}
+Two choices, made independently on each tile: \emph{Colour by} sets the colour,
+and \emph{Style by} the dash pattern and marker. A curve therefore carries two
+identities, so a tile showing the same three channels from three files can
+distinguish the channels \emph{and} the files.
 
 \textbf{Colour by} --- \emph{Parameter}, \emph{Simulation} or \emph{ISO} --- sets
 the colour and nothing else. \emph{Parameter} is the default, and leads the
@@ -1132,8 +1060,8 @@ Getting this wrong was a real defect: the table was built from the old choice an
 showed the wrong rows until something else forced a refresh.
 
 \textbf{Style by} --- \emph{None}, \emph{File}, \emph{Simulation} or \emph{ISO}
---- sets the dash pattern and the marker. \emph{None} is the 2.0.0 behaviour:
-dash and marker follow the colour key. Choosing \emph{ISO} reveals a second
+--- sets the dash pattern and the marker. Under \emph{None} the dash and marker
+follow the colour key. Choosing \emph{ISO} reveals a second
 combo, \emph{Style ISO}, which need not name the same parameter the colour does.
 
 The pairing this exists for is several files of the same parameters on one tile:
@@ -1199,12 +1127,9 @@ of 6.0.
 
 \subsection{The two tables}
 
-\begin{aoenew}{Changed in 2.1.0 --- one table became two}
-The single \emph{Curves} table of 2.0.0 is now a \emph{Colour} table and a
-\emph{Line} table, because the two encodings have different row sets: three
-parameters and four files is three colour rows and four line rows, not twelve of
-anything. Both scroll when the list is long.
-\end{aoenew}
+The \emph{Colour} table and the \emph{Line} table have different row sets:
+three parameters and four files is three colour rows and four line rows, not
+twelve of anything. Both scroll when the list is long.
 
 \emph{Colour} has one row per coloured identity in the current \emph{Colour by}
 mode, with a swatch that opens a colour dialog. \emph{Line} has one row per
@@ -1227,22 +1152,15 @@ With \emph{File} and \emph{Simulation} off, rows whose text is identical are
 merged. That merging is the point of the switches: twenty-five runs sharing three
 ISO intervals produce three rows rather than twenty-five saying the same thing.
 
-\begin{aoenew}{Fixed in \appver{} --- ISO and \emph{Style by ISO}}
 Ticking \emph{ISO} writes every ISO identity the curve carries, not only the
-colour's.
+colour's. A tile colouring by parameter and styling by ISO therefore reads
+\code{ALT | MACH = 0.75}: one row per value, ordered by value --- or by
+interval, when the parameter is grouped. When \emph{Colour by} and \emph{Style
+by} name the same ISO parameter it is written once, not twice.
 
-Before \appver{} only the \emph{Colour by} parameter's label was consulted. On a
-tile colouring by parameter and styling by ISO that label is empty --- colour is
-not keying on ISO, so no ISO labels were looked up at all --- so \emph{ISO} wrote
-nothing, every row came out as just the parameter name, and the rows, being
-identical, were merged into one. A tile whose dashes carried the whole sweep had
-a legend that could not explain it.
-
-It reads \code{ALT | MACH = 0.75} now, one row per value, ordered by value ---
-or by interval, when the parameter is grouped --- exactly as the colour path
-already was. When \emph{Colour by} and \emph{Style by} name the same ISO
-parameter it is written once, not twice.
-\end{aoenew}
+The ISO value has to be \emph{in} the text for the rows to survive, because
+rows with identical text are merged --- which is what turns a fifty-run sweep
+into one row per value rather than fifty saying the same thing.
 
 Beyond sixty rows the legend stops adding them and appends a pen-less entry
 reading \emph{\ldots and N more (legend caps at 60 rows)}. The cap is what
@@ -1263,15 +1181,37 @@ had it.
 
 \subsection{Titles and axis captions}
 
-\begin{aoenew}{Changed in 2.1.0 --- the title carries the names}
 The captions beside Y and under X are blank. The tile's title names every
 selected parameter and the x channel, as \code{ALPHA, NZ = f(TIME)}, and a long
 list wraps onto a second line rather than being truncated.
 
-A caption beside the axis repeated what the title already said and spent a strip
-of a tile that is often one ninth of a page. The unit reaches the reader through
-the tick values and the \tab{inspect} tables instead.
-\end{aoenew}
+A caption beside the axis would repeat what the title already says and spend a
+strip of a tile that is often one ninth of a page. The unit reaches the reader
+through the tick values and the \tab{inspect} tables instead.
+
+The caption is \emph{hidden} rather than set to an empty string, because
+pyqtgraph shows an axis label whatever text it is given --- an empty one still
+reserved the whole line it was meant to give back.
+
+\begin{aoenote}{How much room the tick numbers get}
+pyqtgraph sizes the bottom axis from the text it drew the last time it painted,
+which is one paint behind: the height reserved is right for the font the axis
+had \emph{before}, so the first layout after the tick font changes --- every
+change of interface scale, and the first paint of every tile --- reserves the
+previous font's height. Where the new font is taller, the numbers are drawn
+below the space reserved for them and the tile clips them.
+
+It showed on Linux and not on Windows because the default font differs: DejaVu
+Sans at the same point size is taller than Segoe UI, so the figure pyqtgraph
+starts from is too small there and close enough to right on Windows.
+
+So the height is not left to it. It is computed from the font's own metrics ---
+the full line height including descenders, plus the tick offset, plus two
+pixels of air at the current scale --- and set as a fixed height, which is right
+on the first paint, on every platform and at every interface scale. The left
+axis is still pyqtgraph's own, because its width is measured from the tick
+strings actually drawn, which it does get right.
+\end{aoenote}
 
 A tile with nothing to draw says so in the same place: \emph{empty tile},
 \emph{no parameter selected (x: TIME)}, \emph{ALTITUDE (no x axis selected)}, or
@@ -1321,8 +1261,8 @@ you choose rather than something you are given; it locks this tile, not the
 variables, so the tiles whose scales the constraints were set to fix keep them.
 
 \begin{aoenote}{Why not simply take the union?}
-Taking the smallest window containing both is the obvious answer, and it is what
-the program used to do. It is wrong twice over. A union is a superset of both
+Taking the smallest window containing both is the obvious answer. It is wrong
+twice over. A union is a superset of both
 ranges and therefore honours neither, which defeats the entire purpose of the
 feature: the point of constraining a variable is that two tiles showing it can be
 compared directly, and under a union they cannot. And when the two ranges differ
@@ -1360,6 +1300,89 @@ axis is re-fitted inside the new x window, computed by a single pass in the core
 that understands a non-monotonic x, because otherwise a windowed manoeuvre sits
 as a flat line at the bottom of the tile.
 \end{aoenote}
+
+\section{SYNC --- aligning the runs on an event}
+\label{sec:sync}
+
+
+A channel logged over several runs of the same manoeuvre carries that manoeuvre
+at a different place in each run, because each recording started at a different
+moment. Plotted against \code{TIME} the curves are the same shape smeared
+sideways, and comparing them means comparing the shapes rather than the clocks.
+
+This panel shifts each run along the x axis so that a chosen event lands in the
+same place for all of them. Nothing in the file changes and no sample is
+altered; only where the curves are drawn.
+
+\subsection*{The event}
+
+\begin{longtable}{@{}p{0.34\textwidth}p{0.6\textwidth}@{}}
+\toprule
+\textbf{Condition} & \textbf{What it finds} \\
+\midrule
+\endhead
+first rises above & the first sample past a level you give \\
+first falls below & the same, downwards \\
+first crosses & either direction, judged against where the channel started \\
+first starts to rise & no level needed: the first move of 2\% of the channel's
+own range away from its first sample \\
+first starts to fall & the same, downwards \\
+reaches its maximum & the largest sample of the run \\
+reaches its minimum & the smallest \\
+\bottomrule
+\end{longtable}
+
+The two \emph{starts to} conditions take a threshold in percent of the
+channel's own span rather than an absolute level, which is what lets the same
+setting mean the same thing on a speed in m/s and an angle in radians.
+
+\subsection*{Where it goes}
+
+\begin{longtable}{@{}p{0.34\textwidth}p{0.6\textwidth}@{}}
+\toprule
+\textbf{Move the event to} & \textbf{Result} \\
+\midrule
+\endhead
+zero & the axis reads as time since the event \\
+the first run's event & everything moves onto the first run drawn, which keeps
+the original axis values meaningful \\
+a value I choose & for lining two tiles up on one reference \\
+\bottomrule
+\end{longtable}
+
+A car accelerating from rest, logged five times: choose \code{SPEED},
+\emph{first rises above}, \code{0.5}, and \emph{zero}. Every run is then drawn
+with $x = 0$ at the moment it began to move.
+
+\subsection*{What it does with the awkward cases}
+
+\begin{aoenote}{Three decisions worth knowing}
+\textbf{The event is interpolated, not rounded to a sample.} Two runs logged at
+different rates would otherwise align only to the sampling interval, which is
+visible as a step between them. Where the crossing itself falls inside a gap
+--- \code{NaN}, which is what an unreadable token becomes --- the first
+readable sample past the level is reported instead, because there is nothing to
+interpolate across.
+
+\textbf{A run in which the event never happens is left where it is}, and
+counted. The panel reports ``7 run(s) aligned, 1 left unaligned because the
+event was not found in them'', and \emph{List the events} names each run with
+the value found in it. Hiding such a run would lose data; shifting it by a
+guess would be a lie.
+
+\textbf{Markers and bands are evaluated in each run's own axis.} They go on
+meaning ``this instant in this run'' and travel with the curve they mark,
+rather than being reinterpreted as an offset from the event.
+\end{aoenote}
+
+The alignment belongs to the tile, so one page can hold the aligned comparison
+beside the raw one. \emph{Apply to every tile on this page} copies it across.
+The title says so as well: \code{ALT = f(TIME)~~[0 = SPEED event]}.
+
+It is saved in the workspace. A workspace written before this existed carries
+none of these fields, which the loader reads as the default --- off --- so it
+opens exactly as it was saved. The schema version is unchanged, deliberately:
+bumping it would make the workspace unreadable by the version that wrote it.
 
 \section{3D --- three channels against each other}
 
@@ -1475,27 +1498,24 @@ deep-copies this tile's captions onto every visible tile of every page.
 
 Typing does not commit on every keystroke: a 400\,ms idle timer fires after you
 stop, or the caption commits when the field loses focus, or immediately on
-\emph{Update text now}. Committing per keystroke used to flicker the tile and
+\emph{Update text now}. Committing per keystroke would flicker the tile and
 steal the caret. Notes can also be dragged directly on the plot in Select mode,
 and the spin boxes follow; clicking outside every note passes the click through,
 so empty space still selects the tile.
 
 \chapter{Pages, grids and tiles}
 
-\begin{aoenew}{New in 2.2.0}
 \textbf{Duplicate} copies the whole page, tiles and all: the copy is named
-\code{<name> (2)}, inserted straight after the original and made active, since
-a duplicate is nearly always the start of a variation on the page it came from.
+\code{<name> (2)}, inserted straight after the original and made active, since a
+duplicate is nearly always the start of a variation on the page it came from.
 Duplicating a duplicate gives \code{(3)} rather than \code{(2) (2)}.
 
-The \textbf{remove} button now asks before removing a page, and says how many
-configured tiles
-are on it. It is one character wide and sits beside Add; a mis-click used to
-take a page of work with no way back.
+The \textbf{remove} button asks before removing a page, and says how many
+configured tiles are on it: it is one character wide and sits beside Add, where
+a mis-click would otherwise take a page of work with no way back.
 
 Double-clicking a tile makes it active, fits it \emph{and} brings PARAMS
 forward --- three things from the gesture that means ``this tile, now''.
-\end{aoenew}
 \label{ch:pages}
 
 \section{The page and tile bar}
@@ -1523,17 +1543,10 @@ lives in the process only and is not saved to a workspace.
 Last, behind its own rule, \emph{Fit} (\key{Ctrl+0}) auto-scales every tile,
 honouring axis locks; double-clicking one plot fits just that one.
 
-\begin{aoenew}{Changed in \appver}
-\emph{Fit} was in the main toolbar, among the workspace and export actions. It
-acts on the tiles, and you pick a tile by clicking it, so it belongs within a
-few pixels of them --- the same reason the rest of this bar is here. Behind its
-own rule because it moves no tile and copies nothing: it re-frames what is
-already there.
-
-The shortcut is unchanged and still works from anywhere in the window. An
-action that is on no widget has no shortcut at all, so it is registered on the
-window rather than on a bar.
-\end{aoenew}
+\emph{Fit} sits behind its own rule on this bar because it moves no tile and
+copies nothing: it re-frames what is already there. Its shortcut is registered
+on the window rather than on the bar, so it works from anywhere in the window
+--- an action that is on no widget has no shortcut at all.
 
 \section{How a page is modelled}
 
@@ -1590,14 +1603,13 @@ the same shape reuses the widgets and merely redraws them.
 \end{longtable}
 \end{center}
 
-All of it is saved in a workspace. \code{style\_mode} and
-\code{style\_iso\_param} are the two fields 2.1.0 added; a workspace written by
-2.0.0 carries neither and opens with \emph{Style by} set to \emph{None}, which is
-exactly the behaviour it was written under.
+All of it is saved in a workspace. A workspace that carries no
+\code{style\_mode} or \code{style\_iso\_param} opens with \emph{Style by} set
+to \emph{None}, under which the dash follows the colour key.
 
-\begin{aoenote}{Why \code{legend\_show\_style} is still there}
-It was offered in an early build as \emph{Line style marker} and never read by
-anything that draws: the legend shows a sample of the curve itself, dash pattern
+\begin{aoenote}{Why \code{legend\_show\_style} is still read}
+It is accepted from a workspace and never used by anything that draws: the
+legend shows a sample of the curve itself, dash pattern
 and marker included, so spelling those out in the text said nothing the row was
 not already showing. The field is retained so that a workspace written while it
 existed still loads.
@@ -1628,27 +1640,19 @@ is loaded one file at a time.
 not destroy a layout, and reusing one workspace against another study --- remove
 the old file, add the new one --- keeps every tile's axes.
 
-\begin{aoenew}{Fixed in \appver{} --- swapping studies lost the x axis}
 Closing a study leaves its computed parameters and aliases defined. That is
 deliberate: opening the next study should not throw away the formulas and the
-readable names set up for it. What it also did was convince this step that
-something was still loaded. \code{Session.parameters} is the union of file
-headers, computed channels and aliases, so with nothing open it came back
-\emph{non-empty} --- and the guard here tested whether that list was empty
-rather than whether a file was open.
+readable names set up for it. It does mean that two different questions have to
+be asked separately.
 
-So removing \code{sample1.aoe} re-pointed every tile's x axis at whichever
-alias or formula sorted first, and adding \code{sample2.aoe} found that name
-perfectly valid and left it alone. \code{TIME} was gone from every tile and
-nothing said why.
-
-The two questions have two answers now. \code{parameters} answers ``what names
-may the user write'', and still lists everything. \code{plottable\_parameters}
-answers ``what can carry an axis'', and is empty while no file is open --- a
-formula over columns that are not loaded evaluates to nothing, and an alias
-resolves to a channel no file carries. Everything that chooses a channel on the
-user's behalf reads the second.
-\end{aoenew}
+\code{Session.parameters} answers ``what names may the user write'', and lists
+the union of file headers, computed channels and aliases --- so it is
+\emph{non-empty} even with nothing open. \code{plottable\_parameters} answers
+``what can carry an axis'', and is empty while no file is open: a formula over
+columns that are not loaded evaluates to nothing, and an alias resolves to a
+channel no file carries. Everything that chooses a channel on the user's behalf
+reads the second, so that removing one study and adding another cannot re-point
+every tile's x axis at whichever alias or formula sorted first.
 
 A tile whose x channel is genuinely absent from the new study is still
 re-pointed, and the status bar still says so.
@@ -1716,11 +1720,8 @@ filter(s))}.
 
 \subsection{Names given to files and runs}
 
-\begin{aoenew}{New in \appver}
-A file or run renamed in \tab{data} (\S\ref{sec:data}) comes back under that name
-when the workspace is loaded. Before \appver{} the name lived only for the
-session.
-\end{aoenew}
+A file or run renamed in \tab{data} (\S\ref{sec:data}) comes back under that
+name when the workspace is loaded.
 
 The names ride in two optional keys, \code{file\_names} and \code{sim\_names}.
 Both are keyed by identity rather than by position --- a file by its path, a run
@@ -1736,11 +1737,11 @@ nothing. A file's name is always written, because the automatic one already
 depends on what else is open --- two files of the same basename make the second
 \emph{out.aoe (2)}.
 
-Neither key is written when nothing was renamed. A workspace from 2.1.0 or
-earlier carries neither and loads exactly as before, with each file and run under
-the name its own contents give it. Both are extra keys rather than a schema bump
-for that reason: nothing older needs to understand them to keep working, and
-nothing newer is confused by their absence.
+Neither key is written when nothing was renamed, and a workspace carrying
+neither loads with each file and run under the name its own contents give it.
+They are extra keys rather than a schema bump for that reason: nothing older
+needs to understand them to keep working, and nothing newer is confused by
+their absence.
 
 The names are applied on the worker thread, immediately after the files are
 opened and before anything reads a name, so the first paint already shows them.
@@ -1748,9 +1749,10 @@ opened and before anything reads a name, so the first paint already shows them.
 \subsection{Loading against data that has moved on}
 
 Loading reads the file, then does everything that touches the core on a worker
-thread: clears the session, opens each file, builds any missing sidecars, applies
-the saved display names, installs the aliases, and re-creates the computed
-parameters.
+thread: clears the session, opens each file, applies the saved display names,
+installs the aliases, and re-creates the computed parameters. Any missing
+sidecars are started afterwards, in another process, once the workspace is on
+screen.
 
 Aliases are installed before the formulas, since a formula may be written in
 terms of one. The formulas are then installed in as many passes as it takes,
@@ -1769,10 +1771,9 @@ parameters none of these files carry, and ISO filters that no run satisfies.
 JSON was chosen over an ad-hoc delimited format because such a format breaks the
 moment a file path or a parameter name contains the delimiter, and cannot be
 extended without a version bump nobody implements. The loader is tolerant by
-design: it sets only the attributes it recognises and ignores the rest, which is
-how workspaces written when markers and bands still had a caption field continue
-to load, and how a 2.0.0 workspace loads into the two-encoding model with
-\emph{Style by} at \emph{None}.
+design: it sets only the attributes it recognises and ignores the rest, which
+is how a workspace carrying a field this version has retired still loads, and
+how one that names no \emph{Style by} opens at \emph{None}.
 
 \begin{aoenote}{What a workspace still does not carry}
 The active tile index, the tile clipboard, the memory limit, the window geometry,
@@ -1790,13 +1791,75 @@ interpreter lock for the duration of every call, so a Python thread sitting
 inside a core function genuinely runs in parallel with the event loop --- while
 the core is using all of its own worker threads inside that one call.
 
-The governing constraint is that the core session is not internally
-synchronised, so only one thread may touch it at a time. Rather than take a lock,
-which would merely move the freeze from the paint loop to the click handler, the
-application disables the panels, the rail, the page bar and the grid while a task
-runs, and the tiles show a placeholder. Tasks queue rather than overlap, and for
-redraw work only the newest queued request is kept, since an older one is by then
-worthless. There is no cancellation: a running task cannot be interrupted.
+The governing constraint is not the obvious one. The core session \emph{is}
+internally synchronised: every C ABI entry point takes a reader-writer lock, so
+two threads calling it cannot corrupt it. What a lock cannot make safe is what
+the viewer does with the session, which is to hold pointers into its sample
+buffers and draw from them. Adding a file, reloading one or writing a sidecar
+moves those buffers, and a plot midway through reading one then reads freed
+memory --- a lock around each call does not help, because the pointer was handed
+out before the call that invalidated it.
+
+So the rule is that while a task runs the interface does not call the session at
+all: the panels, the rail, the page bar and the grid are disabled and the tiles
+show a placeholder. Tasks queue rather than overlap, and for redraw work only
+the newest queued request is kept, since an older one is by then worthless.
+There is no cancellation: a running task cannot be interrupted. While the
+interface is disabled the pointer shows a wait cursor and the progress bar
+counts whatever can be counted --- see section~\ref{sec:statusbar} --- because
+a frozen window that says nothing is indistinguishable from a crashed one.
+
+\subsection{Work that does not freeze anything: the sidecar builder}
+
+Writing a sidecar is the one long job that has been moved out of the
+application entirely. It does not fit the scheme above: it is a second full pass
+over the file, and the core holds its write lock for the whole of it, so as a
+worker task it blocked every read the window wanted and left the interface
+disabled from beginning to end. On a 2.9\,GB HDF5 file of 50 runs and 1000
+parameters, that was around five minutes between asking for the file and being
+able to use it.
+
+Since \appver{} the application starts a copy of itself instead:
+
+\begin{aoecode}
+aoeviewer --build-cache run_001.aoe run_002.hdf5
+\end{aoecode}
+
+detached, with no console window on Windows, once the file is already open and
+drawn. That process has a session of its own, so there is nothing for the window
+to queue behind and nothing to disable; the only trace of it is the status-bar
+note. It is polled every 1.5 seconds, purely so that the note can be taken down
+when it ends, and the timer stops when no build is running.
+
+The flag works on its own as well, which is the useful side effect: a directory
+of results can be warmed overnight so that nobody waits for a first open. Both
+kinds of file go through it --- an AOE file needs the parse, an HDF5 file needs
+every column fetched first, which is exactly why doing it in-process reinstated
+the wait that reading HDF5 lazily removes.
+
+\begin{aoenote}{What the builder is not allowed to do}
+It reads files it does not own, possibly on a share, possibly while a solver is
+writing them. So:
+
+\begin{itemize}
+  \item It never writes to the source. It opens it read-only, and the only file
+        it creates is the sidecar.
+  \item It never holds a lock that would stop anyone else writing to the
+        source. HDF5 takes one on open --- even read-only --- unless
+        \code{HDF5\_USE\_FILE\_LOCKING=FALSE} is set before the library
+        initialises, which the reader does at import; the memory mapping used
+        for AOE files is opened with \code{FILE\_SHARE\_WRITE}.
+  \item If the source changes while it works, it abandons the sidecar and
+        deletes it --- through the core, which drops the mapping first, since on
+        Windows a mapped file cannot be deleted. A sidecar mixing a file's
+        before and after is the one failure that would put numbers on screen
+        that were never in the file together.
+  \item It never deletes or modifies the source, under any circumstance,
+        including the one above.
+  \item It fails quietly. A sidecar is an optimisation nobody asked for, and
+        the file is already open and working without it.
+\end{itemize}
+\end{aoenote}
 
 Most redraws never reach a worker at all. Before dispatching, the application
 computes a signature of which channels each file must supply and which runs are
@@ -1982,93 +2045,6 @@ dialog's filter, which accepts \code{*.aoe}, \code{*.dat}, \code{*.txt},
 \code{*.res} and \code{*.out}. Those are the same format under different
 customary names; the two real dialects are the packed and indexed header forms,
 and they are distinguished by content rather than by filename.
-
-\section{SYNC --- aligning the runs on an event}
-\label{sec:sync}
-
-\begin{aoenew}{New in 2.2.0}
-A thirteenth panel. Earlier versions could compare runs only against the clock
-they were recorded on.
-\end{aoenew}
-
-A channel logged over several runs of the same manoeuvre carries that manoeuvre
-at a different place in each run, because each recording started at a different
-moment. Plotted against \code{TIME} the curves are the same shape smeared
-sideways, and comparing them means comparing the shapes rather than the clocks.
-
-This panel shifts each run along the x axis so that a chosen event lands in the
-same place for all of them. Nothing in the file changes and no sample is
-altered; only where the curves are drawn.
-
-\subsection*{The event}
-
-\begin{longtable}{@{}p{0.34\textwidth}p{0.6\textwidth}@{}}
-\toprule
-\textbf{Condition} & \textbf{What it finds} \\
-\midrule
-\endhead
-first rises above & the first sample past a level you give \\
-first falls below & the same, downwards \\
-first crosses & either direction, judged against where the channel started \\
-first starts to rise & no level needed: the first move of 2\% of the channel's
-own range away from its first sample \\
-first starts to fall & the same, downwards \\
-reaches its maximum & the largest sample of the run \\
-reaches its minimum & the smallest \\
-\bottomrule
-\end{longtable}
-
-The two \emph{starts to} conditions take a threshold in percent of the
-channel's own span rather than an absolute level, which is what lets the same
-setting mean the same thing on a speed in m/s and an angle in radians.
-
-\subsection*{Where it goes}
-
-\begin{longtable}{@{}p{0.34\textwidth}p{0.6\textwidth}@{}}
-\toprule
-\textbf{Move the event to} & \textbf{Result} \\
-\midrule
-\endhead
-zero & the axis reads as time since the event \\
-the first run's event & everything moves onto the first run drawn, which keeps
-the original axis values meaningful \\
-a value I choose & for lining two tiles up on one reference \\
-\bottomrule
-\end{longtable}
-
-A car accelerating from rest, logged five times: choose \code{SPEED},
-\emph{first rises above}, \code{0.5}, and \emph{zero}. Every run is then drawn
-with $x = 0$ at the moment it began to move.
-
-\subsection*{What it does with the awkward cases}
-
-\begin{aoenote}{Three decisions worth knowing}
-\textbf{The event is interpolated, not rounded to a sample.} Two runs logged at
-different rates would otherwise align only to the sampling interval, which is
-visible as a step between them. Where the crossing itself falls inside a gap
---- \code{NaN}, which is what an unreadable token becomes --- the first
-readable sample past the level is reported instead, because there is nothing to
-interpolate across.
-
-\textbf{A run in which the event never happens is left where it is}, and
-counted. The panel reports ``7 run(s) aligned, 1 left unaligned because the
-event was not found in them'', and \emph{List the events} names each run with
-the value found in it. Hiding such a run would lose data; shifting it by a
-guess would be a lie.
-
-\textbf{Markers and bands are evaluated in each run's own axis.} They go on
-meaning ``this instant in this run'' and travel with the curve they mark,
-rather than being reinterpreted as an offset from the event.
-\end{aoenote}
-
-The alignment belongs to the tile, so one page can hold the aligned comparison
-beside the raw one. \emph{Apply to every tile on this page} copies it across.
-The title says so as well: \code{ALT = f(TIME)~~[0 = SPEED event]}.
-
-It is saved in the workspace. A workspace written before this existed carries
-none of these fields, which the loader reads as the default --- off --- so it
-opens exactly as it was saved. The schema version is unchanged, deliberately:
-bumping it would make the workspace unreadable by the version that wrote it.
 
 \section{Files that are not AOE: HDF5}
 \label{sec:hdf5}
@@ -2753,10 +2729,10 @@ rather than bracketing a span, for exactly the phase-plane reason above.
 
 Most rebuilds do not change a single drawn point. Toggling the grid, restyling
 one colour, dragging a marker, editing the legend, coming back to a page --- all
-of them arrive at \code{rebuild()}, and all of them used to throw away every
-item and re-decimate every curve from full resolution for an answer identical to
-the one already on screen. Four caches now stand between a rebuild and the work
-it would otherwise do.
+of them arrive at \code{rebuild()}, and the naive answer is to throw away every
+item and re-decimate every curve from full resolution to arrive at a picture
+identical to the one already on screen. Four caches stand between a rebuild and
+that work.
 
 \subsection{The resample key}
 
@@ -2798,10 +2774,8 @@ parameter a sample belongs to.
 
 \subsection{The plot's own settings}
 
-\begin{aoenew}{New in \appver}
 Grid, log mode, axis captions and the title are written only when one of them
 differs from what was last written.
-\end{aoenew}
 
 They were re-applied on every rebuild, and most rebuilds change none of them.
 \code{setLogMode} is what made that expensive rather than merely redundant:
@@ -2819,10 +2793,8 @@ so showing one forgets the comparison --- without that, a tile that showed
 
 \subsection{The drawn annotations}
 
-\begin{aoenew}{New in \appver}
 Markers and shaded bands keep their items unless the annotations, the tile's x
 channel, whether they can be dragged, or the curves have changed.
-\end{aoenew}
 
 This is the same idea applied to the overlay pass, and it matters for the same
 reason the item adoption does. The dot form of a marker searches each curve for
@@ -2982,9 +2954,8 @@ Everything above the core is written without a C++ compiler, and the reason is
 this interface: sixty exported functions taking only C types and opaque handles.
 It is declared in \code{core/include/aoe/aoe\_c\_api.h}.
 
-Nothing in it changed across the 2.1 releases. \code{aoe\_version()} returns
-\code{"2.0.0"}, which is the core's version and not the application's
-(\appver); \code{-version} prints both.
+\code{aoe\_version()} returns \code{"2.0.0"}, which is the core's version and
+not the application's (\appver); \code{-version} prints both.
 
 \section{Handles, versioning and errors}
 
@@ -3382,9 +3353,6 @@ Shutdown wait & 30\,s for background work to finish \\
 \end{longtable}
 \end{center}
 
-The file-change poll that appeared in this table up to 2.1.0 is gone; see
-\S\ref{sec:reload}.
-
 \section{Getting the best out of it}
 
 Open each large file once and let the sidecar be written; the cost is paid on
@@ -3548,7 +3516,7 @@ two-space indentation. The schema is at version~3.
 \begin{aoecode}
 {
   "version": 3,
-  "app_version": "2.2.0",
+  "app_version": "2.2.1",
   "files":    ["/abs/path/run_a.aoe"],
   "computed": {"LOAD_FACTOR": "NZ * 9.80665"},
   "aliases":  {"Angle of attack": "ALPHA"},
@@ -3610,10 +3578,9 @@ object keys are strings: round-tripping \code{0.75} through an object hands back
 Non-finite keys are dropped, so the file stays portable JSON.
 
 The loader sets only the attributes it recognises and ignores the rest, which is
-how workspaces written when markers and bands still carried a caption field
-continue to load, how the withdrawn \code{legend\_show\_style} field is
-tolerated, and how a 2.0.0 workspace loads into the two-encoding model with
-\emph{Style by} at \emph{None}. The \code{"version"} key is written but nothing
+how a workspace carrying a field this version has retired still loads, how the
+unread \code{legend\_show\_style} field is tolerated, and how one that names no
+\emph{Style by} opens at \emph{None}. The \code{"version"} key is written but nothing
 branches on it.
 
 Not saved: the active tile index, the tile clipboard, the memory limit, the
@@ -3634,7 +3601,7 @@ window geometry, and the hidden tiles of a shrunken grid.
 \endhead
 Window size & startup & $1500 \times 920$ \\
 Theme & rail foot & dark \\
-Interface size & toolbar & 100\,\% (range 70--160\,\%, steps of 10) \\
+Interface size & toolbar & 90\,\% (range 70--160\,\%, steps of 10) \\
 Mouse mode & toolbar & Select \\
 Grid & page bar & $1 \times 1$ \\
 Legend, Grid & \tab{style} & on \\
@@ -3647,6 +3614,7 @@ Marker size & \tab{style} & 6.0 (range 1.0--20.0) \\
 Legend corner & \tab{style} & top-left \\
 Legend parts & \tab{style} & Parameter only \\
 Axis locks & \tab{scale} & off \\
+Align runs on an event & \tab{sync} & off \\
 ISO groups & \tab{iso} & 3 \\
 Azimuth, tilt & \tab{3d} & $45^\circ$, $25^\circ$ \\
 3D triad, 3D grid & \tab{3d} & on \\
@@ -3662,26 +3630,23 @@ Memory limit & command line & 2048\,MB (floor 64\,MB) \\
 \end{longtable}
 \end{center}
 
-\emph{Colour by} defaulted to \emph{Simulation} up to 2.1.0. Existing
-workspaces are unaffected --- every tile records its own mode.
-
 \chapter{Known limitations}
 
 The following are real shortcomings of this version, gathered here so they are
 easy to find.
 
-\textbf{An HDF5 file is read whole, and needs h5py.} The samples are handed to
-the core rather than parsed by it, so there is no lazy per-column loading and no
-\code{.aoec} sidecar for such a file; see section~\ref{sec:hdf5}. The layout is
-inferred from the tree, which is evidence rather than proof --- a file following
-none of the known conventions opens with its runs and channels arranged wrongly
-or does not open at all, and the log says which convention was chosen.
+\textbf{An HDF5 file's layout is inferred, and reading one needs h5py.} The
+tree is evidence rather than proof: a file following none of the known
+conventions opens with its runs and channels arranged wrongly, or does not open
+at all. The log names the convention chosen and what else was considered, which
+is where to look first; see section~\ref{sec:hdf5}.
 
-Entries that appeared here in earlier editions and have since been fixed are not
-repeated: ISO filters and aliases missing from the workspace, the undocumented
-\code{ln}, an ISO filter on an absent parameter hiding every run, display names
-lost on save, and a run's identity moving when its file was renamed and
-reloaded.
+\textbf{A pushed file cannot have a sidecar written until every column of it is
+resident.} The core writes one from what it holds and has no reader of its own
+to fill a gap, so the separate process that writes the sidecar for an HDF5 file
+fetches the whole file first. On a file larger than the machine's memory that
+fails, and no sidecar is written --- the file is still usable, column by
+column.
 
 \textbf{The workspace version is not interpreted.} A \code{"version"} of 3 is
 written and nothing reads it; there is no version-branching logic, so a future

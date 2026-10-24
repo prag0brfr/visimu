@@ -18,7 +18,7 @@ Typical scripted use::
             print(sim.sim_id, a.max())
 """
 
-__version__ = "2.2.0"
+__version__ = "2.2.1"
 
 # Imported lazily rather than at module import.
 #

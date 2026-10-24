@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aoeviewer"
-version = "2.2.0"
+version = "2.2.1"
 description = "Fast viewer for AOE simulation result files"
 readme = "README.md"
 requires-python = ">=3.8"

@@ -430,6 +430,23 @@ class TestDrawPathWiring(unittest.TestCase):
         # Saved with the workspace, like the theme is.
         self.assertIn("self.state.ui_scale", step)
 
+    def test_the_scale_is_pushed_into_the_theme_before_anything_measures(self):
+        """And before the toolbar, the panels or the first paint.
+
+        The state's scale and the theme module's agree at startup because both
+        take the same default, but agreeing by coincidence is how they come
+        apart later. Setting it explicitly in __init__ -- ahead of the three
+        build steps, every one of which measures something -- is what makes the
+        state the single source of the size actually on screen.
+        """
+        body = self._source("ui/main_window.py", "MainWindow", "__init__")
+        self.assertIn("set_ui_scale(self.state.ui_scale)", body)
+        position = body.index("set_ui_scale(self.state.ui_scale)")
+        for later in ("_build_toolbar()", "_build_central()", "apply_theme()"):
+            self.assertIn(later, body)
+            self.assertLess(position, body.index(later),
+                            "the scale is set after " + later)
+
     def test_fit_lives_with_the_tile_controls(self):
         """It acts on the tiles, and you pick a tile by clicking it.
 
@@ -514,14 +531,23 @@ class TestDrawPathWiring(unittest.TestCase):
     def test_reloading_a_file_happens_on_the_worker(self):
         """Re-reading a 578 MB file is a full parse.
 
-        It is also a call into a session that is not internally synchronised,
-        so it belongs in a submitted task like every other one -- and the
-        panel that owns the button must not make the call itself.
+        It also moves every sample buffer the plots are holding pointers into,
+        so it belongs in a submitted task like every other one -- and the panel
+        that owns the button must not make the call itself.
         """
         body = self._source("ui/main_window.py", "MainWindow", "reload_files")
         self.assertIn("self.tasks.submit", body)
-        before_work, _sep, _after = body.partition("def work():")
-        self.assertTrue(_sep, "reload_files() no longer submits a worker body")
+        # Either signature: a work function takes a progress reporter when it
+        # has steps worth counting. What this test is about is which thread the
+        # parse happens on, not how the bar is drawn.
+        before_work = body
+        for spelling in ("def work():", "def work(report):"):
+            head, separator, _rest = body.partition(spelling)
+            if separator:
+                before_work = head
+                break
+        else:
+            self.fail("reload_files() no longer submits a worker body")
         self.assertNotIn(".reload()", before_work,
                          "the core must not be re-read on the GUI thread")
 

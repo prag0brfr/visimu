@@ -232,6 +232,69 @@ class LegendItem:
         return _Any()
 
 
+class ViewBox(_Any):
+    """pyqtgraph's view box, with the two pieces our subclass needs.
+
+    The mode constants are read off the *class*, which _Any cannot answer: it
+    invents attributes on instances only.
+
+    mouseDragEvent has to be a real method rather than an invented attribute
+    for a different reason. The tile's view box hands every drag it does not
+    reinterpret back to pyqtgraph with super(), and super() looks through the
+    class dictionaries -- it does not go through __getattr__. An invented
+    attribute is therefore invisible to it, and a stub without this raised
+    exactly where the real one does the work. Recording the call also lets a
+    test assert that a pan, an axis drag or a right-drag was handed back
+    rather than quietly swallowed.
+    """
+
+    PanMode = 3
+    RectMode = 1
+
+    def mouseDragEvent(self, event, axis=None):
+        self.__dict__.setdefault("delegated_drags", []).append((event, axis))
+
+
+class _Axis:
+    """One of a plot's axes, recording what the tile does to it.
+
+    Falling through to _Any was enough while the tile only styled the axes.
+    It stopped being enough once the tile started *sizing* the bottom one: a
+    fresh _Any per getAxis() call cannot show that a height was set, nor what
+    it was, which is the whole of the behaviour that keeps the tick numbers
+    inside the tile.
+    """
+
+    def __init__(self, name, plot):
+        self.name = name
+        self._plot = plot
+        self.label_shown = None
+        self.heights = []
+        self.style_calls = []
+        # The defaults pyqtgraph itself carries, because the tile reads them
+        # to work out how much room the numbers need.
+        self.style = {"tickTextOffset": (5, 2), "tickLength": -5}
+
+    def showLabel(self, show=True):
+        self.label_shown = bool(show)
+        # Counted as a label write, like setLabel: "the caption was decided on
+        # this rebuild" is the thing the reuse tests are asking about, and
+        # hiding it is a way of deciding it.
+        self._plot.label_calls.append((self.name, None if not show else ""))
+
+    def setHeight(self, height=None):
+        self.heights.append(height)
+
+    def setStyle(self, **kwargs):
+        self.style_calls.append(kwargs)
+        self.style.update(kwargs)
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return _Any()
+
+
 class PlotItem:
     """Tracks which items are on the plot, which is what the reuse tests ask."""
 
@@ -247,6 +310,7 @@ class PlotItem:
         self.grid_calls = []
         self.log_calls = []
         self.label_calls = []
+        self._axes = {}
         # Range writes are recorded because fitting is behaviour now: a tile
         # that has just acquired its first curve is supposed to frame itself,
         # and every later rebuild is supposed to leave the frame alone. Without
@@ -300,6 +364,12 @@ class PlotItem:
 
     def setLabel(self, axis=None, text=None, **kwargs):
         self.label_calls.append((axis, text))
+
+    def getAxis(self, name):
+        """The same object every time, so what was done to it can be read."""
+        if name not in self._axes:
+            self._axes[name] = _Axis(name, self)
+        return self._axes[name]
 
     @property
     def axis_writes(self):
@@ -994,6 +1064,101 @@ class _AutoModule(types.ModuleType):
         return made
 
 
+class QPointF:
+    """A point that holds its coordinates.
+
+    An _Any placeholder was enough while points were only ever handed back to
+    Qt. The zoom decides which axes a drag means from the coordinates, so they
+    have to be real numbers for any of that to be reachable from a test.
+    """
+
+    def __init__(self, x=0.0, y=0.0):
+        self._x = float(x)
+        self._y = float(y)
+
+    def x(self):
+        return self._x
+
+    def y(self):
+        return self._y
+
+    def __eq__(self, other):
+        return (isinstance(other, QPointF)
+                and (self._x, self._y) == (other._x, other._y))
+
+    def __repr__(self):
+        return "QPointF({0}, {1})".format(self._x, self._y)
+
+
+class QRectF:
+    """A rectangle that holds its edges. Takes (x, y, w, h) or two corners."""
+
+    def __init__(self, *args):
+        if len(args) == 4:
+            x, y, w, h = (float(a) for a in args)
+        elif len(args) == 2 and all(isinstance(a, QPointF) for a in args):
+            first, second = args
+            x, y = min(first.x(), second.x()), min(first.y(), second.y())
+            w, h = abs(second.x() - first.x()), abs(second.y() - first.y())
+        else:
+            x = y = w = h = 0.0
+        self._x, self._y, self._w, self._h = x, y, w, h
+
+    def left(self):
+        return self._x
+
+    def top(self):
+        return self._y
+
+    def right(self):
+        return self._x + self._w
+
+    def bottom(self):
+        return self._y + self._h
+
+    def width(self):
+        return self._w
+
+    def height(self):
+        return self._h
+
+    def topLeft(self):
+        return QPointF(self._x, self._y)
+
+    def normalized(self):
+        return self
+
+    def __repr__(self):
+        return "QRectF({0}, {1}, {2}, {3})".format(
+            self._x, self._y, self._w, self._h)
+
+
+class QFontMetricsF:
+    """Font metrics with a fixed, plausible answer.
+
+    A real measurement needs a font engine and a display. What the tile does
+    with the number is the part worth testing, so the stub returns a constant
+    and the tests assert on the arithmetic applied to it.
+    """
+
+    LINE_HEIGHT = 14.0
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def height(self):
+        return self.LINE_HEIGHT
+
+    def horizontalAdvance(self, text=""):
+        return 7.0 * len(str(text))
+
+    def ascent(self):
+        return self.LINE_HEIGHT * 0.8
+
+    def descent(self):
+        return self.LINE_HEIGHT * 0.2
+
+
 def install() -> None:
     """Put the stub modules into sys.modules, whether or not Qt is installed.
 
@@ -1011,8 +1176,12 @@ def install() -> None:
     core = _AutoModule("PySide6.QtCore")
     core.Signal = Signal
     core.Qt = _make_qt()
-    for name in ("QPointF", "QRectF", "QObject", "QThread"):
+    for name in ("QObject", "QThread"):
         setattr(core, name, type(name, (_Any,), {}))
+    # These two carry numbers rather than inventing attributes: the zoom reads
+    # a drag's coordinates to decide which axes it means.
+    core.QPointF = QPointF
+    core.QRectF = QRectF
 
     # QTimer needs two real behaviours.
     #
@@ -1068,6 +1237,11 @@ def install() -> None:
     core.QTimer = QTimer
 
     gui = _AutoModule("PySide6.QtGui")
+    # Real enough to measure with: the tile asks the font how tall a row of
+    # tick numbers is, and an _Any answer would make that arithmetic
+    # unreachable from a test.
+    gui.QFontMetricsF = QFontMetricsF
+    gui.QFontMetrics = QFontMetricsF
     for name in ("QBrush", "QColor", "QPainter", "QPen", "QPolygonF"):
         setattr(gui, name, type(name, (_Any,), {}))
     gui.QFont = QFont
@@ -1119,7 +1293,7 @@ def install() -> None:
     # ViewBox's mode constants are read off the *class*, and _Any only answers
     # attribute lookups on instances -- so an auto-made stub raised where the
     # real one just has two integers.
-    pg.ViewBox = type("ViewBox", (_Any,), {"PanMode": 3, "RectMode": 1})
+    pg.ViewBox = ViewBox
     pg.GraphicsObject = type("GraphicsObject", (_Any,), {})
     pg.TextItem = type("TextItem", (_Any,), {})
     pg.InfiniteLine = type("InfiniteLine", (_Any,), {})

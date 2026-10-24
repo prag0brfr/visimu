@@ -23,3 +23,11 @@ __pycache__/
 *.aoec.*.tmp
 data/
 _archive_/
+
+# LaTeX build products. The guide's PDF is committed; the intermediate files
+# pdflatex needs for its second pass are not, and they change on every build.
+doc/*.aux
+doc/*.out
+doc/*.toc
+# Scoped to doc/ on purpose: *.out is also one of the extensions real result
+# files use, and the application filters on it.

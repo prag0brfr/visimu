@@ -20,9 +20,12 @@ edge cases than the drawing does.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -2593,6 +2596,19 @@ class TestTheAxesAreWrittenOnlyWhenTheyChange(unittest.TestCase):
         self.assertTrue(self.plot.grid_calls)
         self.assertTrue(self.plot.log_calls)
         self.assertEqual(len(self.plot.label_calls), 2)   # bottom and left
+
+    def test_neither_axis_keeps_a_caption(self):
+        """The title names every parameter and the x channel, so a caption
+        beside the axis repeated it and spent a strip of a tile that is often
+        one ninth of a page.
+
+        Hidden rather than set to an empty string: pyqtgraph shows the label
+        whatever text it is given, so an empty caption still reserved the whole
+        line it was meant to give back.
+        """
+        self.tile.rebuild()
+        for name in ("bottom", "left"):
+            self.assertIs(self.plot.getAxis(name).label_shown, False, name)
 
     def test_a_rebuild_that_changes_nothing_writes_nothing(self):
         self.tile.rebuild()
@@ -5243,3 +5259,691 @@ class TestConflictingVariableLimits(unittest.TestCase):
         self.state.apply_global_limits_everywhere()
         self.assertTrue(self.t2.lock_y)
         self.assertEqual((self.t2.y_min, self.t2.y_max), (0.0, 13000.0))
+
+
+# ---------------------------------------------------------------------------
+# Saying that the application is busy, and work that happens elsewhere
+# ---------------------------------------------------------------------------
+
+class _FakeProgressBar:
+    """Records what a progress bar was told, which is the whole question."""
+
+    def __init__(self):
+        self.range = None
+        self.value = None
+        self.text_visible = None
+        self.visible = False
+        self.format = ""
+
+    def setRange(self, low, high):
+        self.range = (low, high)
+
+    def setValue(self, value):
+        self.value = value
+
+    def setTextVisible(self, value):
+        self.text_visible = bool(value)
+
+    def setFormat(self, text):
+        self.format = text
+
+    def show(self):
+        self.visible = True
+
+    def hide(self):
+        self.visible = False
+
+
+class _BusyWindowStub:
+    """Enough of MainWindow for the busy-state methods to run."""
+
+    def __init__(self):
+        self.progress = _FakeProgressBar()
+        self._task_steps = 0
+        self.status = ""
+        self.enabled_calls = []
+        self.updated_status = 0
+
+    @property
+    def status_label(self):
+        holder = self
+
+        class _Label:
+            def setText(self, text):
+                holder.status = text
+        return _Label()
+
+    def _set_ui_enabled(self, enabled):
+        self.enabled_calls.append(bool(enabled))
+
+    def _update_status(self):
+        self.updated_status += 1
+
+    def call(self, name, *args):
+        return getattr(main_window.MainWindow, name)(self, *args)
+
+
+class TestTheBusyIndication(unittest.TestCase):
+    """Freezing the window is intended; looking crashed is not.
+
+    The user asked for the interface to be disabled while a task runs -- an
+    action taken then would be lost anyway -- on the condition that it is
+    obvious the application is working rather than dead. So what is tested here
+    is the saying-so, not the disabling.
+    """
+
+    def test_a_task_with_a_known_step_count_gets_a_real_bar(self):
+        window = _BusyWindowStub()
+        window.call("_on_task_started", "Opening 7 file(s)...", 7)
+        self.assertEqual(window.progress.range, (0, 7))
+        self.assertEqual(window.progress.value, 0)
+        self.assertTrue(window.progress.text_visible)
+        self.assertTrue(window.progress.visible)
+        self.assertEqual(window.status, "Opening 7 file(s)...")
+        self.assertEqual(window.enabled_calls, [False])
+
+    def test_a_task_that_cannot_count_says_so_honestly(self):
+        # (0, 0) is Qt's indeterminate range. The core reports nothing from
+        # inside a single parse, and an invented percentage would be a lie.
+        window = _BusyWindowStub()
+        window.call("_on_task_started", "Reading...", 0)
+        self.assertEqual(window.progress.range, (0, 0))
+        self.assertFalse(window.progress.text_visible)
+        self.assertTrue(window.progress.visible)
+
+    def test_progress_advances_the_bar(self):
+        window = _BusyWindowStub()
+        window.call("_on_task_started", "Opening 3 file(s)...", 3)
+        window.call("_on_task_progress", 2)
+        self.assertEqual(window.progress.value, 2)
+
+    def test_progress_cannot_run_past_the_end(self):
+        window = _BusyWindowStub()
+        window.call("_on_task_started", "Opening 3 file(s)...", 3)
+        window.call("_on_task_progress", 99)
+        self.assertEqual(window.progress.value, 3)
+
+    def test_progress_from_an_uncounted_task_is_ignored(self):
+        window = _BusyWindowStub()
+        window.call("_on_task_started", "Reading...", 0)
+        window.call("_on_task_progress", 4)
+        # Setting a value on an indeterminate bar would make it jump to a
+        # determinate one and show a fraction of nothing.
+        self.assertIsNone(window.progress.value)
+
+    def test_finishing_puts_everything_back(self):
+        window = _BusyWindowStub()
+        window.call("_on_task_started", "Opening 3 file(s)...", 3)
+        window.call("_on_task_finished")
+        self.assertFalse(window.progress.visible)
+        self.assertFalse(window.progress.text_visible)
+        self.assertEqual(window._task_steps, 0)
+        self.assertEqual(window.enabled_calls, [False, True])
+        self.assertEqual(window.updated_status, 1)
+
+    def test_the_count_does_not_leak_into_the_next_task(self):
+        window = _BusyWindowStub()
+        window.call("_on_task_started", "Opening 3 file(s)...", 3)
+        window.call("_on_task_finished")
+        window.call("_on_task_started", "Reading...", 0)
+        window.call("_on_task_progress", 2)
+        self.assertEqual(window.progress.range, (0, 0))
+
+    def test_the_wait_cursor_is_tied_to_the_disabled_state(self):
+        """Not to the task, and the difference matters.
+
+        A chain of queued tasks emits started() once per task and finished()
+        once at the end. Pushing an override cursor on every start would leave
+        the stack several deep and the hourglass on for good. The disabled flag
+        is the one thing guaranteed to alternate.
+        """
+        source = inspect.getsource(main_window.MainWindow._set_ui_enabled)
+        self.assertIn("setOverrideCursor", source)
+        self.assertIn("restoreOverrideCursor", source)
+        started = inspect.getsource(main_window.MainWindow._on_task_started)
+        self.assertNotIn("setOverrideCursor", started,
+                         "the cursor must not be pushed per task")
+
+
+class _SpawnWindowStub:
+    """Enough of MainWindow for the out-of-process build to be decided."""
+
+    CACHE_THRESHOLD_BYTES = main_window.MainWindow.CACHE_THRESHOLD_BYTES
+
+    def __init__(self, files, cache_enabled=True, active=()):
+        self._files = files
+        self._cache_enabled = cache_enabled
+        self._active = set(active)
+        self._cache_builds = set()
+        self._cache_processes = []
+        self.timer_started = 0
+        self.timer_stopped = 0
+        self.label = None
+        holder = self
+
+        class _Session:
+            cache_enabled = property(lambda _self: holder._cache_enabled)
+
+            def file(_self, index):
+                return holder._files.get(index)
+
+            def cache_active(_self, index):
+                return index in holder._active
+
+        class _Timer:
+            def start(_self):
+                holder.timer_started += 1
+
+            def stop(_self):
+                holder.timer_stopped += 1
+
+        self.session = _Session()
+        self._cache_timer = _Timer()
+
+    def _update_cache_label(self):
+        self.label = len(self._cache_builds)
+
+    def call(self, name, *args):
+        return getattr(main_window.MainWindow, name)(self, *args)
+
+
+class _FileStub:
+    def __init__(self, path):
+        self.path = path
+
+
+class _FakeProcess:
+    def __init__(self):
+        self.polled = 0
+        self.alive = True
+
+    def poll(self):
+        self.polled += 1
+        return None if self.alive else 0
+
+
+class TestStartingAnOutOfProcessBuild(unittest.TestCase):
+    """Which files are handed to a separate process, and which are not.
+
+    Writing a sidecar is a second full pass over the file, and until 2.2.1 it
+    happened on a worker thread inside the application -- which held the core's
+    write lock for minutes on a large file and left the window disabled for all
+    of it. The decision of what to send is worth testing on its own, because
+    sending the wrong thing is either wasted work or a file read twice.
+    """
+
+    def setUp(self):
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        self.started = []
+        self._real_spawn = main_window.cachebuild.spawn
+
+        def fake_spawn(paths):
+            self.started.append(list(paths))
+            return _FakeProcess()
+
+        main_window.cachebuild.spawn = fake_spawn
+        self.addCleanup(setattr, main_window.cachebuild, "spawn",
+                        self._real_spawn)
+
+    def write(self, name, megabytes):
+        path = os.path.join(self.directory, name)
+        with open(path, "wb") as handle:
+            handle.write(b"\0" * int(megabytes * 1024 * 1024))
+        return path
+
+    def test_a_large_file_is_sent(self):
+        path = self.write("big.aoe", 12)
+        window = _SpawnWindowStub({0: _FileStub(path)})
+        window.call("_spawn_cache_builds", [0])
+        self.assertEqual(self.started, [[path]])
+        self.assertEqual(window._cache_builds, {path})
+        self.assertEqual(window.timer_started, 1)
+
+    def test_a_small_file_is_not_worth_it(self):
+        # Parsing it is quick enough that a sidecar would save nothing
+        # measurable and would just leave an extra file beside the results.
+        path = self.write("small.aoe", 1)
+        window = _SpawnWindowStub({0: _FileStub(path)})
+        window.call("_spawn_cache_builds", [0])
+        self.assertEqual(self.started, [])
+
+    def test_a_file_already_served_from_a_sidecar_is_left_alone(self):
+        path = self.write("cached.aoe", 12)
+        window = _SpawnWindowStub({0: _FileStub(path)}, active={0})
+        window.call("_spawn_cache_builds", [0])
+        self.assertEqual(self.started, [])
+
+    def test_caching_switched_off_sends_nothing(self):
+        path = self.write("big.aoe", 12)
+        window = _SpawnWindowStub({0: _FileStub(path)}, cache_enabled=False)
+        window.call("_spawn_cache_builds", [0])
+        self.assertEqual(self.started, [])
+
+    def test_a_file_already_being_built_is_not_sent_twice(self):
+        path = self.write("big.aoe", 12)
+        window = _SpawnWindowStub({0: _FileStub(path)})
+        window.call("_spawn_cache_builds", [0])
+        window.call("_spawn_cache_builds", [0])
+        self.assertEqual(self.started, [[path]])
+
+    def test_several_files_go_to_one_process(self):
+        # Sequentially inside it: three large files at once is three times the
+        # memory and the same one disk.
+        first = self.write("a.aoe", 12)
+        second = self.write("b.aoe", 12)
+        window = _SpawnWindowStub({0: _FileStub(first), 1: _FileStub(second)})
+        window.call("_spawn_cache_builds", [0, 1])
+        self.assertEqual(self.started, [[first, second]])
+
+    def test_a_vanished_file_is_skipped(self):
+        window = _SpawnWindowStub({0: _FileStub(
+            os.path.join(self.directory, "gone.aoe"))})
+        window.call("_spawn_cache_builds", [0])
+        self.assertEqual(self.started, [])
+
+    def test_an_index_with_no_file_is_skipped(self):
+        window = _SpawnWindowStub({})
+        window.call("_spawn_cache_builds", [0, 5])
+        self.assertEqual(self.started, [])
+
+    def test_a_finished_build_stops_being_announced(self):
+        path = self.write("big.aoe", 12)
+        window = _SpawnWindowStub({0: _FileStub(path)})
+        window.call("_spawn_cache_builds", [0])
+        process, _paths = window._cache_processes[0]
+
+        window.call("_poll_cache_builds")
+        self.assertEqual(window._cache_builds, {path}, "still running")
+
+        process.alive = False
+        window.call("_poll_cache_builds")
+        self.assertEqual(window._cache_builds, set())
+        self.assertEqual(window._cache_processes, [])
+        # And the timer stops rather than ticking for the rest of the session.
+        self.assertEqual(window.timer_stopped, 1)
+
+    def test_a_refused_start_leaves_no_trace(self):
+        path = self.write("big.aoe", 12)
+        main_window.cachebuild.spawn = lambda paths: None
+        window = _SpawnWindowStub({0: _FileStub(path)})
+        window.call("_spawn_cache_builds", [0])
+        self.assertEqual(window._cache_builds, set())
+        self.assertEqual(window._cache_processes, [])
+        self.assertEqual(window.timer_started, 0)
+
+
+# ---------------------------------------------------------------------------
+# Room for the tick numbers, and a zoom that reads the drag
+# ---------------------------------------------------------------------------
+
+class TestRoomForTheTickNumbers(unittest.TestCase):
+    """The x values along the bottom of a tile must not be clipped.
+
+    pyqtgraph sizes the bottom axis from the text of the previous paint, so the
+    first layout after the tick font changes reserves the old font's height.
+    Where the new font is taller the numbers are drawn below the space reserved
+    for them and the tile cuts them off -- which is why it showed on Linux,
+    whose default font is taller than Windows' at the same point size, and not
+    on Windows.
+    """
+
+    def setUp(self):
+        self.session = _DrawSession()
+        self.tile = make_drawable_tile(self.session)
+        state = self.tile._state
+        state.selected_sims.update({(0, 0)})
+        state.tile.x_param, state.tile.y_params = "TIME", ["ALT"]
+        self.plot = self.tile.getPlotItem()
+
+    def test_the_bottom_axis_is_given_a_measured_height(self):
+        from PySide6.QtGui import QFontMetricsF
+        from aoeviewer.scales import tick_row_height
+
+        self.tile.apply_theme(self.tile._theme)
+        heights = self.plot.getAxis("bottom").heights
+        self.assertTrue(heights, "the bottom axis was never sized")
+
+        style = self.plot.getAxis("bottom").style
+        expected = tick_row_height(
+            QFontMetricsF.LINE_HEIGHT,
+            tick_length=style["tickLength"],
+            offset=style["tickTextOffset"][1],
+            scale=theme_module.ui_scale(),
+        )
+        self.assertEqual(heights[-1], expected)
+
+    def test_the_height_leaves_room_below_the_text(self):
+        # The point of the pad: a descender on the longest label otherwise
+        # sits exactly on the tile's edge.
+        from aoeviewer.scales import tick_row_height
+
+        self.assertGreater(tick_row_height(14.0, offset=0.0), 14.0)
+
+    def test_ticks_drawn_inside_the_plot_cost_no_height(self):
+        # pyqtgraph's default tick length is negative, meaning the ticks are
+        # drawn inside the view; a naive sum would subtract from the row.
+        from aoeviewer.scales import tick_row_height
+
+        self.assertEqual(tick_row_height(14.0, tick_length=-5.0),
+                         tick_row_height(14.0, tick_length=0.0))
+
+    def test_a_larger_interface_gets_a_taller_row(self):
+        from aoeviewer.scales import tick_row_height
+
+        small = tick_row_height(14.0, scale=0.7)
+        large = tick_row_height(22.0, scale=1.6)
+        self.assertGreater(large, small)
+
+    def test_the_left_axis_is_left_to_pyqtgraph(self):
+        # Its width is measured from the tick strings actually drawn, which
+        # pyqtgraph does get right; only the height was guessed.
+        self.tile.apply_theme(self.tile._theme)
+        self.assertEqual(self.plot.getAxis("left").heights, [])
+
+    def test_both_axes_still_get_the_tick_font(self):
+        self.tile.apply_theme(self.tile._theme)
+        for name in ("bottom", "left"):
+            calls = self.plot.getAxis(name).style_calls
+            self.assertTrue(any("tickFont" in call for call in calls), name)
+
+
+class TestTheDragDecidesWhichAxesZoom(unittest.TestCase):
+    """Three gestures from one drag.
+
+    A rectangle zoom is the right gesture for a region of the plot and the
+    wrong one most of the time: what is usually wanted is a stretch of x with
+    y left exactly as it was. Doing that with a rectangle means dragging the
+    full height of the tile by eye and getting it slightly wrong, which
+    rescales y for no reason and makes two tiles that should be comparable no
+    longer comparable.
+
+    So the shape of the drag chooses, and these are the boundaries of that
+    choice.
+    """
+
+    def setUp(self):
+        from aoeviewer.ui import zoombox
+
+        self.zoom = zoombox
+
+    def test_an_area_drag_zooms_the_area(self):
+        self.assertEqual(self.zoom.zoom_axes(200, 150), self.zoom.AREA)
+
+    def test_a_flat_drag_takes_the_x_axis_only(self):
+        self.assertEqual(self.zoom.zoom_axes(200, 4), self.zoom.HORIZONTAL)
+
+    def test_an_exactly_flat_drag_takes_x(self):
+        self.assertEqual(self.zoom.zoom_axes(200, 0), self.zoom.HORIZONTAL)
+
+    def test_an_upright_drag_takes_the_y_axis_only(self):
+        self.assertEqual(self.zoom.zoom_axes(3, 180), self.zoom.VERTICAL)
+
+    def test_direction_does_not_matter_only_shape(self):
+        # Dragging right-to-left or bottom-to-top is the same gesture.
+        self.assertEqual(self.zoom.zoom_axes(-200, -4), self.zoom.HORIZONTAL)
+        self.assertEqual(self.zoom.zoom_axes(-3, -180), self.zoom.VERTICAL)
+
+    def test_a_small_careless_rectangle_is_not_a_line(self):
+        """Under the thin ceiling in both directions, and a line in neither.
+
+        The ceiling alone would call this horizontal, which is why the ratio
+        is checked as well.
+        """
+        self.assertEqual(self.zoom.zoom_axes(20, 16), self.zoom.AREA)
+
+    def test_a_long_but_thick_drag_is_an_area(self):
+        # Six times longer than it is tall, but 60 pixels tall: whoever drew
+        # this meant a region, not a line.
+        self.assertEqual(self.zoom.zoom_axes(400, 60), self.zoom.AREA)
+
+    def test_a_twitch_while_clicking_does_nothing(self):
+        # Without this, two pixels of movement zoom the view by a factor of a
+        # hundred and the only way back is Fit.
+        self.assertEqual(self.zoom.zoom_axes(2, 1), self.zoom.NOTHING)
+        self.assertEqual(self.zoom.zoom_axes(0, 0), self.zoom.NOTHING)
+
+    def test_the_thresholds_follow_the_interface_scale(self):
+        """So they mean the same thing to the eye at 70 % as at 160 %.
+
+        A drag that is a line at one scale must still be a line at another;
+        what changes is how many pixels that is.
+        """
+        thin = self.zoom.THIN_PX
+        # Just over the ceiling at 1.0, comfortably under it at 1.6.
+        height = thin + 2
+        self.assertEqual(self.zoom.zoom_axes(400, height, 1.0), self.zoom.AREA)
+        self.assertEqual(self.zoom.zoom_axes(400, height, 1.6),
+                         self.zoom.HORIZONTAL)
+
+    def test_a_silly_scale_is_ignored_rather_than_dividing_by_it(self):
+        for scale in (0.0, -1.0, None):
+            self.assertEqual(self.zoom.zoom_axes(200, 4, scale),
+                             self.zoom.HORIZONTAL)
+
+
+class TestTheZoomRectangleIsWidened(unittest.TestCase):
+    """How "zoom x, leave y alone" is expressed.
+
+    By giving the rectangle the full height of the view rather than by
+    special-casing the ranges: mapped into data coordinates such a rectangle
+    gives back exactly the y range the axis already had, so the one code path
+    that was already correct does all three gestures.
+    """
+
+    def setUp(self):
+        from PySide6.QtCore import QPointF, QRectF
+        from aoeviewer.ui import zoombox
+
+        self.zoom = zoombox
+        self.point = QPointF
+        self.bounds = QRectF(0.0, 0.0, 500.0, 300.0)
+
+    def corners(self, mode):
+        first, last = self.zoom.stretched(
+            self.point(100.0, 120.0), self.point(300.0, 130.0),
+            self.bounds, mode)
+        return ((first.x(), first.y()), (last.x(), last.y()))
+
+    def test_an_area_zoom_uses_the_drag_as_drawn(self):
+        self.assertEqual(self.corners(self.zoom.AREA),
+                         ((100.0, 120.0), (300.0, 130.0)))
+
+    def test_an_x_zoom_keeps_the_drag_in_x_and_spans_y(self):
+        first, last = self.corners(self.zoom.HORIZONTAL)
+        self.assertEqual((first[0], last[0]), (100.0, 300.0))
+        self.assertEqual((first[1], last[1]), (0.0, 300.0))
+
+    def test_a_y_zoom_keeps_the_drag_in_y_and_spans_x(self):
+        first, last = self.corners(self.zoom.VERTICAL)
+        self.assertEqual((first[1], last[1]), (120.0, 130.0))
+        self.assertEqual((first[0], last[0]), (0.0, 500.0))
+
+
+class TestTheZoomHintNamesAllThree(unittest.TestCase):
+    def test_the_hint_describes_the_three_gestures(self):
+        """Nothing on screen suggests that the shape of the drag means
+        anything, so the status bar has to say it."""
+        hint = model.MOUSE_MODE_HINTS[model.MouseMode.ZOOM].lower()
+        self.assertIn("area", hint)
+        self.assertIn("x axis", hint)
+        self.assertIn("y axis", hint)
+
+
+class _DragEvent:
+    """A pyqtgraph mouse-drag event, as far as the view box reads one."""
+
+    def __init__(self, origin, current, finish=False, button=None):
+        from PySide6.QtCore import Qt
+
+        self._origin = origin
+        self._current = current
+        self._finish = finish
+        self._button = Qt.MouseButton.LeftButton if button is None else button
+        self.accepted = False
+
+    def button(self):
+        return self._button
+
+    def buttonDownPos(self, _button=None):
+        return self._origin
+
+    def pos(self):
+        return self._current
+
+    def isFinish(self):
+        return self._finish
+
+    def accept(self):
+        self.accepted = True
+
+
+class _Band:
+    def __init__(self):
+        self.hidden = 0
+
+    def hide(self):
+        self.hidden += 1
+
+
+class _ChildGroup:
+    """Hands the rectangle back unmapped, so a test can read it."""
+
+    @staticmethod
+    def mapRectFromParent(rect):
+        return rect
+
+
+def _directional_box(mode=None):
+    """A DirectionalViewBox wired up enough to drive a drag through it."""
+    import pyqtgraph as pg
+    from aoeviewer.ui.zoombox import DirectionalViewBox
+
+    box = DirectionalViewBox()
+    box.state = {"mouseMode": pg.ViewBox.RectMode if mode is None else mode}
+    box.rbScaleBox = _Band()
+    box.childGroup = _ChildGroup()
+    box.zoomed = []
+    box.banded = []
+    box.delegated = []
+    box.axHistory = []
+    box.axHistoryPointer = -1
+    box.boundingRect = lambda: qt_stubs.QRectF(0.0, 0.0, 500.0, 300.0)
+    box.showAxRect = lambda rect: box.zoomed.append(rect)
+    box.updateScaleBox = lambda a, b: box.banded.append((a, b))
+    return box
+
+
+class TestTheViewBoxActsOnTheDrag(unittest.TestCase):
+    """The glue: which drags are reinterpreted, and which are handed back.
+
+    Only the left-button rectangle drag across both axes is taken over. A drag
+    on an axis itself, a middle or right drag, and pan mode are all pyqtgraph's
+    -- none of them is the gesture this is about, and taking one of them over
+    by accident would break panning.
+    """
+
+    def point(self, x, y):
+        return qt_stubs.QPointF(x, y)
+
+    def drag(self, box, origin, current, finish=True, button=None):
+        event = _DragEvent(self.point(*origin), self.point(*current),
+                           finish=finish, button=button)
+        box.mouseDragEvent(event)
+        return event
+
+    def test_a_flat_drag_zooms_x_over_the_whole_height(self):
+        box = _directional_box()
+        self.drag(box, (100, 150), (300, 154))
+        self.assertEqual(len(box.zoomed), 1)
+        rect = box.zoomed[0]
+        self.assertEqual((rect.left(), rect.right()), (100.0, 300.0))
+        # The full height of the view, which maps back to the y range it
+        # already had -- so y is left exactly as it was.
+        self.assertEqual((rect.top(), rect.bottom()), (0.0, 300.0))
+
+    def test_an_upright_drag_zooms_y_over_the_whole_width(self):
+        box = _directional_box()
+        self.drag(box, (250, 40), (252, 260))
+        rect = box.zoomed[0]
+        self.assertEqual((rect.top(), rect.bottom()), (40.0, 260.0))
+        self.assertEqual((rect.left(), rect.right()), (0.0, 500.0))
+
+    def test_an_area_drag_zooms_just_the_area(self):
+        box = _directional_box()
+        self.drag(box, (100, 50), (300, 250))
+        rect = box.zoomed[0]
+        self.assertEqual((rect.left(), rect.right()), (100.0, 300.0))
+        self.assertEqual((rect.top(), rect.bottom()), (50.0, 250.0))
+
+    def test_a_twitch_leaves_the_view_alone(self):
+        box = _directional_box()
+        self.drag(box, (100, 100), (102, 101))
+        self.assertEqual(box.zoomed, [])
+        self.assertEqual(box.rbScaleBox.hidden, 1, "the band was left up")
+
+    def test_the_band_shows_the_decision_before_the_button_is_released(self):
+        box = _directional_box()
+        self.drag(box, (100, 150), (300, 154), finish=False)
+        self.assertEqual(box.zoomed, [], "it zoomed before the drag finished")
+        self.assertEqual(len(box.banded), 1)
+        first, last = box.banded[0]
+        # Spanning the full height already, so the gesture is confirmed while
+        # the mouse is still down rather than after.
+        self.assertEqual((first.y(), last.y()), (0.0, 300.0))
+
+    def test_the_band_is_taken_down_when_the_drag_finishes(self):
+        box = _directional_box()
+        self.drag(box, (100, 150), (300, 154))
+        self.assertEqual(box.rbScaleBox.hidden, 1)
+
+    def test_the_zoom_joins_pyqtgraphs_own_history(self):
+        box = _directional_box()
+        self.drag(box, (100, 150), (300, 154))
+        self.assertEqual(len(box.axHistory), 1)
+        self.assertEqual(box.axHistoryPointer, 0)
+
+    def test_pan_mode_is_left_to_pyqtgraph(self):
+        import pyqtgraph as pg
+
+        box = _directional_box(mode=pg.ViewBox.PanMode)
+        self.drag(box, (100, 150), (300, 154))
+        self.assertEqual(box.zoomed, [], "a pan was turned into a zoom")
+        self.assertEqual(len(box.delegated_drags), 1, "the pan was swallowed")
+
+    def test_a_drag_on_one_axis_is_left_to_pyqtgraph(self):
+        # Dragging an axis itself already means "this axis only", and
+        # pyqtgraph handles it.
+        box = _directional_box()
+        event = _DragEvent(self.point(100, 150), self.point(300, 154),
+                           finish=True)
+        box.mouseDragEvent(event, axis=0)
+        self.assertEqual(box.zoomed, [])
+        self.assertEqual(box.delegated_drags[0][1], 0,
+                         "the axis was not passed on with the drag")
+
+    def test_a_right_drag_is_left_to_pyqtgraph(self):
+        from PySide6.QtCore import Qt
+
+        box = _directional_box()
+        self.drag(box, (100, 150), (300, 154),
+                  button=Qt.MouseButton.RightButton)
+        self.assertEqual(box.zoomed, [])
+        self.assertEqual(len(box.delegated_drags), 1)
+
+    def test_the_event_is_accepted_so_nothing_else_handles_it(self):
+        box = _directional_box()
+        event = self.drag(box, (100, 150), (300, 154))
+        self.assertTrue(event.accepted)
+
+
+class TestTheTileUsesTheDirectionalViewBox(unittest.TestCase):
+    def test_it_is_given_at_construction(self):
+        """Not swapped in afterwards.
+
+        The PlotItem builds its own view box otherwise, and replacing it later
+        leaves the axes linked to the box that was replaced -- so the plot
+        would scroll while the numbers beside it stood still.
+        """
+        source = inspect.getsource(pt.PlotTile.__init__)
+        self.assertIn("viewBox=DirectionalViewBox()", source)
