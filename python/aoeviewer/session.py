@@ -219,6 +219,7 @@ class Session:
     # ------------------------------------------------------------ lifetime
 
     def close(self) -> None:
+        hdf5.release()
         if getattr(self, "_handle", None):
             lib.aoe_session_destroy(self._handle)
             self._handle = None
@@ -246,6 +247,25 @@ class Session:
         what they are called, has to call this."""
         self._sim_cache.clear()
         self._iso_cache.clear()
+        # And the open HDF5 handles, which belong to files that may just have
+        # been removed, reloaded or renumbered. Reopening costs one round trip
+        # against the risk of reading through a handle onto a file this
+        # session no longer believes in.
+        hdf5.release()
+
+    def release_sources(self) -> None:
+        """Close the HDF5 files held open for reuse.
+
+        Called when a background task finishes. Reads only happen inside a
+        task, so a task is the span over which keeping a handle open pays --
+        a page of six parameters opens the file once rather than six times --
+        and outside one there is nothing to gain by holding it.
+
+        It is not only tidiness. This program must never be the reason a
+        solver cannot write its own output, and the surest way to honour that
+        is to hold nothing open while nothing is being read.
+        """
+        hdf5.release()
 
     def _simulations(self, file_index: int) -> List[SimulationHandle]:
         cached = self._sim_cache.get(file_index)

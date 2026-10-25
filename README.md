@@ -2,27 +2,30 @@
 
 A fast viewer for AOE simulation result files.
 
-**Version 2.2.1.** What it does:
+**Version 2.2.2.** What it does:
 
 - **Opens a study, not a file.** Add any number of result files, tick the runs
   you want, and compare them across a grid of plot tiles arranged in pages.
   Thirteen side panels decide what is drawn and how; the whole arrangement
   saves as a workspace.
-- **Reads AOE text and HDF5.** Both dialects of the `.aoe` format, and HDF5
-  under any of the four tree conventions exporters use. Everything downstream —
+- **Reads AOE text and HDF5.** Both dialects of the `.aoe` format; HDF5 read as
+  declared where the file says what is in it, and otherwise inferred from any of
+  the four tree conventions exporters use. Everything downstream —
   decimation, ISO filters, computed parameters, styles, workspaces — is
   identical either way.
-- **Large files open at once.** An HDF5 file is not read when it is opened: its
-  columns are fetched as they are drawn. A faster `.aoec` copy of any file over
-  8 MB is written afterwards by a separate process, so the window stays usable
-  while it happens and every later open takes the cached path.
+- **Large files open at once,** including over a network share. An HDF5 file is
+  not read when it is opened: its layout is worked out from dataset names, and
+  written down so that opening it again costs a single read. Columns are fetched
+  as they are drawn. A faster `.aoec` copy of any file over 8 MB is written
+  afterwards by a separate process, so the window stays usable while it happens
+  and every later open takes the cached path.
 - **Compares runs on their own terms.** Filter runs by a value they hold
   constant, colour and dash them by independent keys, align them on an event
   rather than on the clock, and read any sample of any channel off the plot.
 - **Derived channels** from an expression over the ones in the file, evaluated
   in the core.
 
-The full manual is `doc/aoeViewer-2.2.1-User-and-Reference-Guide.pdf`, built
+The full manual is `doc/aoeViewer-2.2.2-User-and-Reference-Guide.pdf`, built
 from the LaTeX source beside it.
 
 The heavy work — parsing, computed parameters, plot decimation — happens in a
@@ -81,6 +84,8 @@ seconds, and megabytes apiece.
   - [Workspaces](#workspaces)
 - [Computed parameters](#computed-parameters)
 - [HDF5 files](#hdf5-files)
+  - [Files that declare their own structure](#files-that-declare-their-own-structure)
+  - [Files on a network share](#files-on-a-network-share)
 - [The AOE file format](#the-aoe-file-format)
 - [Scripting without the GUI](#scripting-without-the-gui)
 - [Performance](#performance)
@@ -952,12 +957,38 @@ This needs **h5py**, which is not part of the base install. Without it, opening
 such a file reports `reading HDF5 files needs the h5py package, which is not
 installed` and the rest of the program carries on as before.
 
+### Files that declare their own structure
+
+Some exporters say outright what is in the file, and those are read as stated
+rather than guessed at:
+
+```
+/DOMAIN/OSMA_1/PARAMETERS/ALFA              a channel, with @unit
+/DOMAIN/OSMA_1/PARAMETERS/ALFA/ALFA_1_2_0   its samples for one run
+/DOMAIN/OSMA_1/SIMULATIONS/SIMULATION_1_2_0 a run, with its sweep values
+```
+
+`PARAMETERS` lists the channels and `SIMULATIONS` lists the runs, so a dataset
+is simply the two put together and nothing has to be inferred. The units come
+from each channel's group, where they are declared once, rather than from every
+dataset. Reading this costs two listings per session, one attribute per channel,
+and a single dataset opened to learn the sample count — no dataset name is
+enumerated at all.
+
+A file holding **more than one session** — `OSMA_1` beside `OSMA_2` — is read
+correctly here and cannot be by inference: every session repeats the same run
+names, so a reading keyed on the dataset name alone sees `ALFA_1_2_0` twice,
+declares itself inconsistent and stands down in favour of a reading that is
+consistent and useless. The session is part of the run's identity, which is what
+it is, and the runs come out as `OSMA_1/1_2_0`, `OSMA_2/1_2_0` and so on.
+
 ### Which datasets are which
 
-HDF5 is a container, not a layout. Two exporters writing the same simulation
-produce trees with nothing in common but the file signature, and the thing they
-disagree about most is where the identity of a *run* is written. These are the
-conventions the reader knows:
+For a file that declares nothing, the layout has to be inferred. HDF5 is a
+container, not a layout. Two exporters writing the same simulation produce trees
+with nothing in common but the file signature, and the thing they disagree about
+most is where the identity of a *run* is written. These are the conventions the
+reader knows:
 
 ```
 /RUN_1/ALTITUDE               a group per run, a dataset per channel
@@ -1021,6 +1052,48 @@ path. Deleting a sidecar only costs speed.
 
 Reload works and goes back through the reader, keeping the file's index and with
 it every colour and style keyed on its runs.
+
+### Files on a network share
+
+Reading an HDF5 file over a share is not slow because of the bytes, it is slow
+because of the round trips, and working out the layout is where they used to
+be. Three things keep that count down.
+
+**An inferred layout is worked out from dataset paths, not from the datasets.**
+None of the conventions above look at a dataset's contents — every one of them keys on
+the path — so the names in the file are enough to decide which convention is in
+force. Enumerating names is one traversal; opening every dataset to ask its
+shape is one round trip apiece, and a file of 50 runs × 1000 channels holds
+fifty thousand of them. Shapes are read only for the channels of the first run,
+to settle the common length and collect the units, plus one dataset of each
+other run to confirm it agrees. **1,049 reads instead of 50,000.**
+
+**The layout is then written down,** gzipped, as a `.aoelay` file beside the
+source — or in the per-user cache directory when the source's own directory is
+read-only, which solver output usually is. Opening the file again reads that
+instead of the tree. It is checked three ways: the source must be the size and
+date it was, the document must be a format this version understands, and one
+dataset it names must still be there with the length it claims. That last check
+is a single read, and it is what makes the other two safe to trust. **One read
+instead of 50,000.**
+
+This matters most once a sidecar exists. At that point not one sample is read
+from the HDF5 file — and the tree was still being walked on every open, because
+the core had to be told what the file contains before it could look for a
+sidecar. That walk was the whole cost of opening an already-cached file.
+
+**The file is opened once per task, not once per read.** A handle is kept and
+reused, so drawing six parameters, or scanning fifty for an ISO filter, costs
+one open rather than six or fifty. The handles are released the moment the task
+finishes: reads only happen inside a task, so that is the whole span over which
+reuse pays, and the viewer never holds a file open while idle — it must never be
+the reason a solver cannot write its own output. A handle is also re-checked
+against the file's size and date before reuse, because a handle reads the file
+it was opened on, which is not necessarily the file at that path any more.
+
+If results live on a share but you would rather the derived files did not,
+`AOE_CACHE_DIR` moves both the sidecars and the layout files to a directory of
+your choosing.
 
 ---
 
@@ -1428,7 +1501,7 @@ asked for; the file has already opened and works.
 | | |
 |---|---|
 | `AOE_CACHE=0` | never read or write sidecars |
-| `AOE_CACHE_DIR=<path>` | use this instead of the per-user directory |
+| `AOE_CACHE_DIR=<path>` | use this instead of the per-user directory, for sidecars and for HDF5 layout files alike |
 
 From a script:
 

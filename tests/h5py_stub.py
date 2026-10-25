@@ -59,6 +59,7 @@ class Group(object):
     def __init__(self, attrs=None):
         self.attrs = dict(attrs or {})
         self._children = {}
+        self._tree_path = ""
 
     # Real h5py raises on an existing name; this returns what is already there,
     # which only makes a test easier to write and cannot hide a bug in the
@@ -67,7 +68,10 @@ class Group(object):
         node = self
         for part in str(path).strip("/").split("/"):
             if part not in node._children:
-                node._children[part] = Group()
+                child = Group()
+                child._tree_path = "%s/%s" % (
+                    getattr(node, "_tree_path", ""), part)
+                node._children[part] = child
             node = node._children[part]
         return node
 
@@ -82,6 +86,7 @@ class Group(object):
         return dataset
 
     def __getitem__(self, path):
+        COUNTS["getitem"] += 1
         node = self
         for part in str(path).strip("/").split("/"):
             node = node._children[part]
@@ -97,12 +102,80 @@ class Group(object):
     def items(self):
         return list(self._children.items())
 
+    # Real h5py groups are mappings and know their own absolute path. Both are
+    # read by the reader -- keys() to list a file's channels and runs without
+    # walking anything, and name to build a dataset's path from its channel
+    # and its run -- so the stand-in has to have them or it tests a route the
+    # application never takes.
+    def keys(self):
+        return list(self._children)
+
+    def __iter__(self):
+        return iter(self._children)
+
+    @property
+    def name(self):
+        return "/" + getattr(self, "_tree_path", "").strip("/")
+
+
+# What the reader did to the file, so a test can measure the cost of an open
+# rather than describe it. The whole point of working the layout out from
+# names is that it opens a handful of datasets instead of all of them, and
+# that is a number.
+COUNTS = {"file_open": 0, "getitem": 0, "visititems": 0, "links_visit": 0}
+
+
+def reset_counts():
+    for key in COUNTS:
+        COUNTS[key] = 0
+
+
+class _Links(object):
+    """h5py's h5l.LinkProxy, as far as the reader uses it.
+
+    visit() reports every path in the file, groups included, and never opens
+    the object a link points to -- which is the whole reason the reader
+    prefers it to visititems().
+    """
+
+    def __init__(self, owner):
+        self._owner = owner
+        self.opened = 0          # stays zero: visiting opens nothing
+
+    def visit(self, callback):
+        COUNTS["links_visit"] += 1
+
+        def walk(prefix, group):
+            for name, obj in sorted(group._children.items()):
+                path = prefix + name
+                if callback(path) is not None:
+                    return True
+                if isinstance(obj, Group) and walk(path + "/", obj):
+                    return True
+            return False
+
+        walk("", self._owner)
+
+
+class _FileId(object):
+    def __init__(self, owner):
+        self._owner = owner
+
+    @property
+    def valid(self):
+        return not getattr(self._owner, "_closed", False)
+
+    @property
+    def links(self):
+        return _Links(self._owner)
+
 
 class File(Group):
     def __init__(self, path, mode="r"):
         Group.__init__(self)
         self._path = str(path)
         if mode == "r":
+            COUNTS["file_open"] += 1
             existing = _FILES.get(self._path)
             if existing is None:
                 raise OSError("no such file: %s" % self._path)
@@ -121,9 +194,26 @@ class File(Group):
         return self
 
     def __exit__(self, *exc):
+        self.close()
         return False
 
+    def close(self):
+        self._closed = True
+
+    @property
+    def id(self):
+        """The low-level handle, with the two pieces the reader uses.
+
+        `valid` is how the handle cache tells a live handle from one that has
+        been closed, and `links.visit` is the cheap traversal: it walks the
+        link names without opening the objects they point to, which is what
+        makes working the layout out from paths cost nothing per dataset.
+        """
+        return _FileId(self)
+
     def visititems(self, callback):
+        COUNTS["visititems"] += 1
+
         def walk(prefix, group):
             for name, obj in sorted(group._children.items()):
                 path = prefix + name

@@ -5303,6 +5303,14 @@ class _BusyWindowStub:
         self.status = ""
         self.enabled_calls = []
         self.updated_status = 0
+        self.released = 0
+        holder = self
+
+        class _Session:
+            def release_sources(_self):
+                holder.released += 1
+
+        self.session = _Session()
 
     @property
     def status_label(self):
@@ -5370,6 +5378,16 @@ class TestTheBusyIndication(unittest.TestCase):
         # Setting a value on an indeterminate bar would make it jump to a
         # determinate one and show a fraction of nothing.
         self.assertIsNone(window.progress.value)
+
+    def test_finishing_lets_go_of_the_open_files(self):
+        """Reads only happen inside a task, so the handles kept open for one
+        are released the moment it ends -- the viewer holds nothing open
+        while idle, and cannot be the reason a solver's write is refused."""
+        window = _BusyWindowStub()
+        window.call("_on_task_started", "Opening 3 file(s)...", 3)
+        self.assertEqual(window.released, 0)
+        window.call("_on_task_finished")
+        self.assertEqual(window.released, 1)
 
     def test_finishing_puts_everything_back(self):
         window = _BusyWindowStub()

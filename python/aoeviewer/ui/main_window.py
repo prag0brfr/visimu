@@ -719,6 +719,9 @@ class MainWindow(QMainWindow):
             self.progress.setValue(min(int(done), self._task_steps))
 
     def _on_task_finished(self) -> None:
+        # Nothing is read outside a task, so this is where the HDF5 files held
+        # open for the task are let go -- see Session.release_sources.
+        self.session.release_sources()
         self.progress.hide()
         self.progress.setTextVisible(False)
         self._task_steps = 0

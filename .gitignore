@@ -21,6 +21,11 @@ __pycache__/
 # the .aoe in seconds, tied to one exact copy of it, and megabytes apiece.
 *.aoec
 *.aoec.*.tmp
+# The layout of an HDF5 file, written down so that opening it again costs no
+# tree walk. Derived data, rebuilt in seconds, and tied to one exact copy of
+# the file it describes.
+*.aoelay
+*.aoelay.tmp
 data/
 _archive_/
 

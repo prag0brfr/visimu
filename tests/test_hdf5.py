@@ -66,8 +66,32 @@ class Hdf5Mixin:
             sys.modules["h5py"] = cls._real_h5py
         cls._dir.cleanup()
 
+    def setUp(self):
+        # Every handle and every written-down layout belongs to a file some
+        # earlier test wrote. The stub writes the same 128 bytes for all of
+        # them, so a real file's size and date -- which is what the reader
+        # checks -- cannot tell two of them apart, and a test would be served
+        # the previous test's tree. Nothing here is testing that behaviour, so
+        # each test starts from nothing held.
+        from aoeviewer import hdf5 as hdf5_module
+
+        hdf5_module.release()
+        self.addCleanup(hdf5_module.release)
+        parent = getattr(super(), "setUp", None)
+        if parent is not None:
+            parent()
+
     def path(self, name):
         return os.path.join(self._dir.name, name)
+
+    def forget_layout(self, target):
+        """Drop any written-down layout for this path."""
+        from aoeviewer import hdf5 as hdf5_module
+
+        hdf5_module.release(target)
+        cache = hdf5_module._layout_cache_path(target)
+        if cache and os.path.exists(cache):
+            os.remove(cache)
 
     def write_channel_groups(self, name, runs=("1_2_0", "2_2_0"), aux=True):
         """A group per channel, a dataset per run, the run in the leaf name.
@@ -579,3 +603,441 @@ class MissingDependencyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CostOfAnOpenTests(Hdf5Mixin, unittest.TestCase):
+    """How much of the file an open has to touch.
+
+    Not a timing test -- a counting one. The reason a 3 GB file took minutes
+    to appear over a network share was never bytes, it was round trips: the
+    reader opened every dataset in the file to ask its shape, and a file of 50
+    runs by 1000 channels holds fifty thousand of them. Counting the opens is
+    the honest way to test that, because it is the quantity that scales with
+    the latency of the share.
+    """
+
+    def big_tree(self, name="cost.hdf5", runs=10, channels=50):
+        target = self.path(name)
+        with h5py_stub.File(target, "w") as handle:
+            group = handle.create_group("ROOT/CASE")
+            for index in range(channels):
+                holder = group.create_group("CH%03d" % index)
+                for run in range(runs):
+                    holder.create_dataset(
+                        "CH%03d_1_%d_0" % (index, run),
+                        data=np.arange(20, dtype=np.float64) + run)
+        self.forget_layout(target)
+        return target, runs, channels
+
+    def test_it_opens_one_dataset_per_channel_plus_one_per_run(self):
+        target, runs, channels = self.big_tree()
+        h5py_stub.reset_counts()
+        described = hdf5.inspect(target, use_cache=False)
+
+        self.assertEqual(len(described.layout.run_keys), runs)
+        self.assertEqual(len(described.channels), channels)
+
+        opened = h5py_stub.COUNTS["getitem"]
+        # One per channel of the first run, to settle the length and collect
+        # the units, and one per remaining run to confirm it agrees -- plus a
+        # couple of groups opened on the way past while looking for a file
+        # that declares its own structure, which this one does not.
+        self.assertLessEqual(opened, channels + runs + 4,
+                             "opened %d datasets; the whole file is %d"
+                             % (opened, runs * channels))
+        self.assertLess(opened, runs * channels / 4.0)
+
+    def test_it_does_not_walk_the_objects_at_all(self):
+        target, _runs, _channels = self.big_tree("noobjects.hdf5")
+        h5py_stub.reset_counts()
+        hdf5.inspect(target, use_cache=False)
+        self.assertEqual(h5py_stub.COUNTS["visititems"], 0,
+                         "fell back to opening every dataset")
+        self.assertEqual(h5py_stub.COUNTS["links_visit"], 1)
+
+    def test_the_object_walk_still_reaches_the_same_answer(self):
+        # It is the fallback, so it has to agree with the cheap path.
+        target, runs, channels = self.big_tree("agree.hdf5")
+        handle = hdf5._open(target)
+        cheap = hdf5._inspect_by_name(handle, target)
+        thorough = hdf5._inspect_by_object(handle, target)
+        self.assertEqual(cheap.layout.rule, thorough.layout.rule)
+        self.assertEqual(cheap.layout.run_keys, thorough.layout.run_keys)
+        self.assertEqual(cheap.channels, thorough.channels)
+        self.assertEqual(cheap.layout.samples, thorough.layout.samples)
+        self.assertEqual(cheap.units, thorough.units)
+
+    def test_it_falls_back_when_the_cheap_traversal_is_missing(self):
+        """An older h5py has no low-level link visit. The file still opens."""
+        target, runs, channels = self.big_tree("fallback.hdf5")
+        real = hdf5._link_names
+        hdf5._link_names = lambda handle: None
+        try:
+            h5py_stub.reset_counts()
+            described = hdf5.inspect(target, use_cache=False)
+        finally:
+            hdf5._link_names = real
+        self.assertEqual(h5py_stub.COUNTS["visititems"], 1)
+        self.assertEqual(len(described.channels), channels)
+        self.assertEqual(len(described.layout.run_keys), runs)
+
+    def test_a_file_the_cheap_path_cannot_read_falls_back(self):
+        # Runs of differing lengths: the name phase declines, and the object
+        # walk's grouping by length makes the call instead.
+        target = self.path("ragged.hdf5")
+        with h5py_stub.File(target, "w") as handle:
+            group = handle.create_group("ROOT")
+            for channel in ("TIME", "ALFA"):
+                holder = group.create_group(channel)
+                for run, length in enumerate((20, 31)):
+                    holder.create_dataset(
+                        "%s_1_%d_0" % (channel, run),
+                        data=np.arange(length, dtype=np.float64))
+        self.forget_layout(target)
+        described = hdf5.inspect(target, use_cache=False)
+        # One length family wins; the reader does not invent a ragged layout.
+        self.assertEqual(len(set(
+            len(v) for v in described.layout.runs.values())), 1)
+
+
+class LayoutCacheTests(Hdf5Mixin, unittest.TestCase):
+    """The layout written down beside the file.
+
+    Once a sidecar exists not one sample is read from the HDF5 file -- and yet
+    the tree was still walked on every open, because the core had to be told
+    what the file contains before it could look for a sidecar. That walk was
+    the whole cost of opening an already-cached file, and all of it was waste.
+    """
+
+    def tree(self, name="cached.hdf5"):
+        target = self.write_channel_groups(name)
+        self.forget_layout(target)
+        return target
+
+    def test_the_first_open_writes_it_and_the_second_reads_it(self):
+        target = self.tree()
+        first = hdf5.inspect(target)
+        self.assertTrue(os.path.exists(hdf5._layout_cache_path(target)))
+
+        hdf5.release()
+        h5py_stub.reset_counts()
+        second = hdf5.inspect(target)
+
+        self.assertEqual(h5py_stub.COUNTS["links_visit"], 0)
+        self.assertEqual(h5py_stub.COUNTS["visititems"], 0)
+        self.assertEqual(second.layout.rule, first.layout.rule)
+        self.assertEqual(second.layout.run_keys, first.layout.run_keys)
+        self.assertEqual(second.channels, first.channels)
+        self.assertEqual(second.units, first.units)
+        self.assertEqual(second.layout.samples, first.layout.samples)
+        self.assertEqual(second.layout.runs, first.layout.runs)
+
+    def test_the_cached_open_still_checks_one_dataset(self):
+        """Size and date say the file has not changed; they do not prove the
+        tree is the same. One read does, against fifty thousand for a walk."""
+        target = self.tree("checked.hdf5")
+        hdf5.inspect(target)
+        hdf5.release()
+        h5py_stub.reset_counts()
+        hdf5.inspect(target)
+        self.assertEqual(h5py_stub.COUNTS["getitem"], 1)
+
+    def test_a_changed_file_is_not_served_from_the_cache(self):
+        target = self.tree("changed.hdf5")
+        hdf5.inspect(target)
+        with open(target, "ab") as handle:        # a different size
+            handle.write(b"\0" * 32)
+        hdf5.release()
+        h5py_stub.reset_counts()
+        hdf5.inspect(target)
+        self.assertEqual(h5py_stub.COUNTS["links_visit"], 1,
+                         "the stale layout was used")
+
+    def test_a_tree_that_no_longer_fits_is_rejected(self):
+        target = self.tree("moved.hdf5")
+        described = hdf5.inspect(target)
+
+        # Same size and date, different tree: only the per-dataset check can
+        # catch this, and it must.
+        cache = hdf5._layout_cache_path(target)
+        import gzip
+        import json
+
+        with gzip.open(cache, "rt", encoding="utf-8") as handle:
+            document = json.load(handle)
+        document["runs"] = {
+            run: {channel: path + "_GONE" for channel, path in entry.items()}
+            for run, entry in document["runs"].items()}
+        with gzip.open(cache, "wt", encoding="utf-8") as handle:
+            json.dump(document, handle)
+
+        hdf5.release()
+        again = hdf5.inspect(target)
+        self.assertEqual(again.layout.runs, described.layout.runs)
+
+    def test_a_corrupt_cache_is_ignored_rather_than_fatal(self):
+        target = self.tree("corrupt.hdf5")
+        hdf5.inspect(target)
+        with open(hdf5._layout_cache_path(target), "wb") as handle:
+            handle.write(b"not gzip, not json, not anything")
+        hdf5.release()
+        described = hdf5.inspect(target)
+        self.assertEqual(len(described.layout.run_keys), 2)
+
+    def test_a_cache_from_a_future_version_is_ignored(self):
+        target = self.tree("future.hdf5")
+        hdf5.inspect(target)
+        cache = hdf5._layout_cache_path(target)
+        import gzip
+        import json
+
+        with gzip.open(cache, "rt", encoding="utf-8") as handle:
+            document = json.load(handle)
+        document["format"] = hdf5.LAYOUT_FORMAT + 1
+        with gzip.open(cache, "wt", encoding="utf-8") as handle:
+            json.dump(document, handle)
+        hdf5.release()
+        h5py_stub.reset_counts()
+        hdf5.inspect(target)
+        self.assertEqual(h5py_stub.COUNTS["links_visit"], 1)
+
+    def test_use_cache_false_always_works_it_out(self):
+        target = self.tree("nocache.hdf5")
+        hdf5.inspect(target)
+        hdf5.release()
+        h5py_stub.reset_counts()
+        hdf5.inspect(target, use_cache=False)
+        self.assertEqual(h5py_stub.COUNTS["links_visit"], 1)
+
+    def test_it_goes_beside_the_file_when_that_is_writable(self):
+        target = self.tree("beside.hdf5")
+        self.assertEqual(hdf5._layout_cache_path(target),
+                         target + hdf5.LAYOUT_SUFFIX)
+
+    def test_the_session_opens_a_cached_file_without_walking_it(self):
+        from aoeviewer import Session
+
+        target = self.tree("session.hdf5")
+        warm = Session()
+        warm.add_file(target)
+        warm.close()
+
+        hdf5.release()
+        h5py_stub.reset_counts()
+        session = Session()
+        self.addCleanup(session.close)
+        handle = session.add_file(target)
+        self.assertEqual(h5py_stub.COUNTS["links_visit"], 0)
+        self.assertEqual(h5py_stub.COUNTS["visititems"], 0)
+        self.assertEqual(handle.simulation_count, 2)
+        self.assertEqual(session.parameters, CHANNELS)
+
+
+class OpenHandleTests(Hdf5Mixin, unittest.TestCase):
+    """One open per task, not one per read."""
+
+    def test_several_reads_share_one_open(self):
+        target = self.write_channel_groups("shared.hdf5")
+        self.forget_layout(target)
+        layout = hdf5.inspect(target, use_cache=False).layout
+
+        h5py_stub.reset_counts()
+        for index in range(len(layout.channels)):
+            hdf5.read_first_values(target, layout, index)
+        self.assertEqual(h5py_stub.COUNTS["file_open"], 0,
+                         "an ISO scan reopened the file per channel")
+
+    def test_releasing_closes_it(self):
+        target = self.write_channel_groups("released.hdf5")
+        self.forget_layout(target)
+        hdf5.inspect(target, use_cache=False)
+        hdf5.release()
+        h5py_stub.reset_counts()
+        hdf5.inspect(target, use_cache=False)
+        self.assertEqual(h5py_stub.COUNTS["file_open"], 1)
+
+    def test_a_rewritten_file_is_reopened(self):
+        """A handle reads the file it was opened on. If a solver replaces the
+        file, reading through the old handle would return yesterday's numbers,
+        so the source is stat-ed on the way past."""
+        target = self.write_channel_groups("rewritten.hdf5")
+        self.forget_layout(target)
+        hdf5._open(target)
+        with open(target, "ab") as handle:
+            handle.write(b"\0" * 16)
+        h5py_stub.reset_counts()
+        hdf5._open(target)
+        self.assertEqual(h5py_stub.COUNTS["file_open"], 1)
+
+    def test_releasing_one_path_leaves_the_others(self):
+        first = self.write_channel_groups("one.hdf5")
+        second = self.write_channel_groups("two.hdf5")
+        hdf5._open(first)
+        hdf5._open(second)
+        hdf5.release(first)
+        h5py_stub.reset_counts()
+        hdf5._open(second)
+        self.assertEqual(h5py_stub.COUNTS["file_open"], 0)
+        hdf5._open(first)
+        self.assertEqual(h5py_stub.COUNTS["file_open"], 1)
+
+    def test_releasing_nothing_open_is_harmless(self):
+        hdf5.release()
+        hdf5.release("/not/a/file.hdf5")
+
+
+# The channels of the real files, with the units their PARAMETERS groups
+# declare. Ordered as the exporter writes them.
+DECLARED_CHANNELS = (("TIME", "s"), ("ALFA", "deg"), ("CG", "h%"),
+                     ("MACH", "wu"), ("MASSE", "Kg"), ("Q1", "deg.s-1"),
+                     ("TETA", "deg"), ("VC", "kt"), ("ZP", "ft"))
+
+
+class DeclaredSchemaTests(Hdf5Mixin, unittest.TestCase):
+    """Files that state their own structure are read as stated.
+
+    The real files carry two sibling groups per session: PARAMETERS, one group
+    per channel holding one dataset per run, and SIMULATIONS, one group per
+    run. Between them they say exactly which axis is which, so there is
+    nothing to infer -- and inferring it was not merely wasteful but wrong on
+    a file holding more than one session.
+    """
+
+    def write_declared(self, name, sessions=("OSMA_1",),
+                       runs=("1_2_0", "2_2_0"), samples=76):
+        target = self.path(name)
+        with h5py_stub.File(target, "w") as handle:
+            domain = handle.create_group("DOMAIN")
+            for session_name in sessions:
+                session = domain.create_group(session_name)
+                session.attrs["name"] = session_name
+                parameters = session.create_group("PARAMETERS")
+                for channel, unit in DECLARED_CHANNELS:
+                    holder = parameters.create_group(channel)
+                    holder.attrs["name"] = channel
+                    holder.attrs["unit"] = unit
+                    holder.attrs["type"] = "REAL"
+                    for index, run in enumerate(runs):
+                        values = np.arange(samples, dtype=np.float64) + index
+                        dataset = holder.create_dataset(
+                            "%s_%s" % (channel, run), data=values)
+                        dataset.attrs["unit"] = unit
+                        dataset.attrs["name"] = "%s_%s" % (channel, run)
+                simulations = session.create_group("SIMULATIONS")
+                for run in runs:
+                    group = simulations.create_group("SIMULATION_%s" % run)
+                    group.attrs["name"] = "SIMULATION_%s" % run
+                    group.attrs["sweepParameters"] = ["sw_MASSE", "sw_CG"]
+                    group.attrs["sweepValues"] = ["210.0", "17.0"]
+        self.forget_layout(target)
+        return target
+
+    def test_the_runs_are_the_simulations_not_the_tree(self):
+        target = self.write_declared("declared.hdf5")
+        described = hdf5.inspect(target, use_cache=False)
+        self.assertEqual(described.layout.rule, "declared")
+        self.assertEqual(described.layout.run_keys, ["1_2_0", "2_2_0"])
+        self.assertNotIn("DOMAIN", described.layout.run_keys)
+
+    def test_the_channels_are_the_parameters(self):
+        target = self.write_declared("channels.hdf5")
+        described = hdf5.inspect(target, use_cache=False)
+        self.assertEqual(sorted(described.channels),
+                         sorted(name for name, _unit in DECLARED_CHANNELS))
+
+    def test_the_units_come_from_the_channel_group(self):
+        target = self.write_declared("units.hdf5")
+        described = hdf5.inspect(target, use_cache=False)
+        units = dict(zip(described.channels, described.units))
+        for channel, unit in DECLARED_CHANNELS:
+            self.assertEqual(units[channel], unit, channel)
+
+    def test_several_sessions_are_separate_runs(self):
+        """The case that broke inference outright.
+
+        Every session repeats the same run names, so a reading keyed on the
+        dataset name alone sees ALFA_1_2_0 twice, calls itself inconsistent,
+        and stands down -- leaving a reading that is consistent and useless.
+        """
+        target = self.write_declared("sessions.hdf5",
+                                     sessions=("OSMA_1", "OSMA_2"))
+        described = hdf5.inspect(target, use_cache=False)
+        self.assertEqual(described.layout.rule, "declared")
+        self.assertEqual(described.layout.run_keys,
+                         ["OSMA_1/1_2_0", "OSMA_1/2_2_0",
+                          "OSMA_2/1_2_0", "OSMA_2/2_2_0"])
+        self.assertEqual(sorted(described.channels),
+                         sorted(name for name, _unit in DECLARED_CHANNELS))
+
+    def test_a_session_keeps_its_own_datasets(self):
+        target = self.write_declared("ownruns.hdf5",
+                                     sessions=("OSMA_1", "OSMA_2"))
+        described = hdf5.inspect(target, use_cache=False)
+        for run_key, entry in described.layout.runs.items():
+            session = run_key.split("/")[0]
+            for dataset_path in entry.values():
+                self.assertIn("/%s/" % session, dataset_path,
+                              "%s points outside its session" % run_key)
+
+    def test_it_opens_almost_nothing(self):
+        target = self.write_declared("cheap.hdf5")
+        h5py_stub.reset_counts()
+        hdf5.inspect(target, use_cache=False)
+        # One dataset, to learn the sample count. The channels and the runs
+        # are listings, and the units are group attributes.
+        self.assertLessEqual(h5py_stub.COUNTS["getitem"],
+                             len(DECLARED_CHANNELS) + 8)
+        self.assertEqual(h5py_stub.COUNTS["visititems"], 0)
+        self.assertEqual(h5py_stub.COUNTS["links_visit"], 0,
+                         "it enumerated dataset names it did not need")
+
+    def test_the_samples_are_the_right_ones(self):
+        from aoeviewer import Session
+
+        target = self.write_declared("values.hdf5")
+        session = Session()
+        self.addCleanup(session.close)
+        handle = session.add_file(target)
+        self.assertEqual(handle.simulation_count, 2)
+        for index in range(2):
+            column = session.channel(handle.index, index, "ZP")
+            self.assertTrue(np.array_equal(
+                column, (np.arange(76) + index).astype(np.float32)), index)
+
+    def test_the_run_names_reach_the_application(self):
+        from aoeviewer import Session
+
+        target = self.write_declared("names.hdf5")
+        session = Session()
+        self.addCleanup(session.close)
+        handle = session.add_file(target)
+        self.assertEqual([sim.name for sim in handle.simulations],
+                         ["1_2_0", "2_2_0"])
+
+    def test_a_file_without_the_schema_is_still_inferred(self):
+        target = self.write_channel_groups("plain.hdf5")
+        self.forget_layout(target)
+        described = hdf5.inspect(target, use_cache=False)
+        self.assertEqual(described.layout.rule, "leaf_tail_3")
+
+    def test_a_schema_whose_names_do_not_line_up_falls_back(self):
+        # PARAMETERS and SIMULATIONS are there, but the datasets are not named
+        # <channel>_<run>, so the schema cannot be taken at its word.
+        target = self.path("mismatch.hdf5")
+        with h5py_stub.File(target, "w") as handle:
+            session = handle.create_group("DOMAIN/OSMA_1")
+            parameters = session.create_group("PARAMETERS")
+            for channel in ("TIME", "ALFA"):
+                holder = parameters.create_group(channel)
+                holder.attrs["unit"] = "s"
+                for run in ("1_2_0", "2_2_0"):
+                    holder.create_dataset(
+                        "%s__%s" % (channel, run),      # two underscores
+                        data=np.arange(10, dtype=np.float64))
+            simulations = session.create_group("SIMULATIONS")
+            for run in ("1_2_0", "2_2_0"):
+                simulations.create_group("SIMULATION_%s" % run)
+        self.forget_layout(target)
+        described = hdf5.inspect(target, use_cache=False)
+        self.assertNotEqual(described.layout.rule, "declared")
+        self.assertEqual(len(described.layout.run_keys), 2)

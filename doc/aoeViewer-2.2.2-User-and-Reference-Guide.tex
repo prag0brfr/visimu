@@ -5,7 +5,7 @@
 % earlier one: where behaviour has changed, the text was rewritten rather than
 % appended to.
 %
-% Build:  pdflatex aoeViewer-2.2.1-User-and-Reference-Guide.tex   (three times,
+% Build:  pdflatex aoeViewer-2.2.2-User-and-Reference-Guide.tex   (three times,
 %         so the table of contents and the cross-references settle)
 
 \documentclass[11pt,a4paper,oneside]{report}
@@ -42,13 +42,13 @@
 \definecolor{aoeshade}{HTML}{F4F6F8}
 
 \hypersetup{
-  pdftitle={aoeViewer 2.2.1 -- User and Reference Guide},
+  pdftitle={aoeViewer 2.2.2 -- User and Reference Guide},
   pdfauthor={Paulo R. A. Gilz},
   pdfsubject={The interface, the algorithms, the file format, the C ABI and the scripting API},
   colorlinks=false,
 }
 
-\newcommand{\appver}{2.2.1}
+\newcommand{\appver}{2.2.2}
 
 \pagestyle{fancy}
 \fancyhf{}
@@ -1810,6 +1810,7 @@ counts whatever can be counted --- see section~\ref{sec:statusbar} --- because
 a frozen window that says nothing is indistinguishable from a crashed one.
 
 \subsection{Work that does not freeze anything: the sidecar builder}
+\label{sec:sidecar-writer}
 
 Writing a sidecar is the one long job that has been moved out of the
 application entirely. It does not fit the scheme above: it is a second full pass
@@ -2059,8 +2060,43 @@ the file dialog still offers HDF5 files and opening one reports that the package
 is missing, which is the honest failure: nothing else in the program is
 affected.
 
+\subsection*{Files that declare their own structure}
+
+Some exporters state what is in the file, and those are read as stated.
+
+\begin{aoecode}
+/DOMAIN/OSMA_1/PARAMETERS/ALFA               a channel, with @unit
+/DOMAIN/OSMA_1/PARAMETERS/ALFA/ALFA_1_2_0    its samples, for one run
+/DOMAIN/OSMA_1/SIMULATIONS/SIMULATION_1_2_0  a run, with its sweep values
+\end{aoecode}
+
+\code{PARAMETERS} lists the channels and \code{SIMULATIONS} lists the runs, so
+a dataset is the two put together: nothing is inferred and nothing is ranked,
+and the answer cannot come out the wrong way round. Units are taken from each
+channel's own group, where the exporter declares them once, rather than from
+every dataset.
+
+It is also the cheapest route there is. Two listings per session, one attribute
+per channel, and one dataset opened to learn the sample count --- no dataset
+name is enumerated at all, because a dataset's path is its channel's and its
+run's put together.
+
+\begin{aoenote}{Why a file with several sessions cannot be inferred}
+A file holding \code{OSMA\_1} beside \code{OSMA\_2} repeats the same run names
+under each. A reading keyed on the dataset name alone therefore finds
+\code{ALFA\_1\_2\_0} twice, correctly concludes that two datasets cannot both
+be the same channel of the same run, and stands down --- leaving a reading
+that is consistent and useless: one ``run'' named after the top of the tree,
+carrying every dataset in the file as a channel of its own.
+
+Read as declared, the session is part of the run's identity, which is what it
+is. The runs come out as \code{OSMA\_1/1\_2\_0}, \code{OSMA\_2/1\_2\_0} and so
+on, and the channels are the channels.
+\end{aoenote}
+
 \subsection*{Why there is no single HDF5 reader}
 
+For a file that declares nothing, the layout has to be inferred.
 HDF5 is a container, not a layout. It says how to store named arrays in a tree
 and nothing whatever about which array is a channel and which is a run, so two
 exporters writing the same simulation produce trees that share only the file
@@ -2124,16 +2160,69 @@ read in Python and its columns handed down through four calls on the C ABI
 holding is the same header table, run list and per-run columns that parsing an
 \code{.aoe} file would have produced.
 
-That choice has two consequences worth knowing.
+Opening the file reads \emph{no samples at all}. The names, the runs and the
+shapes are enough to build the \tab{data} tree and the parameter lists, and a
+column is fetched the first time something asks to draw it --- a page of four
+tiles against forty channels reads four of them. A column can arrive from three
+places, tried in order of cost: already in memory, from the sidecar, or read
+from the file. An ISO scan is cheaper still, reading element zero of each run's
+dataset rather than the column.
+
+A moment after the file is on screen, and only above 8\,MB, a separate process
+fetches the rest and writes the \code{.aoec} sidecar
+(\S\ref{sec:sidecar-writer}). Every later open is then served from it, and the
+HDF5 file is not read at all.
+
+\subsection*{Reading one over a network}
+
+A share is slow in round trips rather than in bytes, and working out the layout
+is where the round trips used to be. Three things keep the count down.
+
+\textbf{An inferred layout is worked out from paths, not from datasets.} None
+of the conventions above looks at a dataset's contents --- every one keys on the path
+--- so the names are enough to decide which is in force. Enumerating names is
+one traversal; opening every dataset to ask its shape is a round trip apiece,
+and a file of 50 runs by 1000 channels holds fifty thousand of them. Shapes are
+read for the channels of the first run only, which settles the common length
+and collects the units in the same pass, plus one dataset of each other run to
+confirm it agrees: \textbf{1,049 reads rather than 50,000}.
+
+\textbf{The layout is written down.} It is the same answer every time, so it is
+stored, gzipped, as a \code{.aoelay} file beside the source --- or in the
+per-user cache directory when the source's own is read-only, which solver
+output usually is, under the same \code{AOE\_CACHE\_DIR} override the sidecars
+use. Opening the file again reads that instead of walking anything:
+\textbf{one read rather than 50,000}.
+
+Three things have to hold before it is believed: the source must be the size
+and date it was when the layout was written, the document must be a format this
+version understands, and one dataset the layout names must still be there with
+the length it claims. The first two are cheap and not proof; the third is a
+single read and is what makes them safe to trust. Anything that fails sends the
+reader back to working it out properly.
+
+\textbf{The file is opened once per task.} A handle is kept and reused, so
+drawing six parameters, or scanning fifty of them for an ISO filter, costs one
+open rather than six or fifty. It is released when the task finishes --- reads
+only happen inside a task, so that is the whole span over which reuse pays, and
+holding a file open while nothing is reading it would risk being the reason a
+solver's own write is refused. Before a handle is reused the source is stat-ed,
+because a handle reads the file it was opened on, which is not necessarily the
+file at that path any more.
+
+\begin{aoenote}{Why this matters most once a sidecar exists}
+At that point not one sample is read from the HDF5 file. The tree was still
+being walked on every open, though, because the core has to be told what the
+file contains before it can look for a sidecar --- so the walk was the entire
+cost of opening an already-cached file, and all of it was waste.
+\end{aoenote}
 
 \begin{aoelimit}
-\textbf{No sidecar.} A \code{.aoec} is a rewrite of a parse of the source, and
-there is no parse here. None is written for an HDF5 file and none is looked
-for.
-
-\textbf{No lazy loading.} A parsed file loads a column the first time a curve
-needs it; a pushed one arrives complete, so its samples are all resident from
-the moment it opens.
+\textbf{A sidecar for a pushed file needs every column resident first.} The
+core writes one from what it holds and has no reader of its own to fill a gap,
+so the process that writes it fetches the whole file before writing anything.
+On a file larger than the machine's memory that fails and no sidecar is
+written; the file is still perfectly usable, column by column.
 \end{aoelimit}
 
 Reload (\textsc{data} panel) works and goes back through the reader rather than
@@ -3502,7 +3591,7 @@ Wheel on a 3D tile in Zoom & zoom \\
 \code{AOEVIEWER\_CORE} & Path to the core library, or to a directory containing it. Searched first, before every built-in location \\
 \code{AOEVIEWER\_LOG\_DIR} & Directory for \code{aoeviewer.log} \\
 \code{AOE\_CACHE} & Set to \code{0}, \code{false}, \code{no} or \code{off} to disable sidecar caching entirely. Read once per process \\
-\code{AOE\_CACHE\_DIR} & Overrides the per-user sidecar directory \\
+\code{AOE\_CACHE\_DIR} & Overrides the per-user directory used for sidecars and for HDF5 layout files \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -3516,7 +3605,7 @@ two-space indentation. The schema is at version~3.
 \begin{aoecode}
 {
   "version": 3,
-  "app_version": "2.2.1",
+  "app_version": "2.2.2",
   "files":    ["/abs/path/run_a.aoe"],
   "computed": {"LOAD_FACTOR": "NZ * 9.80665"},
   "aliases":  {"Angle of attack": "ALPHA"},

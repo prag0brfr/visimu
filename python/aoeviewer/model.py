@@ -1553,7 +1553,7 @@ class AppState:
     def to_dict(self) -> dict:
         return {
             "version": 3,
-            "app_version": "2.2.1",
+            "app_version": "2.2.2",
             "pages": [p.to_dict() for p in self.pages],
             "active_page": self.active_page,
             "selected_sims": sorted(list(self.selected_sims)),
