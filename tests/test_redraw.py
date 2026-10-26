@@ -2562,6 +2562,73 @@ class TestTheCappedLegendSaysSo(unittest.TestCase):
         self.assertIn(str(pt.MAX_LEGEND_ROWS), last)
 
 
+class _TwoFileSession(_DrawSession):
+    """Two files of many runs each -- the shape the legend cap misread."""
+
+    def __init__(self, runs_per_file=40):
+        super().__init__(
+            iso_values=tuple(float(i) for i in range(runs_per_file)))
+        names = ["R{0}".format(i) for i in range(runs_per_file)]
+        self.files = [_FileHandle(0, "flight_a.aoe", names),
+                      _FileHandle(1, "flight_b.aoe", names)]
+
+    def file(self, index):
+        if 0 <= index < len(self.files):
+            return self.files[index]
+        return None
+
+
+class TestTheLegendBudgetIsSpentOnRows(unittest.TestCase):
+    """The cap counts the rows a user would see, not the curves behind them.
+
+    One parameter from two files, coloured and labelled by file, is two
+    rows -- whether each file holds three runs or three hundred. Counting
+    curves instead spent the sixty-row budget inside the first file, so the
+    second file's row was dropped as an overflow and the legend named one
+    file while the plot drew two.
+    """
+
+    def tile_for(self, runs_per_file=40):
+        from aoeviewer.model import ColorMode
+
+        session = _TwoFileSession(runs_per_file)
+        tile = make_drawable_tile(session)
+        state = tile._state
+        for file_index in (0, 1):
+            for sim in range(runs_per_file):
+                state.set_selected(file_index, sim, True)
+        state.tile.x_param, state.tile.y_params = "TIME", ["ALT"]
+        state.tile.color_mode = ColorMode.FILE
+        state.tile.show_legend = True
+        state.tile.legend_show_param = True
+        state.tile.legend_show_file = True
+        state.tile.legend_show_sim = False
+        tile.rebuild()
+        return tile
+
+    def test_both_files_are_named(self):
+        rows = legend_names(self.tile_for())
+        self.assertEqual(len(rows), 2, rows)
+        self.assertTrue(any("flight_a" in row for row in rows), rows)
+        self.assertTrue(any("flight_b" in row for row in rows), rows)
+
+    def test_nothing_is_reported_as_capped(self):
+        rows = legend_names(self.tile_for())
+        self.assertFalse([row for row in rows if "more" in row], rows)
+
+    def test_many_runs_each_is_still_two_rows(self):
+        """Well past the cap in curves, nowhere near it in rows.
+
+        Both files named, and named by the rows themselves -- counting the
+        rows alone would have passed on a legend holding one file and an
+        "and 340 more" note.
+        """
+        rows = legend_names(self.tile_for(runs_per_file=200))
+        self.assertEqual(len(rows), 2, rows)
+        self.assertTrue(any("flight_a" in row for row in rows), rows)
+        self.assertTrue(any("flight_b" in row for row in rows), rows)
+
+
 class TestTheAxesAreWrittenOnlyWhenTheyChange(unittest.TestCase):
     """The PlotItem's own settings: grid, log mode, axis captions, title.
 
@@ -5965,3 +6032,529 @@ class TestTheTileUsesTheDirectionalViewBox(unittest.TestCase):
         """
         source = inspect.getsource(pt.PlotTile.__init__)
         self.assertIn("viewBox=DirectionalViewBox()", source)
+
+
+class _EncodingFile:
+    """A file handle as the encodings see one: a display name and a path."""
+
+    def __init__(self, name, path):
+        self.name = name
+        self.path = path
+
+
+class _MultiFileSession:
+    """Two files, each with two runs, for the file-keyed encodings."""
+
+    def __init__(self):
+        self.parameters = ["TIME", "ALT", "MACH"]
+        self.file_count = 2
+        self._files = {
+            0: _EncodingFile("june.aoe", "/june/results.aoe"),
+            1: _EncodingFile("july.aoe", "/july/results.aoe"),
+        }
+
+    @property
+    def plottable_parameters(self):
+        return list(self.parameters)
+
+    def file(self, index):
+        return self._files.get(index)
+
+    def iso_distinct(self, name):
+        return np.array([], dtype=np.float32)
+
+    def format_value(self, value):
+        return "{0:g}".format(value)
+
+
+class TestColourByFileRows(unittest.TestCase):
+    """The Colour table in File mode: one row per file, not per run.
+
+    Colour by File exists for the case of several studies on one tile, where
+    the question a reader asks of a line is which file it came from. The table
+    has to offer one swatch per file for that to be settable at all.
+    """
+
+    def setUp(self):
+        self.panel = object.__new__(panels.StylePanel)
+        self.panel._session = _MultiFileSession()
+        self.panel._state = AppState()
+        self.panel._updating = False
+        state = self.panel._state
+        for file_index in (0, 1):
+            for sim_index in (0, 1):
+                state.set_selected(file_index, sim_index, True)
+        state.tile.y_params = ["ALT", "MACH"]
+
+    def entries(self, mode):
+        self.panel._state.tile.color_mode = mode
+        return self.panel._color_entries()
+
+    def test_one_row_per_file(self):
+        entries = self.entries(model.ColorMode.FILE)
+        self.assertEqual(entries,
+                         [("june.aoe", "file::/june/results.aoe"),
+                          ("july.aoe", "file::/july/results.aoe")])
+
+    def test_a_file_with_several_runs_is_still_one_row(self):
+        # Four runs are plotted; two files means two swatches.
+        self.assertEqual(len(self.entries(model.ColorMode.FILE)), 2)
+
+    def test_the_rows_match_what_the_curves_are_keyed_on(self):
+        """The table is useless if its keys are not the keys the drawing
+        code produces -- the swatch would set a colour nothing reads."""
+        tile = self.panel._state.tile
+        tile.color_mode = model.ColorMode.FILE
+        keys = {key for _label, key in self.panel._color_entries()}
+        drawn = {model.curve_color_key(tile, "ALT", "s%d" % sim, "",
+                                       self.panel._session.file(f).path)
+                 for f in (0, 1) for sim in (0, 1)}
+        self.assertEqual(keys, drawn)
+
+    def test_colour_and_style_offer_the_same_rows_for_files(self):
+        tile = self.panel._state.tile
+        tile.color_mode = model.ColorMode.FILE
+        tile.style_mode = model.StyleMode.FILE
+        self.assertEqual(self.panel._color_entries(),
+                         self.panel._line_entries())
+
+    def test_the_other_modes_are_unchanged(self):
+        self.assertEqual(
+            self.entries(model.ColorMode.PARAMETER),
+            [("ALT", "param::ALT"), ("MACH", "param::MACH")])
+
+
+class TestTheColourModeRadios(unittest.TestCase):
+    def test_every_mode_has_a_button_and_its_id_is_the_mode(self):
+        """A button's id is written into the workspace as the mode, so the
+        row can be reordered without changing what a saved tile means."""
+        source = inspect.getsource(panels.StylePanel)
+        for mode in model.ColorMode:
+            self.assertIn("ColorMode.%s" % mode.name, source, mode.name)
+        self.assertIn("self.mode_group.addButton(radio, int(mode))", source)
+
+    def test_the_iso_combo_shows_only_for_iso(self):
+        source = inspect.getsource(panels.StylePanel)
+        self.assertNotIn("iso_row.setVisible(tile.color_mode == ColorMode.FILE",
+                         source)
+
+
+class TestSettingSeveralRowsAtOnce(unittest.TestCase):
+    """A colour or a dash set on several selected rows together.
+
+    A sweep of twenty runs needs twenty rows set to the same dash far more
+    often than it needs twenty different ones, and doing that one row at a
+    time is twenty dialogs.
+    """
+
+    def setUp(self):
+        self.panel = object.__new__(panels.StylePanel)
+        self.panel._session = _FakeSession()
+        self.panel._state = AppState()
+        self.panel._updating = False
+        self.panel._color_signature = None
+        self.panel._line_signature = None
+        self.panel._color_row_keys = []
+        self.panel._line_row_keys = []
+        self.panel._row_keys = []
+        self.panel.style_changed = qt_stubs.Signal().__get__(self.panel)
+        self.entries = [("ALPHA", "param::ALPHA"), ("NZ", "param::NZ"),
+                        ("ALT", "param::ALT")]
+        self.table = qt_stubs.QTableWidget(0, 2)
+        self.panel.color_table = self.table
+        self.panel.table = self.table
+        self.panel._rebuild_one_table(self.table, self.entries, "color", "")
+
+    def colours(self):
+        styles = self.panel._state.styles
+        return [styles.color_for(key) for _label, key in self.entries]
+
+    def swatch(self, row):
+        return self.table.cellWidget(row, 1)
+
+    def test_with_nothing_selected_it_changes_one_row(self):
+        before = self.colours()
+        self.swatch(1).color_picked.emit("#abcdef")
+        after = self.colours()
+        self.assertEqual(after[1], "#abcdef")
+        self.assertEqual([after[0], after[2]], [before[0], before[2]])
+
+    def test_a_selection_of_several_changes_all_of_them(self):
+        self.table.selectRow(0)
+        self.table.selectRow(2)
+        self.swatch(0).color_picked.emit("#abcdef")
+        after = self.colours()
+        self.assertEqual([after[0], after[2]], ["#abcdef", "#abcdef"])
+
+    def test_a_row_outside_the_selection_changes_only_itself(self):
+        """A stale selection elsewhere must not repaint curves nobody is
+        looking at: the change lands where it was made."""
+        self.table.selectRow(0)
+        self.table.selectRow(1)
+        before = self.colours()
+        self.swatch(2).color_picked.emit("#abcdef")
+        after = self.colours()
+        self.assertEqual(after[2], "#abcdef")
+        self.assertEqual(after[:2], before[:2])
+
+    def test_a_selection_of_one_is_just_that_row(self):
+        self.table.selectRow(1)
+        before = self.colours()
+        self.swatch(1).color_picked.emit("#abcdef")
+        after = self.colours()
+        self.assertEqual(after[1], "#abcdef")
+        self.assertEqual([after[0], after[2]], [before[0], before[2]])
+
+    def test_one_change_is_reported_once(self):
+        self.table.selectRow(0)
+        self.table.selectRow(1)
+        self.table.selectRow(2)
+        self.panel.style_changed.emitted = []
+        self.swatch(0).color_picked.emit("#abcdef")
+        self.assertEqual(len(self.panel.style_changed.emitted), 1,
+                         "a redraw per row was requested")
+
+    def test_the_tables_are_set_up_for_it(self):
+        source = inspect.getsource(panels.StylePanel._configure_style_table)
+        self.assertIn("ExtendedSelection", source)
+        self.assertIn("SelectRows", source)
+        self.assertNotIn("NoSelection", source)
+
+    def test_the_rows_can_actually_be_selected(self):
+        """The flag, not the view's selection mode.
+
+        setFlags replaces an item's default flags rather than adding to
+        them, and Qt's defaults are where ItemIsSelectable comes from. A row
+        given only ItemIsEnabled cannot be picked however the view is
+        configured -- which made the whole feature unusable while every
+        other test of it passed, because they selected rows directly.
+        """
+        for row in range(len(self.entries)):
+            item = self.table.item(row, 0)
+            self.assertTrue(
+                int(item.flags()) & qt_stubs.ITEM_IS_SELECTABLE,
+                "row %d is not selectable" % row)
+
+    def test_selecting_a_row_takes_effect(self):
+        self.table.selectRow(0)
+        self.assertEqual([item.row() for item in self.table.selectedItems()],
+                         [0])
+
+
+class TestSettingSeveralLineRowsAtOnce(unittest.TestCase):
+    def setUp(self):
+        self.panel = object.__new__(panels.StylePanel)
+        self.panel._session = _FakeSession()
+        self.panel._state = AppState()
+        self.panel._updating = False
+        self.panel._color_signature = None
+        self.panel._line_signature = None
+        self.panel._color_row_keys = []
+        self.panel._line_row_keys = []
+        self.panel._row_keys = []
+        self.panel.style_changed = qt_stubs.Signal().__get__(self.panel)
+        self.entries = [("a.aoe", "file::/a.aoe"), ("b.aoe", "file::/b.aoe"),
+                        ("c.aoe", "file::/c.aoe")]
+        self.table = qt_stubs.QTableWidget(0, 3)
+        self.panel.line_table = self.table
+        self.panel._rebuild_one_table(self.table, self.entries, "line", "")
+
+    def dashes(self):
+        styles = self.panel._state.styles
+        return [styles.dash_for(key) for _label, key in self.entries]
+
+    def test_a_dash_set_on_a_selection_reaches_all_of_it(self):
+        self.table.selectRow(0)
+        self.table.selectRow(1)
+        self.table.cellWidget(0, 1).setCurrentText("dash")
+        after = self.dashes()
+        self.assertEqual([after[0], after[1]], ["dash", "dash"])
+
+    def test_the_unselected_row_is_left_alone(self):
+        before = self.dashes()
+        self.table.selectRow(0)
+        self.table.selectRow(1)
+        self.table.cellWidget(0, 1).setCurrentText("dash")
+        self.assertEqual(self.dashes()[2], before[2])
+
+    def test_a_marker_set_on_a_selection_reaches_all_of_it(self):
+        styles = self.panel._state.styles
+        self.table.selectRow(1)
+        self.table.selectRow(2)
+        combo = self.table.cellWidget(1, 2)
+        combo.setCurrentIndex(combo.findData("o"))
+        self.assertEqual(styles.symbol_for("file::/b.aoe"), "o")
+        self.assertEqual(styles.symbol_for("file::/c.aoe"), "o")
+
+    def test_rebuilding_the_table_sets_nothing(self):
+        """Filling the combos writes their values back through the same
+        handler, and with rows selected that would fan one row's value out
+        over the others. _updating is what stops it."""
+        styles = self.panel._state.styles
+        styles.set_dash("file::/a.aoe", "dash")
+        styles.set_dash("file::/b.aoe", "dot")
+        self.table.selectRow(0)
+        self.table.selectRow(1)
+        self.panel._line_signature = None
+        self.panel._updating = True
+        try:
+            self.panel._rebuild_one_table(self.table, self.entries, "line", "")
+        finally:
+            self.panel._updating = False
+        self.assertEqual(styles.dash_for("file::/a.aoe"), "dash")
+        self.assertEqual(styles.dash_for("file::/b.aoe"), "dot")
+
+
+class TestAnEmptyTileIsNotFramed(unittest.TestCase):
+    """Fitting an empty tile must not count as framing it.
+
+    Double-clicking a tile is how PARAMS is opened, and double-clicking also
+    fits. On a fresh start the tile being double-clicked is empty, so the
+    gesture that means "I am about to put something here" was marking the
+    tile as having a view worth keeping -- and the first curve dropped on it
+    then inherited the empty tile's range instead of being fitted.
+    """
+
+    def setUp(self):
+        self.session = _DrawSession()
+        self.tile = make_drawable_tile(self.session)
+        self.state = self.tile._state
+        self.state.selected_sims.update({(0, 0)})
+
+    def test_fitting_an_empty_tile_does_not_mark_it_framed(self):
+        self.tile.rebuild()
+        self.tile.autoscale()
+        self.assertFalse(self.state.tile.view_initialised)
+
+    def test_the_first_curve_is_fitted_after_a_double_click(self):
+        self.tile.rebuild()
+        self.tile.autoscale()                 # what a double-click does
+        self.state.tile.x_param = "TIME"
+        self.state.tile.y_params = ["ALT"]
+        plot = self.tile.getPlotItem()
+        plot.range_writes = []
+        self.tile.rebuild()
+        self.assertTrue(plot.range_writes, "the first curve was not fitted")
+        self.assertTrue(self.state.tile.view_initialised)
+
+    def test_fitting_a_tile_with_curves_still_frames_it(self):
+        self.state.tile.x_param = "TIME"
+        self.state.tile.y_params = ["ALT"]
+        self.tile.rebuild()
+        self.state.tile.view_initialised = False
+        self.tile.autoscale()
+        self.assertTrue(self.state.tile.view_initialised)
+
+    def test_a_framed_tile_keeps_its_view_on_a_later_rebuild(self):
+        self.state.tile.x_param = "TIME"
+        self.state.tile.y_params = ["ALT"]
+        self.tile.rebuild()
+        plot = self.tile.getPlotItem()
+        plot.range_writes = []
+        self.tile.rebuild()
+        self.assertEqual(plot.range_writes, [],
+                         "a rebuild re-fitted a tile the user had framed")
+
+
+class TestAMultiRowLineStyleChange(unittest.TestCase):
+    """A dash or symbol picked for several rows reaches all of them.
+
+    The colour path is safe because the picker is modal: the table still has
+    its selection when the colour comes back. A combo drops a popup instead,
+    and the selection is read after that popup has been and gone -- so the
+    rows are taken when it opens, which is the last moment they are still
+    the user's.
+    """
+
+    def setUp(self):
+        self.panel = object.__new__(panels.StylePanel)
+        self.panel._session = _FakeSession()
+        self.panel._state = AppState()
+        self.panel._updating = False
+        self.panel._color_signature = None
+        self.panel._line_signature = None
+        self.panel._color_row_keys = []
+        self.panel._line_row_keys = []
+        self.panel._row_keys = []
+        self.panel._color_selection = set()
+        self.panel._line_selection = set()
+        self.panel.style_changed = qt_stubs.Signal().__get__(self.panel)
+        self.entries = [("ALPHA", "param::ALPHA"), ("NZ", "param::NZ"),
+                        ("ALT", "param::ALT")]
+        self.table = qt_stubs.QTableWidget(0, 3)
+        self.panel.line_table = self.table
+        self.panel._rebuild_one_table(self.table, self.entries, "line", "")
+
+    def keys(self):
+        return [key for _label, key in self.entries]
+
+    def dashes(self):
+        styles = self.panel._state.styles
+        return [styles.dash_for(key) for key in self.keys()]
+
+    def symbols(self):
+        styles = self.panel._state.styles
+        return [styles.symbol_for(key) for key in self.keys()]
+
+    def select_all_three(self):
+        for row in range(3):
+            self.table.selectRow(row)
+        self.panel._remember_selection(self.table, "_line_selection")
+
+    def lose_the_selection(self):
+        """What the popup's coming and going does to the table.
+
+        Worse than a click on a swatch, and this is the whole bug: the popup
+        is a window of its own, so when the view drops the selection the
+        focus is in the popup rather than in a cell -- which is how
+        _remember_selection tells a collapse from a change of mind. It reads
+        it as a change of mind and clears what it was keeping, leaving the
+        snapshot taken at showPopup as the only record of the rows.
+        """
+        self.panel._focus_is_in_a_cell = lambda _table: False
+        self.table.clearSelection()
+        self.panel._remember_selection(self.table, "_line_selection")
+
+    def test_a_dash_picked_from_a_popup_reaches_every_selected_row(self):
+        self.select_all_three()
+        combo = self.table.cellWidget(0, 1)
+        combo.showPopup()                      # the rows are taken here
+        self.lose_the_selection()              # and gone by now
+        combo.setCurrentText("dash")
+        self.assertEqual(self.dashes(), ["dash"] * 3)
+
+    def test_a_symbol_picked_from_a_popup_reaches_every_selected_row(self):
+        self.select_all_three()
+        combo = self.table.cellWidget(0, 2)
+        combo.showPopup()
+        self.lose_the_selection()
+        combo.setCurrentIndex(combo.findData("o"))
+        self.assertEqual(self.symbols(), ["o"] * 3)
+
+    def test_the_snapshot_is_not_reused_by_the_next_change(self):
+        """One popup, one fan-out. A later change with nothing selected is
+        about its own row, not about whoever was selected last time."""
+        self.select_all_three()
+        combo = self.table.cellWidget(0, 1)
+        combo.showPopup()
+        self.lose_the_selection()
+        combo.setCurrentText("dash")
+
+        self.panel._line_selection = set()
+        self.table.cellWidget(1, 1).setCurrentText("dot")
+        self.assertEqual(self.dashes(), ["dash", "dot", "dash"])
+
+    def test_one_unselected_row_still_changes_alone(self):
+        combo = self.table.cellWidget(2, 1)
+        combo.showPopup()
+        combo.setCurrentText("dash")
+        self.assertEqual(self.dashes()[2], "dash")
+        self.assertNotEqual(self.dashes()[0], "dash")
+
+    def test_the_other_rows_combos_catch_up(self):
+        """The widgets have to agree with the plot. The row that was clicked
+        repaints itself; the others only did when the panel was rebuilt, so
+        the table said one thing and the curves another until the user
+        changed tabs and came back."""
+        self.select_all_three()
+        combo = self.table.cellWidget(0, 1)
+        combo.showPopup()
+        combo.setCurrentText("dash")
+        for row in range(3):
+            self.assertEqual(self.table.cellWidget(row, 1).currentText(),
+                             "dash", "row %d's combo is stale" % row)
+
+
+class TestTheSelectionSurvivesClickingAWidget(unittest.TestCase):
+    """The view drops the selection the moment a cell widget is clicked.
+
+    QAbstractItemView filters FocusIn on the widgets it holds and calls
+    setCurrentIndex, which under ExtendedSelection clears the selection and
+    selects that one row. So the rows a user had picked were gone before the
+    swatch's own handler ran, and a colour chosen for five rows landed on
+    one. The widgets are given NoFocus to stop it happening, and the rows
+    picked are remembered in case some version does it anyway.
+    """
+
+    def setUp(self):
+        self.panel = object.__new__(panels.StylePanel)
+        self.panel._session = _FakeSession()
+        self.panel._state = AppState()
+        self.panel._updating = False
+        self.panel._color_signature = None
+        self.panel._line_signature = None
+        self.panel._color_row_keys = []
+        self.panel._line_row_keys = []
+        self.panel._row_keys = []
+        self.panel._color_selection = set()
+        self.panel._line_selection = set()
+        self.panel.style_changed = qt_stubs.Signal().__get__(self.panel)
+        self.entries = [("ALPHA", "param::ALPHA"), ("NZ", "param::NZ"),
+                        ("ALT", "param::ALT")]
+        self.table = qt_stubs.QTableWidget(0, 2)
+        self.panel.color_table = self.table
+        self.panel.table = self.table
+        self.panel._rebuild_one_table(self.table, self.entries, "color", "")
+
+    def colours(self):
+        styles = self.panel._state.styles
+        return [styles.color_for(key) for _label, key in self.entries]
+
+    def collapse_to(self, row, focus_in_cell=True):
+        """What the view does when a cell widget is clicked."""
+        self.panel._focus_is_in_a_cell = lambda _table: focus_in_cell
+        self.table.clearSelection()
+        self.table.selectRow(row)
+        self.panel._remember_selection(self.table, "_color_selection")
+
+    def test_the_widgets_do_not_take_focus_when_clicked(self):
+        for row in range(len(self.entries)):
+            widget = self.table.cellWidget(row, 1)
+            self.assertEqual(widget.focus_policy, Qt.FocusPolicy.NoFocus,
+                             "row %d's swatch can steal the selection" % row)
+
+    def test_a_collapsed_selection_is_still_honoured(self):
+        self.table.selectRow(0)
+        self.table.selectRow(1)
+        self.table.selectRow(2)
+        self.panel._remember_selection(self.table, "_color_selection")
+
+        self.collapse_to(0)                       # the view's doing
+        self.table.cellWidget(0, 1).color_picked.emit("#abcdef")
+        self.assertEqual(self.colours(), ["#abcdef"] * 3)
+
+    def test_the_other_rows_swatches_catch_up(self):
+        """Every swatch shows the colour its curves are drawn in.
+
+        ColorSwatch._choose repaints the one that was clicked, so the others
+        kept the old colour until the panel was rebuilt -- which happened on
+        a tab change, making the fix look like a refresh bug.
+        """
+        for row in range(3):
+            self.table.selectRow(row)
+        self.panel._remember_selection(self.table, "_color_selection")
+        self.table.cellWidget(0, 1).color_picked.emit("#abcdef")
+        for row in range(3):
+            self.assertEqual(self.table.cellWidget(row, 1).color(), "#abcdef",
+                             "row %d's swatch is stale" % row)
+
+    def test_a_real_change_of_mind_is_respected(self):
+        """Picking one row on purpose, after a multi-selection, changes that
+        row alone. The focus is on the view, not in a cell, which is what
+        tells a deliberate choice from the view dropping the selection."""
+        self.table.selectRow(0)
+        self.table.selectRow(1)
+        self.table.selectRow(2)
+        self.panel._remember_selection(self.table, "_color_selection")
+
+        before = self.colours()
+        self.collapse_to(1, focus_in_cell=False)
+        self.table.cellWidget(1, 1).color_picked.emit("#abcdef")
+        after = self.colours()
+        self.assertEqual(after[1], "#abcdef")
+        self.assertEqual([after[0], after[2]], [before[0], before[2]])
+
+    def test_nothing_remembered_means_one_row(self):
+        self.table.cellWidget(2, 1).color_picked.emit("#abcdef")
+        self.assertEqual(self.colours()[2], "#abcdef")
+        self.assertEqual(len({c for c in self.colours()}), 3)

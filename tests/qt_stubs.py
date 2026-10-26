@@ -418,8 +418,20 @@ class QComboBox:
     def __init__(self, *args, **kwargs):
         self._items = []          # (label, data)
         self._index = -1
+        self.focus_policy = None
         self.currentTextChanged = _BoundSignal()
         self.currentIndexChanged = _BoundSignal()
+
+    def setFocusPolicy(self, policy):
+        # Recorded, not ignored: a cell widget that takes focus when clicked
+        # makes the view drop the selection around it, which is the
+        # difference between setting one row's style and setting five.
+        self.focus_policy = policy
+
+    def showPopup(self):
+        # The real one drops a list window; here it only has to exist, so
+        # StyleCombo can call up to it.
+        self.popup_shown = True
 
     def addItem(self, label, data=None):
         self._items.append((label, data))
@@ -499,7 +511,47 @@ class QTableWidget:
         self._widgets = {}
         self.updates_enabled = True
         self.created = 0        # cell widgets ever installed
+        # Real enough to test with: a change made on one of several selected
+        # rows is supposed to land on all of them, and an _Any selection
+        # could not show that either way.
+        self._selected = set()
+        self.selection_mode = None
+        self.selection_behavior = None
         self.setRowCount(rows)
+
+    def setSelectionMode(self, mode):
+        self.selection_mode = mode
+
+    def setSelectionBehavior(self, behavior):
+        self.selection_behavior = behavior
+
+    def selectRow(self, row):
+        """Select a row, if Qt would have allowed it.
+
+        Honouring the flag is the whole point: selecting a row the real
+        widget would refuse is how a stub reports that a feature works when
+        it cannot work at all.
+        """
+        row = int(row)
+        item = self._items.get((row, 0))
+        flags = None if item is None else item.flags()
+        if flags is not None and not (int(flags) & ITEM_IS_SELECTABLE):
+            return
+        self._selected.add(row)
+
+    def clearSelection(self):
+        self._selected.clear()
+
+    def selectedItems(self):
+        """Column 0's item for each selected row, as SelectRows gives."""
+        items = []
+        for row in sorted(self._selected):
+            if row >= self._rows:
+                continue
+            item = self._items.get((row, 0))
+            if item is not None:
+                items.append(item)
+        return items
 
     def setRowCount(self, count):
         for (row, column) in list(self._items):
@@ -949,7 +1001,12 @@ class QPushButton:
     def __init__(self, text="", *args, **kwargs):
         self._text = text
         self._tip = ""
+        self.focus_policy = None
         self.clicked = _BoundSignal()
+
+    def setFocusPolicy(self, policy):
+        # See QComboBox.setFocusPolicy above.
+        self.focus_policy = policy
 
     def setText(self, text):
         self._text = text
@@ -1039,11 +1096,26 @@ class _Enum:
         return value
 
 
+# Qt's item flags are a bitmask, and the one that decides whether a row can
+# be picked at all is ItemIsSelectable. setFlags *replaces* the default set
+# rather than adding to it, so an item given only ItemIsEnabled is not
+# selectable -- which is worth modelling, because a stub that let every row
+# be selected reported a multi-row feature as working when the real widget
+# would not allow a single row to be chosen.
+ITEM_IS_ENABLED = 1
+ITEM_IS_SELECTABLE = 2
+
+
 def _make_qt():
     qt = _Any()
-    qt.ItemFlag = _Enum(NoItemFlags=0, ItemIsEnabled=1, ItemIsSelectable=2,
+    qt.ItemFlag = _Enum(NoItemFlags=0, ItemIsEnabled=ITEM_IS_ENABLED,
+                        ItemIsSelectable=ITEM_IS_SELECTABLE,
                         ItemIsEditable=4, ItemIsUserCheckable=8)
     qt.CheckState = _Enum(Unchecked=0, PartiallyChecked=1, Checked=2)
+    # Real values, because whether a cell widget takes focus when clicked
+    # decides whether a multi-row selection survives being acted on.
+    qt.FocusPolicy = _Enum(NoFocus=0, TabFocus=1, ClickFocus=2,
+                           StrongFocus=11, WheelFocus=15)
     qt.ItemDataRole = _Enum(DisplayRole=0, UserRole=256, ToolTipRole=3)
     return qt
 

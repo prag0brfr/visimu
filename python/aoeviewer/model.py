@@ -42,11 +42,25 @@ def clamp_3d_half(value: float) -> float:
 
 
 class ColorMode(IntEnum):
-    """What decides a curve's colour."""
+    """What decides a curve's colour.
+
+    The numbers are written into workspaces, so they are fixed: a new mode is
+    appended and never inserted, or every workspace ever saved would come back
+    coloured by something else.
+    """
 
     SIMULATION = 0
     PARAMETER = 1
     ISO = 2
+    FILE = 3
+
+
+COLOR_MODE_LABELS = {
+    ColorMode.PARAMETER: "Parameter",
+    ColorMode.SIMULATION: "Simulation",
+    ColorMode.ISO: "ISO",
+    ColorMode.FILE: "File",
+}
 
 
 class StyleMode(IntEnum):
@@ -458,7 +472,13 @@ class TileState:
                 tile.show_3d_axes = bool(value)
                 continue
             if key == "color_mode":
-                tile.color_mode = ColorMode(int(value))
+                # Guarded like style_mode below. A workspace written by a
+                # later version can name a mode this one has never heard of,
+                # and the rest of the tile is still worth having.
+                try:
+                    tile.color_mode = ColorMode(int(value))
+                except (TypeError, ValueError):
+                    tile.color_mode = ColorMode.PARAMETER
             elif key == "style_mode":
                 try:
                     tile.style_mode = StyleMode(int(value))
@@ -545,11 +565,21 @@ def order_parameters(names, selected):
 
 
 def curve_color_key(tile: "TileState", param: str, sim_key: str,
-                    iso_label: str) -> str:
+                    iso_label: str, file_id: str = "") -> str:
+    """The identity a curve's colour is keyed on.
+
+    `file_id` is the file's path where there is one, so that two files of the
+    same basename in different directories are two identities rather than
+    one. It falls back to the run key, which is what a caller that has no file
+    to offer can still be keyed by -- the same fallback Style-by-File uses, so
+    the two modes agree about what a file is.
+    """
     if tile.color_mode == ColorMode.PARAMETER:
         return "param::" + param
     if tile.color_mode == ColorMode.ISO and tile.color_iso_param and iso_label:
         return "iso::{0}::{1}".format(tile.color_iso_param, iso_label)
+    if tile.color_mode == ColorMode.FILE:
+        return "file::" + (file_id or sim_key)
     return "sim::" + sim_key
 
 
@@ -562,7 +592,7 @@ def curve_line_key(tile: "TileState", param: str, sim_key: str,
         return "sim::" + sim_key
     if tile.style_mode == StyleMode.ISO and tile.style_iso_param and style_iso_label:
         return "iso::{0}::{1}".format(tile.style_iso_param, style_iso_label)
-    return curve_color_key(tile, param, sim_key, color_iso_label)
+    return curve_color_key(tile, param, sim_key, color_iso_label, file_id)
 
 
 def y_axis_label(tile: "TileState", max_names: int = 3) -> str:
@@ -1553,7 +1583,7 @@ class AppState:
     def to_dict(self) -> dict:
         return {
             "version": 3,
-            "app_version": "2.2.2",
+            "app_version": "2.2.3",
             "pages": [p.to_dict() for p in self.pages],
             "active_page": self.active_page,
             "selected_sims": sorted(list(self.selected_sims)),

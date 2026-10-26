@@ -5,7 +5,7 @@
 % earlier one: where behaviour has changed, the text was rewritten rather than
 % appended to.
 %
-% Build:  pdflatex aoeViewer-2.2.2-User-and-Reference-Guide.tex   (three times,
+% Build:  pdflatex aoeViewer-2.2.3-User-and-Reference-Guide.tex   (three times,
 %         so the table of contents and the cross-references settle)
 
 \documentclass[11pt,a4paper,oneside]{report}
@@ -42,13 +42,13 @@
 \definecolor{aoeshade}{HTML}{F4F6F8}
 
 \hypersetup{
-  pdftitle={aoeViewer 2.2.2 -- User and Reference Guide},
+  pdftitle={aoeViewer 2.2.3 -- User and Reference Guide},
   pdfauthor={Paulo R. A. Gilz},
   pdfsubject={The interface, the algorithms, the file format, the C ABI and the scripting API},
   colorlinks=false,
 }
 
-\newcommand{\appver}{2.2.2}
+\newcommand{\appver}{2.2.3}
 
 \pagestyle{fancy}
 \fancyhf{}
@@ -1045,8 +1045,8 @@ and \emph{Style by} the dash pattern and marker. A curve therefore carries two
 identities, so a tile showing the same three channels from three files can
 distinguish the channels \emph{and} the files.
 
-\textbf{Colour by} --- \emph{Parameter}, \emph{Simulation} or \emph{ISO} --- sets
-the colour and nothing else. \emph{Parameter} is the default, and leads the
+\textbf{Colour by} --- \emph{Parameter}, \emph{File}, \emph{Simulation} or
+\emph{ISO} --- sets the colour and nothing else. \emph{Parameter} is the default, and leads the
 row: a tile is nearly always asked which quantity a line is, and colouring by
 run answers a different question --- one that a twenty-five-run study answers
 with twenty-five colours that name nothing the user chose. Each radio is
@@ -1068,6 +1068,26 @@ The pairing this exists for is several files of the same parameters on one tile:
 \emph{Colour by Parameter} and \emph{Style by File}. The colour says which
 quantity, the dash says which file, and the two read at once.
 
+\emph{Colour by File} is the same question answered the other way round, for a
+tile where which file a line came from is the first thing to see rather than
+the second: every curve out of one result file takes one colour, however many
+channels and runs it carries. It keys on the file's path rather than its name,
+so two studies both called \code{results.aoe} in different directories stay
+apart --- the same key \emph{Style by File} uses, so the two modes cannot
+disagree about what a file is.
+
+\begin{aoenote}{Two modes on the same identity say one thing twice}
+Nothing stops \emph{Colour by File} being chosen alongside \emph{Style by
+File}, and the result is legible but wasteful: both dimensions carry the same
+information and the tile has nothing left to distinguish the channels with.
+The useful arrangement is one against the other.
+
+It is also worth ticking \emph{File} among the legend parts when colour keys
+on the file. The legend merges rows whose text is identical, so with only the
+parameter shown, the same channel from two files becomes one row --- and the
+colour that distinguishes them goes unexplained.
+\end{aoenote}
+
 \begin{center}
 \small
 \begin{tabular}{@{}lp{0.34\textwidth}p{0.30\textwidth}@{}}
@@ -1077,6 +1097,7 @@ quantity, the dash says which file, and the two read at once.
 Parameter & y channel of the tile (the default) & \code{param::<name>} \\
 Simulation & plotted run & \code{sim::<run key>} \\
 ISO & value or interval of the chosen ISO parameter & \code{iso::<param>::<label>} \\
+File & open file, whatever it holds & \code{file::<path>} \\
 \bottomrule
 \end{tabular}
 
@@ -1140,6 +1161,27 @@ eleven shapes from \emph{none} to \emph{hexagon}. With \emph{Style by} set to
 is None --- dash follows colour}; when nothing is plotted, both show
 \emph{Nothing plotted yet}.
 
+\subsection{Setting several rows together}
+
+Rows are selectable, and a change made on one of several selected rows is
+written to all of them. Select by the names in the first column --- click,
+then \key{Ctrl}+click or \key{Shift}+click --- then pick a colour, a dash or a
+marker on any row in the selection.
+
+A sweep of twenty runs wants the same dash on twenty rows far more often than
+it wants twenty different ones, and doing that one row at a time is twenty
+dialogs.
+
+\begin{aoenote}{A change lands where it was made}
+Changing a row that is \emph{not} in the selection changes that row alone. The
+alternative --- treating any selection as the target --- means a selection
+left over from an earlier edit silently repaints curves the user is no longer
+looking at, with nothing on screen to explain why.
+
+The whole selection is written in one pass and one redraw is asked for, not
+one per row.
+\end{aoenote}
+
 \subsection{The legend}
 \label{sec:legend}
 
@@ -1167,9 +1209,12 @@ reading \emph{\ldots and N more (legend caps at 60 rows)}. The cap is what
 keeps a large study viewable: pyqtgraph lays out two graphics items per row, and
 a thousand-run study froze the application here before it existed. The row names
 the cap rather than only counting what it left out, because a bare count reads
-as missing data --- every curve those rows would have named is drawn, and
-turning \emph{File} and \emph{Simulation} off merges the identical rows, which
-usually brings the count back under the cap by itself.
+as missing data --- every curve those rows would have named is drawn.
+
+What the cap counts is rows, not curves. A row the legend already holds ---
+the same text drawn in the same colour, dash and marker --- does not cost a
+second one, so one parameter taken from two files and labelled by file is two
+rows whether each file holds three runs or three hundred.
 
 The \emph{Corner} combo snaps the legend to any of the four corners. Dragging the
 legend on the plot puts it anywhere, switches the corner to \emph{custom} and
@@ -1542,6 +1587,13 @@ lives in the process only and is not saved to a workspace.
 
 Last, behind its own rule, \emph{Fit} (\key{Ctrl+0}) auto-scales every tile,
 honouring axis locks; double-clicking one plot fits just that one.
+
+Fitting an \emph{empty} tile frames nothing, and is not recorded as having
+framed it. That matters because double-clicking is also how \tab{params} is
+opened, and on a fresh start the tile being double-clicked is empty: the
+gesture that means ``I am about to put something here'' would otherwise mark
+the tile as having a view worth keeping, and the first curve dropped on it
+would inherit the empty tile's range instead of being fitted.
 
 \emph{Fit} sits behind its own rule on this bar because it moves no tile and
 copies nothing: it re-frames what is already there. Its shortcut is registered
@@ -3605,7 +3657,7 @@ two-space indentation. The schema is at version~3.
 \begin{aoecode}
 {
   "version": 3,
-  "app_version": "2.2.2",
+  "app_version": "2.2.3",
   "files":    ["/abs/path/run_a.aoe"],
   "computed": {"LOAD_FACTOR": "NZ * 9.80665"},
   "aliases":  {"Angle of attack": "ALPHA"},

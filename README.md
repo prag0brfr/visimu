@@ -2,7 +2,7 @@
 
 A fast viewer for AOE simulation result files.
 
-**Version 2.2.2.** What it does:
+**Version 2.2.3.** What it does:
 
 - **Opens a study, not a file.** Add any number of result files, tick the runs
   you want, and compare them across a grid of plot tiles arranged in pages.
@@ -25,7 +25,7 @@ A fast viewer for AOE simulation result files.
 - **Derived channels** from an expression over the ones in the file, evaluated
   in the core.
 
-The full manual is `doc/aoeViewer-2.2.2-User-and-Reference-Guide.pdf`, built
+The full manual is `doc/aoeViewer-2.2.3-User-and-Reference-Guide.pdf`, built
 from the LaTeX source beside it.
 
 The heavy work — parsing, computed parameters, plot decimation — happens in a
@@ -567,12 +567,15 @@ one-click fix.
 **STYLE** — how the tile and its curves look.
 
 - *Tile display* — legend, grid, log Y and point markers.
-- *Colour by* — parameter, simulation, or ISO value; this sets the colour only.
-  **Parameter is the default**: a tile is nearly always asked which quantity a
-  line is, and colouring by run answers a different question — one a
+- *Colour by* — parameter, **file**, simulation, or ISO value; this sets the
+  colour only. **Parameter is the default**: a tile is nearly always asked which
+  quantity a line is, and colouring by run answers a different question — one a
   twenty-five-run study answers with twenty-five colours that name nothing you
-  chose. Styles are keyed by name, not by list position, so loading another file
-  never recolours what is already on screen.
+  chose. *File* gives every curve from one result file the same colour, which is
+  the question a tile answers when several studies are on it at once; it keys on
+  the file's path, so two studies both called `results.aoe` stay apart. Styles
+  are keyed by name, not by list position, so loading another file never
+  recolours what is already on screen.
 - *Style by* — None, File, Simulation or ISO; this sets the dash pattern and
   marker independently of colour. *None* makes the dash follow the colour key.
   *File* is the usual partner for *Colour by Parameter*: one colour per
@@ -581,7 +584,22 @@ one-click fix.
 - Two tables, *Colour* and *Line*, each scrolling when the list is long. Colour
   rows are the identities of *Colour by*, Line rows those of *Style by*. In ISO
   mode the rows are the ISO values, so you set the colour for "MACH = 0.75" once
-  and every run at that Mach uses it.
+  and every run at that Mach uses it; in File mode there is one row per file,
+  however many runs it holds.
+
+  **Rows can be selected and set together.** Pick several by their names —
+  click, then ctrl-click or shift-click — and changing the colour, the line or
+  the marker on any one of them applies it to all of them. A sweep of twenty
+  runs wants the same dash on twenty rows far more often than it wants twenty
+  different ones. Changing a row that is *not* part of the selection changes
+  only that row, so a selection left over from earlier cannot quietly repaint
+  curves you were not looking at.
+
+  *Colour by File* and *Style by File* key on the same thing, so choosing both
+  says one thing twice and spends two dimensions on it. The useful pairing is
+  one against the other: colour by file and dash by parameter, or the reverse.
+  With colour on the file, tick **File** among the legend parts, or the rows
+  will name the parameter and leave the colour unexplained.
 - Global line width and marker size, plus *Re-assign palette* to start over.
 - *Legend* — which corner it sits in, and which parts each entry is built from
   (parameter, ISO value, file, run). The default is the parameter name alone.
@@ -797,7 +815,9 @@ panel forward.
 
 **Double-click any plot to fit it**; `Ctrl+0` fits every tile. A tile also
 frames itself the moment it acquires its first curve, and then leaves the frame
-alone — a rebuild happens for all sorts of reasons that say nothing about what
+alone. Fitting an *empty* tile frames nothing and is not counted, so
+double-clicking a blank tile to open PARAMS — which is what the gesture is for
+— does not rob the first curve you then add of its fit — a rebuild happens for all sorts of reasons that say nothing about what
 should be on screen, and re-fitting on every one would throw away whatever you
 had zoomed in on. Emptying a tile and filling it again fits the new contents.
 
@@ -1227,7 +1247,10 @@ crosshair readout, marker dots, area segments and the CSV export all still
 answer "which run, which parameter". Merging is a drawing decision and nothing
 more.
 
-**The legend is capped at 60 rows**, then says how many were left out.
+**The legend is capped at 60 rows**, then says how many were left out. The
+cap counts rows, not curves: a row the legend already holds -- same text, same
+colour, same dash, same marker -- does not cost a second one, so one parameter
+from two files is two rows whether each file holds three runs or three hundred.
 pyqtgraph builds a `QGraphicsGridLayout` with two items per row, so a
 thousand-run legend asked Qt to lay out several thousand graphics items in one
 column -- which is where the window stopped responding rather than merely

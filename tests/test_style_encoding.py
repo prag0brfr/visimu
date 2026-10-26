@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.join(
 
 import aoeviewer
 from aoeviewer.model import (
+    COLOR_MODE_LABELS,
     AppState,
     ColorMode,
     StyleMode,
@@ -276,3 +277,119 @@ class TestWorkspacesFromEveryEarlierVersion(unittest.TestCase):
         self.assertEqual(tile.sync_param, "SPEED")
         self.assertEqual(tile.sync_condition, "rises")
         self.assertEqual(tile.sync_level, 0.5)
+
+
+class TestColourByFile(unittest.TestCase):
+    """One colour per result file, shared by every parameter from it.
+
+    The question a tile answers when several studies are open at once is
+    often "which file is this line from", and until now that could only be
+    said with the dash. Colour says it now as well.
+    """
+
+    def test_it_keys_on_the_file(self):
+        tile = _tile(color_mode=ColorMode.FILE)
+        self.assertEqual(
+            curve_color_key(tile, "ALPHA", "s1", "0.8", "/data/a.aoe"),
+            "file::/data/a.aoe")
+
+    def test_every_parameter_of_a_file_shares_one_colour(self):
+        tile = _tile(color_mode=ColorMode.FILE)
+        first = curve_color_key(tile, "ALPHA", "s1", "", "/data/a.aoe")
+        second = curve_color_key(tile, "NZ", "s2", "", "/data/a.aoe")
+        self.assertEqual(first, second)
+
+    def test_two_files_are_two_colours(self):
+        tile = _tile(color_mode=ColorMode.FILE)
+        self.assertNotEqual(
+            curve_color_key(tile, "ALPHA", "s1", "", "/data/a.aoe"),
+            curve_color_key(tile, "ALPHA", "s2", "", "/data/b.aoe"))
+
+    def test_it_keys_on_the_path_not_the_name(self):
+        """Two studies called results.aoe in different directories are two
+        files, and must not collapse onto one colour."""
+        tile = _tile(color_mode=ColorMode.FILE)
+        self.assertNotEqual(
+            curve_color_key(tile, "ALPHA", "s1", "", "/june/results.aoe"),
+            curve_color_key(tile, "ALPHA", "s1", "", "/july/results.aoe"))
+
+    def test_without_a_file_it_falls_back_to_the_run(self):
+        """Keyed by the run, but still as a file identity.
+
+        The same fallback Style-by-File uses -- a caller with no file to offer
+        gets one identity per run rather than one for everything, and the two
+        modes still produce the same key for the same curve.
+        """
+        tile = _tile(color_mode=ColorMode.FILE)
+        self.assertEqual(curve_color_key(tile, "ALPHA", "s1", ""), "file::s1")
+        styled = _tile(color_mode=ColorMode.PARAMETER,
+                       style_mode=StyleMode.FILE)
+        self.assertEqual(curve_line_key(styled, "ALPHA", "s1", "", "", ""),
+                         "file::s1")
+
+    def test_colour_and_style_by_file_agree(self):
+        coloured = _tile(color_mode=ColorMode.FILE)
+        styled = _tile(color_mode=ColorMode.PARAMETER,
+                       style_mode=StyleMode.FILE)
+        self.assertEqual(
+            curve_color_key(coloured, "ALPHA", "s1", "", "/data/a.aoe"),
+            curve_line_key(styled, "ALPHA", "s1", "/data/a.aoe", "", ""))
+
+    def test_style_none_follows_a_file_colour_key(self):
+        # Style by None means "dash follows the colour key", and the colour
+        # key now has a file form it has to be able to reach.
+        tile = _tile(color_mode=ColorMode.FILE, style_mode=StyleMode.NONE)
+        self.assertEqual(
+            curve_line_key(tile, "ALPHA", "s1", "/data/a.aoe", "", ""),
+            "file::/data/a.aoe")
+
+    def test_the_other_modes_ignore_the_file(self):
+        for mode, expected in ((ColorMode.PARAMETER, "param::ALPHA"),
+                               (ColorMode.SIMULATION, "sim::s1")):
+            tile = _tile(color_mode=mode)
+            self.assertEqual(
+                curve_color_key(tile, "ALPHA", "s1", "0.8", "/data/a.aoe"),
+                expected, mode)
+
+
+class TestColourModeNumbersAreFixed(unittest.TestCase):
+    """The mode is stored in workspaces as a number, so the numbers are an
+    interface. A new one is appended; none is ever inserted or renumbered."""
+
+    def test_the_existing_numbers_have_not_moved(self):
+        self.assertEqual(int(ColorMode.SIMULATION), 0)
+        self.assertEqual(int(ColorMode.PARAMETER), 1)
+        self.assertEqual(int(ColorMode.ISO), 2)
+
+    def test_file_was_appended(self):
+        self.assertEqual(int(ColorMode.FILE), 3)
+
+    def test_an_old_workspace_still_means_what_it_said(self):
+        for number, mode in ((0, ColorMode.SIMULATION),
+                             (1, ColorMode.PARAMETER),
+                             (2, ColorMode.ISO)):
+            tile = TileState.from_dict({"color_mode": number})
+            self.assertEqual(tile.color_mode, mode)
+
+    def test_a_file_coloured_tile_round_trips(self):
+        tile = TileState()
+        tile.color_mode = ColorMode.FILE
+        back = TileState.from_dict(tile.to_dict())
+        self.assertEqual(back.color_mode, ColorMode.FILE)
+
+    def test_a_mode_this_version_does_not_know_loads_as_parameter(self):
+        """A workspace from a later build can name a mode that does not exist
+        here. The rest of the tile is still worth having, so it is not an
+        error -- the same tolerance style_mode already had."""
+        tile = TileState.from_dict({"color_mode": 99, "y_params": ["ALPHA"]})
+        self.assertEqual(tile.color_mode, ColorMode.PARAMETER)
+        self.assertEqual(tile.y_params, ["ALPHA"])
+
+    def test_rubbish_is_tolerated_too(self):
+        tile = TileState.from_dict({"color_mode": "banana"})
+        self.assertEqual(tile.color_mode, ColorMode.PARAMETER)
+
+    def test_every_mode_has_a_label(self):
+        for mode in ColorMode:
+            self.assertIn(mode, COLOR_MODE_LABELS)
+            self.assertTrue(COLOR_MODE_LABELS[mode])

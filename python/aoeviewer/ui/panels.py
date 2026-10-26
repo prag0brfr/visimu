@@ -11,7 +11,7 @@ from __future__ import annotations
 import fnmatch
 from contextlib import contextmanager
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
@@ -2531,6 +2531,38 @@ class ColorSwatch(QPushButton):
             self.color_picked.emit(chosen.name())
 
 
+class StyleCombo(QComboBox):
+    """A dash or symbol combo that remembers the rows it was opened for.
+
+    Why it has to. A colour is picked in a modal dialog: the table keeps its
+    selection while the dialog is up, so reading the selection when the colour
+    arrives reads the right rows. A combo has no dialog -- it drops a popup,
+    and the popup is a window of its own that takes the mouse and the
+    keyboard. Whatever the view does to the selection around that (the
+    current index moves, the popup's own navigation reaches the view) has
+    already happened by the time currentTextChanged fires, so a change read
+    the selection after it was gone and fanned out to one row.
+
+    The popup opening is the last moment the selection is still what the user
+    made it, so that is where the rows are taken. `capture` is set by the
+    panel; it returns the keys to write to, and they are held until the
+    change that follows consumes them.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.capture = None
+        self.captured_targets = None
+
+    def showPopup(self):                   # noqa: N802 - Qt's spelling
+        if callable(self.capture):
+            try:
+                self.captured_targets = list(self.capture() or [])
+            except Exception:              # pragma: no cover - never block the popup
+                self.captured_targets = None
+        super().showPopup()
+
+
 class StylePanel(QWidget):
     """Colours, dash styles, markers and widths for the plotted curves.
 
@@ -2539,6 +2571,13 @@ class StylePanel(QWidget):
     shows one row per thing in that mode. Because styles are keyed by name
     rather than by list position, they survive loading and removing files.
     """
+
+    # Class attributes, and that is the point: this is a QWidget, and a
+    # missing instance attribute on one reads as "some object" rather than as
+    # "not set yet" to any getattr with a default. The honest answer for a
+    # panel whose rows nobody has selected is nothing selected.
+    _color_selection = None
+    _line_selection = None
 
     style_changed = Signal()
     # How many tiles "Apply legend to all tiles" actually changed. Emitted even
@@ -2588,7 +2627,14 @@ class StylePanel(QWidget):
         # either. Parameter leads because it is the default and because it is
         # the first question of a tile: which quantity is this line.
         self.mode_buttons = {}
+        # Reading order only. A button's id is its ColorMode, and that is
+        # what a workspace stores, so this row can be arranged however it
+        # reads best without changing what any saved tile means. Parameter
+        # leads as the default; File follows it because "which file is this
+        # line from" is the next question a tile with several studies on it
+        # is asked.
         for mode, label in ((ColorMode.PARAMETER, "Parameter"),
+                            (ColorMode.FILE, "File"),
                             (ColorMode.SIMULATION, "Simulation"),
                             (ColorMode.ISO, "ISO")):
             radio = QRadioButton(label)
@@ -2671,6 +2717,22 @@ class StylePanel(QWidget):
         self.line_table.setHorizontalHeaderLabels(["", "Line", "Marker"])
         self._configure_style_table(self.line_table, 3)
         layout.addWidget(self.line_table, 1)
+
+        table_hint = QLabel(
+            "Select several rows to set their colour, line or marker together."
+        )
+        table_hint.setObjectName("Hint")
+        table_hint.setWordWrap(True)
+        layout.addWidget(table_hint)
+
+        self._color_selection = set()
+        self._line_selection = set()
+        self.color_table.itemSelectionChanged.connect(
+            lambda: self._remember_selection(self.color_table,
+                                             "_color_selection"))
+        self.line_table.itemSelectionChanged.connect(
+            lambda: self._remember_selection(self.line_table,
+                                             "_line_selection"))
 
         self.table = self.color_table
         self._color_row_keys = []
@@ -2758,7 +2820,15 @@ class StylePanel(QWidget):
     def _configure_style_table(self, table, columns):
         table.verticalHeader().setVisible(False)
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        # Rows are selectable so that a colour or a dash can be set on several
+        # at once: pick the rows by their names, then change one of them and
+        # the change lands on all of them. Whole rows rather than cells,
+        # because a cell here is a swatch or a combo and selecting one of
+        # those means nothing.
+        table.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection)
+        table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
         table.setMaximumHeight(200)
         table.setMinimumHeight(80)
         table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -2878,7 +2948,30 @@ class StylePanel(QWidget):
             return [(param, "param::" + param) for param in tile.y_params]
         if tile.color_mode == ColorMode.ISO:
             return self._iso_entries_for(tile.color_iso_param)
+        if tile.color_mode == ColorMode.FILE:
+            return self._file_entries()
         return self._sim_entries()
+
+    def _file_entries(self):
+        """(display label, key) with one row per file being plotted.
+
+        Shared by Colour-by-File and Style-by-File so that the two cannot
+        disagree about what counts as a file: both key on the path where
+        there is one, which is what keeps two files of the same basename in
+        different directories apart.
+        """
+        seen = set()
+        entries = []
+        for file_index, _sim_index in self._state.plotted_sims():
+            handle = self._session.file(file_index)
+            if handle is None:
+                continue
+            file_id = handle.path or handle.name
+            if file_id in seen:
+                continue
+            seen.add(file_id)
+            entries.append((handle.name, "file::" + file_id))
+        return entries
 
     def _line_entries(self):
         """(display label, line-style key) for Style-by on the active tile."""
@@ -2886,18 +2979,7 @@ class StylePanel(QWidget):
         if tile.style_mode == StyleMode.NONE:
             return []
         if tile.style_mode == StyleMode.FILE:
-            seen = set()
-            entries = []
-            for file_index, sim_index in self._state.plotted_sims():
-                handle = self._session.file(file_index)
-                if handle is None:
-                    continue
-                file_id = handle.path or handle.name
-                if file_id in seen:
-                    continue
-                seen.add(file_id)
-                entries.append((handle.name, "file::" + file_id))
-            return entries
+            return self._file_entries()
         if tile.style_mode == StyleMode.ISO:
             return self._iso_entries_for(tile.style_iso_param)
         return self._sim_entries()
@@ -2972,15 +3054,32 @@ class StylePanel(QWidget):
         if item is None:
             item = QTableWidgetItem()
             table.setItem(row, 0, item)
-        item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        # Enabled *and* selectable. setFlags replaces the default set
+        # rather than adding to it, so leaving ItemIsSelectable out
+        # here makes the row unpickable -- and with it the whole point
+        # of selecting several rows to set their style together. Not
+        # editable: the text is the identity, and the edit triggers
+        # are off anyway.
+        item.setFlags(Qt.ItemFlag.ItemIsEnabled
+                      | Qt.ItemFlag.ItemIsSelectable)
         item.setText(label)
         item.setToolTip(label)
 
         swatch = table.cellWidget(row, 1)
         if swatch is None:
             swatch = ColorSwatch(styles.color_for(key))
+            # Clicking a cell widget must not move the view's current index.
+            # QAbstractItemView filters FocusIn on the widgets it holds and
+            # calls setCurrentIndex, which under ExtendedSelection clears the
+            # selection and selects that one row -- so the multi-row
+            # selection was gone before the handler below could read it, and
+            # a colour picked on one of five selected rows landed on one.
+            # A button that cannot be focused by clicking still emits
+            # clicked, and the selection survives.
+            swatch.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             swatch.color_picked.connect(
-                lambda color, r=row: self._set_color(self._color_key_for_row(r), color)
+                lambda color, r=row, tbl=table: self._set_colors(
+                    self._targets(tbl, r, self._color_key_for_row), color)
             )
             table.setCellWidget(row, 1, swatch)
         else:
@@ -2991,26 +3090,46 @@ class StylePanel(QWidget):
         if item is None:
             item = QTableWidgetItem()
             table.setItem(row, 0, item)
-        item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        # Enabled *and* selectable. setFlags replaces the default set
+        # rather than adding to it, so leaving ItemIsSelectable out
+        # here makes the row unpickable -- and with it the whole point
+        # of selecting several rows to set their style together. Not
+        # editable: the text is the identity, and the edit triggers
+        # are off anyway.
+        item.setFlags(Qt.ItemFlag.ItemIsEnabled
+                      | Qt.ItemFlag.ItemIsSelectable)
         item.setText(label)
         item.setToolTip(label)
 
         dash = table.cellWidget(row, 1)
         if dash is None:
-            dash = QComboBox()
+            dash = StyleCombo()
             dash.addItems(list(DASH_STYLES))
+            dash.setFocusPolicy(Qt.FocusPolicy.NoFocus)   # see _fill_color_row
+            dash.capture = (
+                lambda r=row, tbl=table:
+                self._targets(tbl, r, self._line_key_for_row))
             dash.currentTextChanged.connect(
-                lambda value, r=row: self._set_dash(self._line_key_for_row(r), value)
+                lambda value, r=row, tbl=table, combo=dash: self._set_dashes(
+                    self._combo_targets(combo, tbl, r,
+                                        self._line_key_for_row), value)
             )
             table.setCellWidget(row, 1, dash)
         symbol = table.cellWidget(row, 2)
         if symbol is None:
-            symbol = QComboBox()
+            symbol = StyleCombo()
             for code in SYMBOLS:
                 symbol.addItem(SYMBOL_LABELS.get(code, code), code)
+            symbol.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # see _fill_color_row
+            symbol.capture = (
+                lambda r=row, tbl=table:
+                self._targets(tbl, r, self._line_key_for_row))
             symbol.currentIndexChanged.connect(
-                lambda _i, r=row, combo=symbol:
-                self._set_symbol(self._line_key_for_row(r), combo.currentData())
+                lambda _i, r=row, combo=symbol, tbl=table:
+                self._set_symbols(
+                    self._combo_targets(combo, tbl, r,
+                                        self._line_key_for_row),
+                    combo.currentData())
             )
             table.setCellWidget(row, 2, symbol)
 
@@ -3056,26 +3175,203 @@ class StylePanel(QWidget):
             return keys[row]
         return ""
 
-    def _set_color(self, key: str, color: str) -> None:
-        if not key:
+    def _remember_selection(self, table, attribute: str) -> None:
+        """Keep the rows the user picked, across a selection the view drops.
+
+        Belt to the braces above. If some Qt version still moves the current
+        index when a cell widget is clicked, the selection collapses to that
+        one row and the fan-out is lost. A collapse of that kind happens with
+        the focus inside the table -- on the widget that was clicked -- and a
+        real change of mind happens with the focus on the view itself, which
+        is what tells the two apart.
+        """
+        rows = self._selected_rows(table)
+        if len(rows) > 1:
+            setattr(self, attribute, set(rows))
             return
-        self._state.styles.set_color(key, color)
+        if not self._focus_is_in_a_cell(table):
+            setattr(self, attribute, set())
+
+    @staticmethod
+    def _focus_is_in_a_cell(table) -> bool:
+        try:
+            focused = QApplication.focusWidget()
+            return bool(focused is not None and focused is not table
+                        and table.isAncestorOf(focused))
+        except (AttributeError, RuntimeError, TypeError):
+            return False
+
+    def _selected_rows(self, table) -> List[int]:
+        """Which rows are selected, in order. Empty when nothing is."""
+        try:
+            items = list(table.selectedItems() or [])
+        except (AttributeError, TypeError):
+            # A view that cannot report a selection has none, and a change
+            # then means what it has always meant: this row.
+            return []
+        rows = set()
+        for item in items:
+            try:
+                row = item.row()
+            except AttributeError:
+                continue
+            if row >= 0:
+                rows.add(row)
+        return sorted(rows)
+
+    def _targets(self, table, row: int, key_for) -> List[str]:
+        """The keys a change made on `row` should be written to.
+
+        Every selected row when the row being changed is one of them, and
+        that row alone otherwise. The second case is what keeps the ordinary
+        gesture ordinary: changing a row nobody selected changes that row,
+        and a stale selection elsewhere in the table cannot quietly repaint
+        curves the user was not looking at.
+        """
+        selected = self._selected_rows(table)
+        if len(selected) < 2:
+            # The view may have collapsed the selection when the widget was
+            # clicked; fall back to what was picked before it did.
+            remembered = getattr(self, self._selection_attr(table), None)
+            if isinstance(remembered, (set, frozenset, list, tuple)) \
+                    and row in remembered:
+                selected = sorted(remembered)
+        if len(selected) > 1 and row in selected:
+            keys = [key_for(other) for other in selected]
+        else:
+            keys = [key_for(row)]
+        return [key for key in keys if key]
+
+    def _combo_targets(self, combo, table, row: int, key_for) -> List[str]:
+        """What a combo's change applies to: its snapshot, else the selection.
+
+        The snapshot is consumed, not kept: the next change through this combo
+        is a new gesture, and a change that arrives without a popup -- the
+        keyboard, the wheel, or this panel writing a value back -- has to read
+        the selection as it is now.
+        """
+        captured = getattr(combo, "captured_targets", None)
+        try:
+            combo.captured_targets = None
+        except AttributeError:                 # pragma: no cover - not ours
+            pass
+        if isinstance(captured, (list, tuple)) and captured:
+            return [key for key in captured if key]
+        return self._targets(table, row, key_for)
+
+    def _selection_attr(self, table) -> str:
+        return ("_line_selection"
+                if table is getattr(self, "line_table", None)
+                else "_color_selection")
+
+    def _set_color(self, key: str, color: str) -> None:
+        self._set_colors([key], color)
+
+    def _set_colors(self, keys: Sequence[str], color: str) -> None:
+        changed = False
+        for key in keys:
+            if not key:
+                continue
+            self._state.styles.set_color(key, color)
+            changed = True
+        if not changed:
+            return
+        # The row the user clicked repaints itself; the others do not, and a
+        # table that disagrees with the plot until the panel is rebuilt reads
+        # as the change having missed them.
+        self._refresh_color_cells(keys)
         self._state.dirty = True
         self.style_changed.emit()
 
     def _set_dash(self, key: str, dash: str) -> None:
-        if self._updating or not key:
+        self._set_dashes([key], dash)
+
+    def _set_dashes(self, keys: Sequence[str], dash: str) -> None:
+        if self._updating:
             return
-        self._state.styles.set_dash(key, dash)
+        changed = False
+        for key in keys:
+            if not key:
+                continue
+            self._state.styles.set_dash(key, dash)
+            changed = True
+        if not changed:
+            return
+        self._refresh_line_cells(keys)        # see _set_colors
         self._state.dirty = True
         self.style_changed.emit()
 
     def _set_symbol(self, key: str, symbol) -> None:
-        if self._updating or not key:
+        self._set_symbols([key], symbol)
+
+    def _set_symbols(self, keys: Sequence[str], symbol) -> None:
+        if self._updating:
             return
-        self._state.styles.set_symbol(key, symbol or "")
+        changed = False
+        for key in keys:
+            if not key:
+                continue
+            self._state.styles.set_symbol(key, symbol or "")
+            changed = True
+        if not changed:
+            return
+        self._refresh_line_cells(keys)        # see _set_colors
         self._state.dirty = True
         self.style_changed.emit()
+
+    def _refresh_color_cells(self, keys: Sequence[str]) -> None:
+        """Put the swatches of `keys` back in step with the styles.
+
+        Only those rows: walking the whole table would be correct too, but
+        these tables run to one row per parameter and this is on the path of
+        every colour change.
+        """
+        table = (self.color_table
+                 if getattr(self, "color_table", None) is not None
+                 else getattr(self, "table", None))
+        if table is None:
+            return
+        wanted = set(key for key in keys if key)
+        if not wanted:
+            return
+        styles = self._state.styles
+        row_keys = getattr(self, "_color_row_keys", None) or self._row_keys
+        for row, key in enumerate(list(row_keys)):
+            if key not in wanted:
+                continue
+            swatch = table.cellWidget(row, 1)
+            if swatch is not None and hasattr(swatch, "set_color"):
+                swatch.set_color(styles.color_for(key))
+
+    def _refresh_line_cells(self, keys: Sequence[str]) -> None:
+        """The same for the dash and symbol combos.
+
+        Under _updating, because setting a combo's value emits its change
+        signal, and that signal is what called us.
+        """
+        table = getattr(self, "line_table", None)
+        if table is None:
+            return
+        wanted = set(key for key in keys if key)
+        if not wanted:
+            return
+        styles = self._state.styles
+        row_keys = getattr(self, "_line_row_keys", None) or []
+        was_updating = self._updating
+        self._updating = True
+        try:
+            for row, key in enumerate(list(row_keys)):
+                if key not in wanted:
+                    continue
+                dash = table.cellWidget(row, 1)
+                if dash is not None and hasattr(dash, "setCurrentText"):
+                    dash.setCurrentText(styles.dash_for(key))
+                symbol = table.cellWidget(row, 2)
+                if symbol is not None and hasattr(symbol, "findData"):
+                    symbol.setCurrentIndex(
+                        max(0, symbol.findData(styles.symbol_for(key))))
+        finally:
+            self._updating = was_updating
 
     def _on_mode_changed(self, index: int) -> None:
         if self._updating:

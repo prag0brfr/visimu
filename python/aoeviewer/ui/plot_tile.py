@@ -1367,7 +1367,7 @@ class PlotTile(pg.PlotWidget):
     def _style_key(self, tile: TileState, param: str, sim_key: str,
                    iso_label: str, file_id: str = "",
                    style_iso_label: str = "") -> str:
-        return curve_color_key(tile, param, sim_key, iso_label)
+        return curve_color_key(tile, param, sim_key, iso_label, file_id)
 
     def _legend_label(self, tile: TileState, param: str, file_name: str,
                       sim_id: str, iso_label: str, dash: str, symbol: str,
@@ -1597,8 +1597,15 @@ class PlotTile(pg.PlotWidget):
         # ISO value instead of fifty rows saying the same thing.
         deduplicate = not tile.legend_show_file and not tile.legend_show_sim
         seen_labels: Set[str] = set()
+        # The rows a legend actually shows, as (text, how the sample is drawn).
+        # The budget below is spent on these rather than on curves: two files
+        # of many runs each, coloured by file and labelled by file, are two
+        # rows however many runs they hold, and counting the curves instead
+        # spent the whole budget inside the first file and left the second
+        # with no row at all.
+        seen_rows: Set[tuple] = set()
+        hidden_row_keys: Set[tuple] = set()
         legend_rows = 0
-        hidden_rows = 0
 
         # (pen signature, legend name) -> plan. Curves that look identical are
         # painted together; see DrawGroup for why that is the difference between
@@ -1643,7 +1650,8 @@ class PlotTile(pg.PlotWidget):
 
                     style_iso_label = style_iso_labels.get((file_index, sim_index), "")
                     file_id = handle.path or file_name
-                    color_key = curve_color_key(tile, param, sim.key, iso_label)
+                    color_key = curve_color_key(tile, param, sim.key,
+                                                iso_label, file_id)
                     line_key = curve_line_key(
                         tile, param, sim.key, file_id, iso_label, style_iso_label)
                     if tile.style_mode != StyleMode.NONE:
@@ -1661,6 +1669,8 @@ class PlotTile(pg.PlotWidget):
                         symbol, style_iso_label
                     )
 
+                    marker = symbol or ("o" if tile.show_points else None)
+
                     show_in_legend = tile.show_legend
                     if show_in_legend and deduplicate:
                         if label in seen_labels:
@@ -1668,13 +1678,19 @@ class PlotTile(pg.PlotWidget):
                         else:
                             seen_labels.add(label)
                     if show_in_legend:
-                        if legend_rows >= MAX_LEGEND_ROWS:
+                        # A row this legend already has is not a second row,
+                        # whatever the mode: same text, same colour, same dash
+                        # and same marker is the same row drawn twice.
+                        row_key = (label, color, dash, width, marker,
+                                   styles.symbol_size)
+                        if row_key in seen_rows:
                             show_in_legend = False
-                            hidden_rows += 1
+                        elif legend_rows >= MAX_LEGEND_ROWS:
+                            show_in_legend = False
+                            hidden_row_keys.add(row_key)
                         else:
+                            seen_rows.add(row_key)
                             legend_rows += 1
-
-                    marker = symbol or ("o" if tile.show_points else None)
 
                     key = "{0}|{1}|{2}".format(file_index, sim_index, param)
                     entry = CurveEntry(x, y, label, style_key, key)
@@ -1734,6 +1750,9 @@ class PlotTile(pg.PlotWidget):
         self._adopt_groups(plot, previous_groups,
                            [plans[k] for k in order])
 
+        # Rows, not curves: the note has to count what the user would have
+        # seen, which is one row per distinct entry.
+        hidden_rows = len(hidden_row_keys)
         if hidden_rows and self._legend is not None:
             # Say what was left out, and say that it is a cap rather than
             # missing data: the curves those rows would have named are all
@@ -1977,8 +1996,11 @@ class PlotTile(pg.PlotWidget):
         for file_index, sim_index, file_name, sim, x, y, z in series:
             iso_label = iso_labels.get((file_index, sim_index), "")
             style_iso_label = style_iso_labels.get((file_index, sim_index), "")
-            file_id = file_name
-            color_key = curve_color_key(tile, tile.z_param, sim.key, iso_label)
+            handle = self._session.file(file_index)
+            file_id = (handle.path or file_name) if handle is not None \
+                else file_name
+            color_key = curve_color_key(tile, tile.z_param, sim.key,
+                                        iso_label, file_id)
             line_key = curve_line_key(
                 tile, tile.z_param, sim.key, file_id, iso_label, style_iso_label)
             if tile.style_mode != StyleMode.NONE:
@@ -3131,8 +3153,16 @@ class PlotTile(pg.PlotWidget):
             return
 
         self._autoscale_if_unlocked()
-        self._store_view_range()
-        tile.view_initialised = True
+        # Only a tile with something in it counts as framed. Fitting an empty
+        # one frames nothing, and recording that as "this tile has a view the
+        # user chose" is what stopped the first curve being fitted: the way
+        # to open PARAMS is to double-click the tile, double-clicking fits
+        # it, and on a fresh start the tile being double-clicked is empty. So
+        # the gesture that means "I am about to put something here" was the
+        # one that decided the something should keep the empty tile's frame.
+        if self._curves:
+            self._store_view_range()
+            tile.view_initialised = True
         self._resample_visible(force=True)
         # The fit is applied with range events suppressed, so that nothing
         # reacts to each of the several setXRange/setYRange calls it makes.
