@@ -44,6 +44,7 @@ class PlotToolbar(QWidget):
     tiles_changed = Signal()        # tile contents moved: redraw
     active_tile_changed = Signal(int)
     fit_requested = Signal()        # re-frame every tile
+    unlock_requested = Signal()     # drop every axis lock, then re-frame
 
     def __init__(self, state: AppState, theme: Theme, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -129,16 +130,22 @@ class PlotToolbar(QWidget):
 
         layout.addWidget(_separator())
 
-        for text, handler, tip in (
-            ("Copy", self._copy_tile, "Copy this tile's configuration"),
-            ("Cut", self._cut_tile, "Copy this tile and empty it"),
-            ("Paste", self._paste_tile, "Replace this tile with the copied one"),
-            ("Clear", self._clear_tile, "Empty this tile"),
+        # Symbols rather than the words, which cost about 210 px of a bar that
+        # also holds the page controls, the grid picker and the tile arrows.
+        # The tooltips still say the words, and these are the four symbols
+        # every other application uses for them.
+        self.tile_buttons = {}
+        for name, handler, tip in (
+            ("copy", self._copy_tile, "Copy this tile's configuration"),
+            ("cut", self._cut_tile, "Copy this tile and empty it"),
+            ("paste", self._paste_tile, "Replace this tile with the copied one"),
+            ("clear", self._clear_tile, "Empty this tile"),
         ):
-            button = QPushButton(text)
+            button = QToolButton()
             button.setToolTip(tip)
             button.clicked.connect(handler)
             layout.addWidget(button)
+            self.tile_buttons[name] = button
 
         layout.addWidget(_separator())
 
@@ -155,6 +162,15 @@ class PlotToolbar(QWidget):
             "Double-click one plot to fit just that one")
         self.fit_button.clicked.connect(self.fit_requested.emit)
         layout.addWidget(self.fit_button)
+
+        # Beside Fit, because it is Fit with the locks taken off first -- and
+        # that is the thing it is reached for: a page whose axes were pinned
+        # to compare two runs, and now will not show the next pair.
+        self.unlock_button = QToolButton()
+        self.unlock_button.setToolTip(
+            "Unlock every X and Y scale constraint on all tiles, then fit them")
+        self.unlock_button.clicked.connect(self.unlock_requested.emit)
+        layout.addWidget(self.unlock_button)
 
         layout.addStretch(1)
         self._apply_icons()
@@ -174,6 +190,10 @@ class PlotToolbar(QWidget):
         called from set_theme(), which the window calls for both.
         """
         self.fit_button.setIcon(icons.icon("fit", self._theme.text, px(14)))
+        self.unlock_button.setIcon(
+            icons.icon("unlock", self._theme.text, px(14)))
+        for name, button in self.tile_buttons.items():
+            button.setIcon(icons.icon(name, self._theme.text, px(14)))
 
     def refresh(self) -> None:
         self._updating = True

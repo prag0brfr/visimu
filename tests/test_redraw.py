@@ -21,7 +21,9 @@ edge cases than the drawing does.
 from __future__ import annotations
 
 import inspect
+import io
 import json
+import re
 import os
 import shutil
 import sys
@@ -2745,9 +2747,9 @@ class TestTheRailHoldsTabsAndNothingElse(unittest.TestCase):
         real = sidebar.VerticalTabButton
 
         class Counted(real):
-            def __init__(self, text, theme, parent=None):
+            def __init__(self, text, theme, parent=None, *args, **kwargs):
                 made.append(text)
-                real.__init__(self, text, theme, parent)
+                real.__init__(self, text, theme, parent, *args, **kwargs)
 
         sidebar.VerticalTabButton = Counted
         self.addCleanup(setattr, sidebar, "VerticalTabButton", real)
@@ -2767,6 +2769,316 @@ class TestTheRailHoldsTabsAndNothingElse(unittest.TestCase):
         # attribute asked of an instance, so an instance check would pass
         # against a rail that still had the button.
         self.assertFalse(hasattr(sidebar.TabRail, "theme_toggled"))
+
+
+class _Wheel:
+    """A wheel event: 120 units per notch, positive upwards, as Qt sends."""
+
+    def __init__(self, delta):
+        self._delta = delta
+        self.accepted = False
+
+    def angleDelta(self):
+        return qt_stubs.QPointF(0.0, float(self._delta))
+
+    def accept(self):
+        self.accepted = True
+
+
+class _Key:
+    """A key press, with no modifier unless one is given."""
+
+    def __init__(self, key, text="", modifiers=0):
+        self._key = key
+        self._text = text
+        self._modifiers = modifiers
+        self.accepted = False
+
+    def type(self):
+        from PySide6.QtCore import QEvent
+        return QEvent.Type.KeyPress
+
+    def key(self):
+        return self._key
+
+    def text(self):
+        return self._text
+
+    def modifiers(self):
+        return self._modifiers
+
+    def accept(self):
+        self.accepted = True
+
+
+class TestTheRailIsRearrangeableAndNavigable(unittest.TestCase):
+    """Four ways to reach a panel, and one to move it.
+
+    The thing being guarded is the split between position and identity: the
+    window addresses a panel by the index it was built with, and the rail is
+    free to show those indices in any order. Dragging a name about must never
+    change which panel an index means.
+    """
+
+    LABELS = ["DATA", "PARAMS", "COMPUTE", "ISO", "STYLE"]
+
+    def rail(self):
+        from aoeviewer.ui import sidebar
+        return sidebar.TabRail(self.LABELS, theme_module.theme_for(True))
+
+    def shown(self, rail):
+        """The labels in the layout, top to bottom -- what the user sees."""
+        return [button.text() for button in rail._layout.widgets()]
+
+    # ------------------------------------------------------------ ordering
+
+    def test_it_starts_in_the_order_it_was_given(self):
+        rail = self.rail()
+        self.assertEqual(rail.order(), self.LABELS)
+        self.assertEqual(self.shown(rail), self.LABELS)
+
+    def test_moving_a_name_moves_it_in_the_layout_too(self):
+        rail = self.rail()
+        self.assertTrue(rail.move(0, 2))
+        self.assertEqual(rail.order(),
+                         ["PARAMS", "COMPUTE", "DATA", "ISO", "STYLE"])
+        self.assertEqual(self.shown(rail), rail.order())
+
+    def test_a_move_that_goes_nowhere_is_not_a_change(self):
+        rail = self.rail()
+        self.assertFalse(rail.move(1, 1))
+        self.assertFalse(rail.move(0, -1))
+        self.assertFalse(rail.move(0, len(self.LABELS)))
+        self.assertEqual(rail.order(), self.LABELS)
+
+    def test_a_moved_name_still_selects_its_own_panel(self):
+        """The point of the whole split. COMPUTE is panel 2 wherever it sits."""
+        rail = self.rail()
+        seen = []
+        rail.tab_selected.connect(seen.append)
+        rail.move(2, 0)
+        compute = rail._buttons[2]
+        self.assertEqual(compute.text(), "COMPUTE")
+        compute.clicked.emit(False)
+        self.assertEqual(seen, [2])
+
+    def test_the_stretch_stays_at_the_bottom(self):
+        """Or the names would drift to the middle of the column after a drag."""
+        rail = self.rail()
+        rail.move(0, 4)
+        self.assertIsNone(rail._layout.items[-1])
+        self.assertEqual(rail._layout.items.count(None), 1)
+
+    def test_dragging_a_name_down_swaps_it_with_the_one_below(self):
+        rail = self.rail()
+        moved = rail._drag_step(rail._buttons[0], 1)
+        self.assertTrue(moved)
+        self.assertEqual(rail.order()[:2], ["PARAMS", "DATA"])
+
+    def test_dragging_past_the_end_does_nothing(self):
+        rail = self.rail()
+        self.assertFalse(rail._drag_step(rail._buttons[0], -1))
+        self.assertEqual(rail.order(), self.LABELS)
+
+    # ------------------------------------------------- order from a workspace
+
+    def test_an_order_from_a_workspace_is_applied(self):
+        rail = self.rail()
+        rail.set_order(["STYLE", "DATA"])
+        self.assertEqual(rail.order(),
+                         ["STYLE", "DATA", "PARAMS", "COMPUTE", "ISO"])
+
+    def test_a_name_this_version_does_not_have_is_ignored(self):
+        """An ALIAS tab in a workspace written by 2.2.x, for instance."""
+        rail = self.rail()
+        rail.set_order(["ALIAS", "STYLE", "DATA", 7, None])
+        self.assertEqual(rail.order(),
+                         ["STYLE", "DATA", "PARAMS", "COMPUTE", "ISO"])
+
+    def test_no_order_at_all_leaves_it_as_built(self):
+        rail = self.rail()
+        rail.set_order([])
+        self.assertEqual(rail.order(), self.LABELS)
+
+    # ---------------------------------------------------------- navigation
+
+    def test_stepping_walks_the_displayed_order_not_the_panel_numbers(self):
+        rail = self.rail()
+        rail.set_order(["STYLE", "DATA"])      # STYLE is panel 4, DATA panel 0
+        rail.set_current(4)
+        picked = []
+        rail.tab_selected.connect(picked.append)
+        rail.step(1)
+        self.assertEqual(picked, [0])
+        self.assertEqual(rail.current(), 0)
+
+    def test_stepping_stops_at_the_ends_rather_than_wrapping(self):
+        rail = self.rail()
+        rail.set_current(0)
+        picked = []
+        rail.tab_selected.connect(picked.append)
+        rail.step(-1)
+        self.assertEqual(picked, [])
+        self.assertEqual(rail.current(), 0)
+        rail.set_current(4)
+        rail.step(1)
+        self.assertEqual(picked, [])
+
+    def test_the_wheel_moves_one_tab_per_notch(self):
+        rail = self.rail()
+        rail.set_current(2)
+        rail.wheelEvent(_Wheel(-120))          # scrolled down
+        self.assertEqual(rail.current(), 3)
+        rail.wheelEvent(_Wheel(120))           # and back up
+        self.assertEqual(rail.current(), 2)
+
+    def test_the_arrow_keys_move_one_tab(self):
+        rail = self.rail()
+        rail.set_current(1)
+        rail.keyPressEvent(_Key(Qt.Key.Key_Down))
+        self.assertEqual(rail.current(), 2)
+        rail.keyPressEvent(_Key(Qt.Key.Key_Up))
+        self.assertEqual(rail.current(), 1)
+
+    def test_home_and_end_go_to_the_first_and_last(self):
+        rail = self.rail()
+        rail.set_current(2)
+        rail.keyPressEvent(_Key(Qt.Key.Key_End))
+        self.assertEqual(rail.current(), 4)
+        rail.keyPressEvent(_Key(Qt.Key.Key_Home))
+        self.assertEqual(rail.current(), 0)
+
+    def test_the_rail_takes_the_focus_and_its_buttons_do_not(self):
+        """The arrows are the rail's; a button holding the focus would eat
+        them one at a time."""
+        rail = self.rail()
+        self.assertEqual(rail.focus_policy, Qt.FocusPolicy.ClickFocus)
+        for button in rail._buttons:
+            self.assertEqual(button.focus_policy, Qt.FocusPolicy.NoFocus)
+
+    # ----------------------------------------------------------- shortcuts
+
+    def test_every_panel_has_a_letter_and_no_two_share_one(self):
+        from aoeviewer.ui import sidebar
+
+        letters = list(sidebar.SHORTCUTS.values())
+        self.assertEqual(sorted(letters), sorted(set(letters)), letters)
+        for label, letter in sidebar.SHORTCUTS.items():
+            self.assertEqual(len(letter), 1, label)
+
+    def test_the_letters_name_the_panels_the_window_builds(self):
+        """The two lists are written in different files; a panel renamed in
+        one and not the other would silently lose its shortcut."""
+        from aoeviewer.ui import sidebar
+
+        here = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(here, os.pardir, "python", "aoeviewer",
+                            "ui", "main_window.py")
+        body = io.open(path, encoding="utf-8").read()
+        start = body.index("self._panels = [")
+        end = body.index("]", start)
+        built = re.findall(r'\("([^"]+)",', body[start:end])
+        self.assertEqual(sorted(built), sorted(sidebar.SHORTCUTS))
+
+    def test_a_letter_finds_its_panel_whatever_the_order(self):
+        rail = self.rail()
+        rail.move(4, 0)
+        self.assertEqual(rail.panel_for_key("S"), 4)
+        self.assertEqual(rail.panel_for_key("s"), 4)
+        self.assertEqual(rail.panel_for_key("D"), 0)
+        self.assertEqual(rail.panel_for_key("Z"), -1)
+        self.assertEqual(rail.panel_for_key(""), -1)
+
+    def test_the_tooltip_says_the_letter(self):
+        rail = self.rail()
+        tip = rail._buttons[0].toolTip()
+        self.assertIn("D", tip)
+        self.assertIn("drag", tip.lower())
+
+
+class TestABareLetterOnlySelectsATabWhenNothingIsBeingTypedInto(
+        unittest.TestCase):
+    """The shortcut has to lose every argument against a text box.
+
+    A QShortcut on a plain letter wins against the focus widget, so typing a
+    page name would jump tabs instead of writing a "d". The filter reads the
+    key before anyone else and hands it straight back whenever something is
+    being typed into, a modifier is held, or a dialog is up.
+    """
+
+    def setUp(self):
+        from aoeviewer.ui import sidebar
+
+        self.sidebar = sidebar
+        self.rail = sidebar.TabRail(["DATA", "PARAMS", "STYLE"],
+                                    theme_module.theme_for(True))
+        self.picked = []
+        self.filter = sidebar.TabKeyFilter(self.rail, self.picked.append)
+        self.focus = None
+        self.modal = None
+        app = qt_stubs.QApplication
+        self.addCleanup(setattr, app, "focusWidget", app.focusWidget)
+        self.addCleanup(setattr, app, "activeModalWidget",
+                        app.activeModalWidget)
+        app.focusWidget = staticmethod(lambda: self.focus)
+        app.activeModalWidget = staticmethod(lambda: self.modal)
+
+    def press(self, text, modifiers=0):
+        event = _Key(0, text, modifiers)
+        taken = self.filter.eventFilter(None, event)
+        return taken
+
+    def test_a_letter_selects_its_panel(self):
+        self.assertTrue(self.press("s"))
+        self.assertEqual(self.picked, [2])
+
+    def test_a_letter_no_tab_claims_is_left_alone(self):
+        self.assertFalse(self.press("q"))
+        self.assertEqual(self.picked, [])
+
+    def test_a_letter_typed_into_a_line_edit_is_left_alone(self):
+        self.focus = qt_stubs.QLineEdit()
+        self.assertFalse(self.press("s"))
+        self.assertEqual(self.picked, [])
+
+    def test_a_letter_typed_into_an_editable_combo_is_left_alone(self):
+        combo = qt_stubs.QComboBox()
+        combo.setEditable(True)
+        self.focus = combo
+        self.assertFalse(self.press("s"))
+
+    def test_a_letter_over_a_list_still_selects(self):
+        """A list takes letters for its own type-ahead search, which is
+        exactly why this has to be an application filter -- but a list is not
+        something being typed *into*, so the tab wins."""
+        listed = qt_stubs.QListWidget()
+        # The stub invents attributes, and an invented answer is truthy; the
+        # real QListWidget does not take typed text.
+        listed.testAttribute = lambda _attribute: False
+        self.focus = listed
+        self.assertTrue(self.press("s"))
+        self.assertEqual(self.picked, [2])
+
+    def test_a_modifier_belongs_to_the_window_commands(self):
+        control = Qt.KeyboardModifier.ControlModifier
+        self.assertFalse(self.press("s", control))
+        self.assertEqual(self.picked, [])
+
+    def test_a_dialog_owns_the_keyboard_while_it_is_up(self):
+        self.modal = qt_stubs.QWidget()
+        self.assertFalse(self.press("s"))
+
+    def test_a_widget_marked_as_taking_text_is_respected(self):
+        """The general answer, for anything custom: Qt marks such a widget
+        itself, which is more durable than a list of classes."""
+        widget = qt_stubs.QWidget()
+        widget.testAttribute = lambda _attribute: True
+        self.focus = widget
+        self.assertFalse(self.press("s"))
+
+    def test_a_key_with_no_text_is_not_a_shortcut(self):
+        self.assertFalse(self.press(""))
+        self.assertFalse(self.press(" "))
 
 
 class TestTheColourSwatchKeepsItsColourToItself(unittest.TestCase):
@@ -5858,17 +6170,22 @@ class TestTheZoomHintNamesAllThree(unittest.TestCase):
 class _DragEvent:
     """A pyqtgraph mouse-drag event, as far as the view box reads one."""
 
-    def __init__(self, origin, current, finish=False, button=None):
+    def __init__(self, origin, current, finish=False, button=None,
+                 modifiers=0):
         from PySide6.QtCore import Qt
 
         self._origin = origin
         self._current = current
         self._finish = finish
         self._button = Qt.MouseButton.LeftButton if button is None else button
+        self._modifiers = modifiers
         self.accepted = False
 
     def button(self):
         return self._button
+
+    def modifiers(self):
+        return self._modifiers
 
     def buttonDownPos(self, _button=None):
         return self._origin
@@ -5931,9 +6248,10 @@ class TestTheViewBoxActsOnTheDrag(unittest.TestCase):
     def point(self, x, y):
         return qt_stubs.QPointF(x, y)
 
-    def drag(self, box, origin, current, finish=True, button=None):
+    def drag(self, box, origin, current, finish=True, button=None,
+             modifiers=0):
         event = _DragEvent(self.point(*origin), self.point(*current),
-                           finish=finish, button=button)
+                           finish=finish, button=button, modifiers=modifiers)
         box.mouseDragEvent(event)
         return event
 
@@ -6007,19 +6325,804 @@ class TestTheViewBoxActsOnTheDrag(unittest.TestCase):
         self.assertEqual(box.delegated_drags[0][1], 0,
                          "the axis was not passed on with the drag")
 
-    def test_a_right_drag_is_left_to_pyqtgraph(self):
+    def test_a_right_drag_zooms_here_and_asks_the_others_to_follow(self):
+        """It used to be pyqtgraph's, where it scaled the view. It is now the
+        same directional zoom as the left button, with the x it settles on
+        handed to every other tile."""
+        from PySide6.QtCore import Qt
+
+        box = _directional_box()
+        shared = []
+        box.shared_x_zoom = lambda low, high: shared.append((low, high))
+        self.drag(box, (100, 150), (300, 154),
+                  button=Qt.MouseButton.RightButton)
+        self.assertEqual(len(box.zoomed), 1, "it did not zoom its own tile")
+        # Nothing was handed back to pyqtgraph: the attribute only exists
+        # once a drag has been delegated.
+        self.assertFalse(box.__dict__.get("delegated_drags"))
+        self.assertEqual(shared, [(100.0, 300.0)])
+
+    def test_ctrl_with_the_left_button_also_asks_the_others_to_follow(self):
+        from PySide6.QtCore import Qt
+
+        box = _directional_box()
+        shared = []
+        box.shared_x_zoom = lambda low, high: shared.append((low, high))
+        self.drag(box, (100, 150), (300, 154),
+                  modifiers=Qt.KeyboardModifier.ControlModifier)
+        self.assertEqual(len(box.zoomed), 1)
+        self.assertEqual(shared, [(100.0, 300.0)])
+
+    def test_a_plain_left_zoom_stays_in_its_own_tile(self):
+        box = _directional_box()
+        shared = []
+        box.shared_x_zoom = lambda low, high: shared.append((low, high))
+        self.drag(box, (100, 150), (300, 154))
+        self.assertEqual(len(box.zoomed), 1)
+        self.assertEqual(shared, [], "a plain zoom reached the other tiles")
+
+    def test_an_area_zoom_shares_its_x_as_well(self):
+        """Whatever the shape of the drag. An area zoom hands over the x it
+        took and leaves every other tile's y alone."""
+        from PySide6.QtCore import Qt
+
+        box = _directional_box()
+        shared = []
+        box.shared_x_zoom = lambda low, high: shared.append((low, high))
+        self.drag(box, (100, 50), (300, 250),
+                  button=Qt.MouseButton.RightButton)
+        rect = box.zoomed[0]
+        self.assertEqual((rect.top(), rect.bottom()), (50.0, 250.0))
+        self.assertEqual(shared, [(100.0, 300.0)])
+
+    def test_a_backwards_drag_hands_over_a_range_the_right_way_round(self):
+        from PySide6.QtCore import Qt
+
+        box = _directional_box()
+        shared = []
+        box.shared_x_zoom = lambda low, high: shared.append((low, high))
+        self.drag(box, (300, 150), (100, 154),
+                  button=Qt.MouseButton.RightButton)
+        self.assertEqual(shared, [(100.0, 300.0)])
+
+    def test_a_right_click_that_was_never_a_drag_is_left_alone(self):
+        """Or the view box's own context menu would stop opening."""
+        from PySide6.QtCore import Qt
+
+        box = _directional_box()
+        shared = []
+        box.shared_x_zoom = lambda low, high: shared.append((low, high))
+        event = self.drag(box, (100, 100), (101, 101),
+                          button=Qt.MouseButton.RightButton)
+        self.assertEqual(box.zoomed, [])
+        self.assertEqual(shared, [])
+        self.assertFalse(event.accepted)
+
+    def test_nothing_is_shared_while_the_drag_is_still_going(self):
+        from PySide6.QtCore import Qt
+
+        box = _directional_box()
+        shared = []
+        box.shared_x_zoom = lambda low, high: shared.append((low, high))
+        self.drag(box, (100, 150), (300, 154), finish=False,
+                  button=Qt.MouseButton.RightButton)
+        self.assertEqual(shared, [])
+
+    def test_a_box_nobody_wired_up_does_not_raise(self):
+        """The callback is set by the tile; a box built without one still
+        zooms."""
         from PySide6.QtCore import Qt
 
         box = _directional_box()
         self.drag(box, (100, 150), (300, 154),
                   button=Qt.MouseButton.RightButton)
-        self.assertEqual(box.zoomed, [])
-        self.assertEqual(len(box.delegated_drags), 1)
+        self.assertEqual(len(box.zoomed), 1)
 
     def test_the_event_is_accepted_so_nothing_else_handles_it(self):
         box = _directional_box()
         event = self.drag(box, (100, 150), (300, 154))
         self.assertTrue(event.accepted)
+
+
+class _FakeGrid:
+    """Just enough grid to watch what the window asks of its tiles."""
+
+    class _Tile:
+        def __init__(self, parent):
+            self._parent = parent
+
+        def apply_mouse_mode(self):
+            self._parent.mouse_modes_applied += 1
+
+    def __init__(self, count=2):
+        self.mouse_modes_applied = 0
+        self.tiles = [self._Tile(self) for _ in range(count)]
+
+
+class _DiffSession(_DrawSession):
+    """Two files, with channels a test can predict.
+
+    TIME is one grid in file A and a coarser, later one in file B, which is
+    the case the interpolation exists for: two runs recorded at different
+    instants, differenced anyway.
+    """
+
+    parameters = ["TIME", "ALT", "MACH"]
+
+    def __init__(self):
+        super().__init__()
+        self.files = [_FileHandle(0, "flight_a.aoe", ["R1", "R2"]),
+                      _FileHandle(1, "flight_b.aoe", ["S1"])]
+        self.reads = []
+
+    @property
+    def file_count(self):
+        return len(self.files)
+
+    def file(self, index):
+        if 0 <= index < len(self.files):
+            return self.files[index]
+        return None
+
+    def channel(self, file_index, sim_index, name):
+        self.reads.append((file_index, sim_index, name))
+        if name == "TIME":
+            if file_index == 0:
+                return np.arange(0.0, 10.0, 1.0, dtype=np.float32)
+            # Coarser and starting later: overlap is 2..8.
+            return np.arange(2.0, 9.0, 2.0, dtype=np.float32)
+        if name == "ALT":
+            if file_index == 0:
+                # 100, 110, 120, ... one per second
+                return np.arange(100.0, 200.0, 10.0, dtype=np.float32)
+            # 200 at t=2, rising 10 per second, so 20 per sample here
+            return np.array([200.0, 220.0, 240.0, 260.0], dtype=np.float32)
+        if name == "MACH":
+            if file_index == 1:
+                return np.array([], dtype=np.float32)      # not in this file
+            return np.full(10, 0.8, dtype=np.float32)
+        return np.array([], dtype=np.float32)
+
+    def iso_values(self, _file, _name):
+        return np.array([], dtype=np.float32)
+
+    def iso_distinct(self, _name):
+        return np.array([], dtype=np.float32)
+
+    def format_value(self, value):
+        return "{0:g}".format(value)
+
+
+class TestATileDrawsTheDifferenceBetweenTwoRuns(unittest.TestCase):
+    """DIFF: one channel, two runs, one curve.
+
+    The arithmetic is the part that has to be right. The two runs keep their
+    own instants, so the difference is taken on A's x with B read at those x
+    by interpolation, over the stretch of x the two share -- outside it there
+    is nothing to subtract, and extrapolating would draw a difference that
+    was never measured.
+    """
+
+    def tile(self, param="ALT", a=(0, 0), b=(1, 0)):
+        session = _DiffSession()
+        tile = make_drawable_tile(session)
+        state = tile._state
+        state.tile.x_param = "TIME"
+        state.tile.diff_param = param
+        state.tile.diff_a = a
+        state.tile.diff_b = b
+        tile.rebuild()
+        return tile
+
+    def curve(self, tile):
+        self.assertEqual(len(tile._curves), 1, tile._curves)
+        return list(tile._curves.values())[0]
+
+    def test_it_draws_one_curve(self):
+        tile = self.tile()
+        entry = self.curve(tile)
+        self.assertTrue(entry.curve_key.startswith("diff|"))
+
+    def test_the_difference_is_right(self):
+        """A is 100 + 10t. B interpolates to 200 + 10(t - 2) = 180 + 10t.
+        So A - B is -80 everywhere the two overlap."""
+        entry = self.curve(self.tile())
+        self.assertTrue(np.allclose(entry.y, -80.0), entry.y)
+
+    def test_it_covers_only_the_x_the_two_share(self):
+        """A runs 0..9, B runs 2..8. Outside that there is nothing to
+        subtract."""
+        entry = self.curve(self.tile())
+        self.assertEqual((float(entry.x[0]), float(entry.x[-1])), (2.0, 8.0))
+
+    def test_it_keeps_the_reference_run_own_instants(self):
+        """A's x, not a resampled grid: the difference is reported where it
+        was measured."""
+        entry = self.curve(self.tile())
+        self.assertTrue(np.allclose(entry.x, np.arange(2.0, 9.0, 1.0)),
+                        entry.x)
+
+    def test_the_curve_says_which_runs_and_which_files(self):
+        entry = self.curve(self.tile())
+        self.assertIn("ALT", entry.label)
+        self.assertIn("flight_a.aoe/R1", entry.label)
+        self.assertIn("flight_b.aoe/S1", entry.label)
+
+    def test_two_runs_of_one_file_are_named_without_the_file(self):
+        entry = self.curve(self.tile(a=(0, 0), b=(0, 1)))
+        self.assertNotIn("flight_a.aoe", entry.label)
+        self.assertIn("R1", entry.label)
+        self.assertIn("R2", entry.label)
+
+    def test_two_runs_of_one_file_difference_to_zero_here(self):
+        """The stub gives both runs of a file the same channel, so this is a
+        check on the plumbing rather than on the data."""
+        entry = self.curve(self.tile(a=(0, 0), b=(0, 1)))
+        self.assertTrue(np.allclose(entry.y, 0.0))
+
+    # --------------------------------------------------- when it cannot draw
+
+    def test_a_channel_one_run_does_not_carry_draws_nothing(self):
+        tile = self.tile(param="MACH", a=(0, 0), b=(1, 0))
+        self.assertEqual(tile._curves, {})
+
+    def test_the_same_run_twice_is_not_a_difference(self):
+        tile = self.tile(a=(0, 1), b=(0, 1))
+        self.assertEqual(tile._curves, {})
+        self.assertFalse(tile.tile_state.is_diff())
+
+    def test_no_second_run_is_not_a_difference(self):
+        tile = self.tile(b=(-1, -1))
+        self.assertEqual(tile._curves, {})
+
+    def test_no_parameter_is_not_a_difference(self):
+        tile = self.tile(param="")
+        self.assertEqual(tile._curves, {})
+
+    # ------------------------------------------------------- how it behaves
+
+    def test_the_ticked_parameters_are_left_undrawn(self):
+        """DIFF is the more specific instruction: a tile differencing is not
+        also drawing whatever PARAMS has ticked."""
+        session = _DiffSession()
+        tile = make_drawable_tile(session)
+        state = tile._state
+        state.set_selected(0, 0, True)
+        state.tile.x_param, state.tile.y_params = "TIME", ["ALT", "MACH"]
+        state.tile.diff_param = "ALT"
+        state.tile.diff_a, state.tile.diff_b = (0, 0), (1, 0)
+        tile.rebuild()
+        self.assertEqual(len(tile._curves), 1)
+
+    def test_a_tile_differencing_is_not_empty(self):
+        """It carries its own channel, so it needs no Y parameter."""
+        state = AppState()
+        state.tile.x_param = "TIME"
+        state.tile.diff_param = "ALT"
+        state.tile.diff_a, state.tile.diff_b = (0, 0), (1, 0)
+        self.assertFalse(state.tile.is_empty())
+        self.assertTrue(state.tile.is_diff())
+
+    def test_it_reads_four_channels_and_no_more(self):
+        """Two x and two y. A diff of a thousand-run file must not walk the
+        file."""
+        session = _DiffSession()
+        tile = make_drawable_tile(session)
+        state = tile._state
+        state.tile.x_param = "TIME"
+        state.tile.diff_param = "ALT"
+        state.tile.diff_a, state.tile.diff_b = (0, 0), (1, 0)
+        session.reads.clear()
+        tile.rebuild()
+        self.assertEqual(sorted(set(session.reads)),
+                         sorted([(0, 0, "TIME"), (0, 0, "ALT"),
+                                 (1, 0, "TIME"), (1, 0, "ALT")]))
+
+    def test_the_title_says_what_it_is(self):
+        from aoeviewer.model import tile_title
+
+        state = AppState()
+        state.tile.x_param = "TIME"
+        state.tile.diff_param = "ALT"
+        state.tile.diff_a, state.tile.diff_b = (0, 0), (1, 0)
+        title = tile_title(state.tile)
+        self.assertIn("ALT", title)
+        self.assertIn("TIME", title)
+
+    def test_it_is_fitted_when_it_first_becomes_a_difference(self):
+        """A difference occupies a completely different range from the
+        channel it came from, so the view the curves left behind is no use."""
+        tile = self.tile()
+        self.assertTrue(tile.tile_state.view_initialised)
+        state = tile.tile_state
+        self.assertLess(state.y_min, 0.0)
+
+
+class TestTheDiffPanelChoices(unittest.TestCase):
+    """Choosing a parameter, two runs and the x axis, all from this panel.
+
+    The runs are the part that broke. Item data goes through a QVariant, and a
+    Python tuple does not come back out of one comparing equal to the tuple
+    that went in -- so findData reported "not in the list" for a run that was
+    in it, and every refresh reset the box to "--". The runs could not be
+    chosen at all.
+    """
+
+    def panel(self):
+        panel = object.__new__(panels.DiffPanel)
+        panel._session = _DiffSession()
+        panel._state = AppState()
+        panel._updating = False
+        panel.x_combo = qt_stubs.QComboBox()
+        panel.param_combo = qt_stubs.QComboBox()
+        panel.a_combo = qt_stubs.QComboBox()
+        panel.b_combo = qt_stubs.QComboBox()
+        panel.tile_label = qt_stubs.QLabel()
+        panel.state_label = qt_stubs.QLabel()
+        panel.tile_changed = qt_stubs.Signal().__get__(panel)
+        panel.refresh()
+        return panel
+
+    def choose(self, panel, x="TIME", param="ALT", a=(0, 0), b=(1, 0)):
+        panel.x_combo.setCurrentIndex(panel.x_combo.findData(x))
+        panel._on_x_changed()
+        panel.param_combo.setCurrentIndex(panel.param_combo.findData(param))
+        panel.a_combo.setCurrentIndex(
+            panel._position_of(panel._run_entries, a))
+        panel.b_combo.setCurrentIndex(
+            panel._position_of(panel._run_entries, b))
+        panel._on_changed()
+        return panel._state.tile
+
+    # ------------------------------------------------------------- the runs
+
+    def test_every_run_of_every_file_is_offered(self):
+        """Including runs nothing has ticked in DATA."""
+        panel = self.panel()
+        self.assertEqual(len(panel._run_entries), 4)   # "--" plus three runs
+        labels = [label for label, _run in panel._run_entries]
+        self.assertIn("flight_a.aoe  /  R1", labels)
+        self.assertIn("flight_b.aoe  /  S1", labels)
+
+    def test_choosing_two_runs_reaches_the_tile(self):
+        tile = self.choose(self.panel())
+        self.assertEqual(tile.diff_a, (0, 0))
+        self.assertEqual(tile.diff_b, (1, 0))
+        self.assertTrue(tile.is_diff())
+
+    def test_the_choice_survives_a_refresh(self):
+        """The bug. A refresh follows every change -- the plots are redrawn
+        and the panels catch up -- so a choice that does not survive one
+        cannot be made at all."""
+        panel = self.panel()
+        self.choose(panel)
+        panel.refresh()
+        self.assertEqual(panel._run_of(panel.a_combo), (0, 0))
+        self.assertEqual(panel._run_of(panel.b_combo), (1, 0))
+        self.assertEqual(panel._state.tile.diff_a, (0, 0))
+
+    def test_a_run_is_found_by_value_and_not_by_identity(self):
+        panel = self.panel()
+        self.assertEqual(panel._position_of(panel._run_entries, (1, 0)), 3)
+        self.assertEqual(panel._position_of(panel._run_entries, [1, 0]), 3)
+        self.assertEqual(panel._position_of(panel._run_entries, (9, 9)), 0)
+
+    def test_clearing_puts_the_tile_back(self):
+        panel = self.panel()
+        self.choose(panel)
+        panel._clear()
+        tile = panel._state.tile
+        self.assertFalse(tile.is_diff())
+        self.assertEqual(tile.diff_a, panel.NONE_RUN)
+
+    # ------------------------------------------------------------ the x axis
+
+    def test_the_x_axis_can_be_chosen_here(self):
+        """Without going to PARAMS for it."""
+        panel = self.panel()
+        tile = self.choose(panel, x="MACH")
+        self.assertEqual(tile.x_param, "MACH")
+
+    def test_it_is_the_same_field_params_writes(self):
+        panel = self.panel()
+        panel._state.tile.x_param = "MACH"
+        panel.refresh()
+        self.assertEqual(panel.x_combo.currentData(), "MACH")
+
+    def test_changing_the_x_axis_asks_for_a_redraw(self):
+        panel = self.panel()
+        seen = []
+        panel.tile_changed.connect(lambda: seen.append(1))
+        self.choose(panel, x="MACH")
+        self.assertTrue(seen)
+
+    def test_a_new_x_axis_frees_the_frame(self):
+        """A different x is a different plot, so the frame it had describes
+        nothing."""
+        panel = self.panel()
+        panel._state.tile.view_initialised = True
+        self.choose(panel, x="MACH")
+        self.assertFalse(panel._state.tile.view_initialised)
+
+    def test_choosing_the_x_it_already_has_changes_nothing(self):
+        panel = self.panel()
+        panel._state.tile.x_param = "TIME"
+        panel._state.tile.view_initialised = True
+        panel.refresh()
+        panel._on_x_changed()
+        self.assertTrue(panel._state.tile.view_initialised)
+
+    # ------------------------------------------------------------ what it says
+
+    def test_it_says_what_is_missing(self):
+        panel = self.panel()
+        tile = panel._state.tile
+        self.assertIn("X axis", panel._describe(tile))
+        tile.x_param = "TIME"
+        self.assertIn("parameter", panel._describe(tile))
+        tile.diff_param = "ALT"
+        self.assertIn("two runs", panel._describe(tile))
+        tile.diff_a = tile.diff_b = (0, 0)
+        self.assertIn("same run", panel._describe(tile))
+        tile.diff_b = (1, 0)
+        self.assertIn("Drawing the difference", panel._describe(tile))
+
+
+class TestTheDiffSurvivesAWorkspaceRoundTrip(unittest.TestCase):
+    def test_it_is_written_and_read_back(self):
+        state = AppState()
+        state.tile.x_param = "TIME"
+        state.tile.diff_param = "ALT"
+        state.tile.diff_a, state.tile.diff_b = (0, 1), (1, 0)
+
+        from aoeviewer.model import TileState
+
+        copy = TileState.from_dict(state.tile.to_dict())
+        self.assertEqual(copy.diff_param, "ALT")
+        self.assertEqual(copy.diff_a, (0, 1))
+        self.assertEqual(copy.diff_b, (1, 0))
+        self.assertTrue(copy.is_diff())
+
+    def test_a_workspace_without_one_opens_as_no_difference(self):
+        """Every workspace written before 2.3.0."""
+        from aoeviewer.model import TileState
+
+        tile = TileState.from_dict({"x_param": "TIME", "y_params": ["ALT"]})
+        self.assertFalse(tile.is_diff())
+        self.assertEqual(tile.diff_a, (-1, -1))
+
+    def test_a_malformed_run_reads_as_no_difference(self):
+        from aoeviewer.model import TileState
+
+        tile = TileState.from_dict({"x_param": "TIME", "diff_param": "ALT",
+                                    "diff_a": "nonsense", "diff_b": [1]})
+        self.assertEqual(tile.diff_a, (-1, -1))
+        self.assertEqual(tile.diff_b, (-1, -1))
+        self.assertFalse(tile.is_diff())
+
+
+class TestAFreedAxisFitsOnTheFirstTry(unittest.TestCase):
+    """setLimits is a hard bound the *view box* keeps, not the tile.
+
+    So it outlives the lock that set it. Clearing the lock and fitting in the
+    same breath meant the fit was computed correctly and then clamped straight
+    back to the range just released -- and the second click worked, because by
+    then something had got round to clearing the bound. Which is why the
+    button had to be pressed twice.
+    """
+
+    def tile(self):
+        session = _DrawSession()
+        tile = make_drawable_tile(session)
+        state = tile._state
+        state.set_selected(0, 0, True)
+        state.tile.x_param, state.tile.y_params = "TIME", ["ALT"]
+        tile.rebuild()
+        return tile
+
+    def locked_tile(self, lock_x=True, lock_y=True):
+        """A tile held to a narrow window, as a constraint leaves it."""
+        tile = self.tile()
+        state = tile.tile_state
+        state.lock_x, state.lock_y = lock_x, lock_y
+        state.x_min, state.x_max = 2.0, 4.0
+        state.y_min, state.y_max = 2.0, 4.0
+        tile.autoscale()                 # applies the lock, and its bounds
+        return tile
+
+    def bounds(self, tile):
+        return dict(tile.getPlotItem().getViewBox().__dict__.get("limits") or {})
+
+    def test_the_lock_leaves_a_bound_on_the_view_box(self):
+        """The premise. Without this the rest of the class proves nothing."""
+        bounds = self.bounds(self.locked_tile())
+        self.assertEqual((bounds.get("xMin"), bounds.get("xMax")), (2.0, 4.0))
+        self.assertEqual((bounds.get("yMin"), bounds.get("yMax")), (2.0, 4.0))
+
+    def test_one_fit_is_enough_on_y(self):
+        """The reported bug, on the axis it was reported on."""
+        tile = self.locked_tile()
+        state = tile.tile_state
+        state.lock_x = state.lock_y = False
+        tile.autoscale()
+
+        written = dict((axis, (low, high)) for axis, low, high
+                       in tile.getPlotItem().range_writes)
+        self.assertIn("y", written)
+        low, high = written["y"]
+        self.assertLess(low, 2.0, "y was clamped to the released window")
+        self.assertGreater(high, 4.0, "y was clamped to the released window")
+
+    def test_one_fit_is_enough_on_x(self):
+        tile = self.locked_tile()
+        state = tile.tile_state
+        state.lock_x = state.lock_y = False
+        tile.autoscale()
+        written = dict((axis, (low, high)) for axis, low, high
+                       in tile.getPlotItem().range_writes)
+        low, high = written["x"]
+        self.assertLess(low, 2.0)
+        self.assertGreater(high, 4.0)
+
+    def test_a_second_fit_changes_nothing_more(self):
+        """What "it works on the second click" looked like. The two fits now
+        agree, which is the whole of the fix."""
+        tile = self.locked_tile()
+        tile.tile_state.lock_x = tile.tile_state.lock_y = False
+
+        # From here, because the writes the lock itself made are history.
+        tile.getPlotItem().range_writes.clear()
+        tile.autoscale()
+        first = list(tile.getPlotItem().range_writes)
+        tile.getPlotItem().range_writes.clear()
+        tile.autoscale()
+        second = list(tile.getPlotItem().range_writes)
+        self.assertEqual(first, second)
+
+    def test_the_bounds_are_gone_afterwards(self):
+        tile = self.locked_tile()
+        tile.tile_state.lock_x = tile.tile_state.lock_y = False
+        tile.autoscale()
+        bounds = self.bounds(tile)
+        for key in ("xMin", "xMax", "yMin", "yMax", "maxXRange", "maxYRange"):
+            self.assertIsNone(bounds.get(key), key)
+
+    def test_a_y_lock_alone_still_frees_x_on_the_first_fit(self):
+        """Only y was constrained, so only y stays put."""
+        tile = self.locked_tile(lock_x=False, lock_y=True)
+        tile.tile_state.lock_y = False
+        tile.autoscale()
+        written = dict((axis, (low, high)) for axis, low, high
+                       in tile.getPlotItem().range_writes)
+        self.assertLess(written["y"][0], 2.0)
+
+    def test_an_axis_still_locked_is_still_held(self):
+        """The fix must not free an axis the user has not released."""
+        tile = self.locked_tile()
+        tile.tile_state.lock_y = False          # x stays locked
+        tile.autoscale()
+        bounds = self.bounds(tile)
+        self.assertEqual((bounds.get("xMin"), bounds.get("xMax")), (2.0, 4.0))
+        self.assertIsNone(bounds.get("yMin"))
+        written = dict((axis, (low, high)) for axis, low, high
+                       in tile.getPlotItem().range_writes)
+        self.assertEqual(written["x"], (2.0, 4.0))
+
+    def test_the_mouse_mode_clears_a_bound_a_lock_left_behind(self):
+        """The other half: this ran only while something was still locked, so
+        an unlocked tile kept the bound until a fit happened to clear it."""
+        tile = self.locked_tile()
+        tile.tile_state.lock_x = tile.tile_state.lock_y = False
+        tile.apply_mouse_mode()
+        bounds = self.bounds(tile)
+        self.assertIsNone(bounds.get("xMin"))
+        self.assertIsNone(bounds.get("yMin"))
+
+
+class TestUnlockingEveryScale(unittest.TestCase):
+    """One button for "stop holding the axes still".
+
+    It reaches every page, not just the one on screen: the locks were set to
+    make a set of plots comparable, and a page left pinned behind this one is
+    the next thing to look wrong.
+    """
+
+    def window(self):
+        from aoeviewer.ui import main_window as mw
+
+        window = object.__new__(mw.MainWindow)
+        window.state = AppState()
+        window.status_label = qt_stubs.QLabel()
+        window.grid = _FakeGrid()
+        window.autoscale_all = lambda: setattr(window, "fitted", True)
+        window._refresh_panel = lambda _panel: None
+        window.scale_panel = None
+        window.fitted = False
+        return window
+
+    def test_every_lock_on_every_page_is_dropped(self):
+        window = self.window()
+        state = window.state
+        state.pages.append(type(state.pages[0])())
+        for page in state.pages:
+            for tile in page.tiles:
+                tile.lock_x = True
+                tile.lock_y = True
+                tile.x_min, tile.x_max = 3.0, 9.0
+
+        window.unlock_all_scales()
+
+        for page in state.pages:
+            for tile in page.tiles:
+                self.assertFalse(tile.lock_x)
+                self.assertFalse(tile.lock_y)
+
+    def test_the_limits_themselves_are_kept(self):
+        """They are what the SCALE boxes show, and a lock put back on should
+        return to the numbers it had rather than to zero and one."""
+        window = self.window()
+        tile = window.state.pages[0].tiles[0]
+        tile.lock_x = True
+        tile.x_min, tile.x_max = 3.0, 9.0
+        window.unlock_all_scales()
+        self.assertEqual((tile.x_min, tile.x_max), (3.0, 9.0))
+
+    def test_it_fits_afterwards(self):
+        """An unlock on its own changes nothing on screen -- the axes stay
+        where the lock was holding them -- so the button would read as doing
+        nothing."""
+        window = self.window()
+        window.state.pages[0].tiles[0].lock_x = True
+        window.unlock_all_scales()
+        self.assertTrue(window.fitted)
+
+    def test_the_tiles_are_told_so_the_mouse_comes_back(self):
+        """A lock disables the mouse on that axis, so re-framing alone would
+        leave the axis unpannable."""
+        window = self.window()
+        window.state.pages[0].tiles[0].lock_x = True
+        window.unlock_all_scales()
+        self.assertEqual(window.grid.mouse_modes_applied, len(window.grid.tiles))
+
+    def test_it_says_so_even_when_nothing_was_locked(self):
+        window = self.window()
+        window.unlock_all_scales()
+        self.assertIn("fitted", window.status_label.text().lower())
+        self.assertFalse(window.state.dirty,
+                         "nothing changed, so nothing is unsaved")
+
+    def test_it_counts_what_it_unlocked(self):
+        window = self.window()
+        window.state.pages[0].tiles[0].lock_y = True
+        window.unlock_all_scales()
+        self.assertIn("1 tile", window.status_label.text())
+        self.assertTrue(window.state.dirty)
+
+    # ------------------------------------------- the variable-wide constraints
+
+    def test_a_variable_wide_constraint_is_released_too(self):
+        """The bug this exists for. A constraint declared for a parameter does
+        not live on the tiles: it lives on the application state, and
+        apply_parameter_defaults() re-imposes it on any tile that later
+        acquires that parameter. Clearing only the tiles left the button
+        looking as though it had not worked -- which it had not."""
+        window = self.window()
+        state = window.state
+        state.global_x_limits["TIME"] = (0.0, 60.0)
+        state.global_y_limits["ALT"] = (0.0, 13000.0)
+
+        window.unlock_all_scales()
+
+        self.assertEqual(state.global_x_limits, {})
+        self.assertEqual(state.global_y_limits, {})
+
+    def test_a_parameter_added_afterwards_is_not_re_locked(self):
+        """The user's sequence: constrain X globally, press Unlock, then put a
+        parameter on an empty tile."""
+        window = self.window()
+        state = window.state
+        state.global_x_limits["TIME"] = (0.0, 60.0)
+        state.global_y_limits["ALT"] = (0.0, 13000.0)
+        window.unlock_all_scales()
+
+        fresh = state.pages[0].tiles[1]
+        fresh.x_param, fresh.y_params = "TIME", ["ALT"]
+        state.apply_global_limits(fresh)
+
+        self.assertFalse(fresh.lock_x, "X was constrained again")
+        self.assertFalse(fresh.lock_y, "Y was constrained again")
+
+    def test_without_the_fix_the_parameter_would_come_back_locked(self):
+        """The same sequence with the constraint left in place, so the test
+        above is known to be testing something."""
+        state = AppState()
+        state.global_x_limits["TIME"] = (0.0, 60.0)
+        tile = state.pages[0].tiles[1]
+        tile.x_param, tile.y_params = "TIME", ["ALT"]
+        state.apply_global_limits(tile)
+        self.assertTrue(tile.lock_x)
+
+    def test_it_says_what_it_released(self):
+        window = self.window()
+        window.state.global_x_limits["TIME"] = (0.0, 60.0)
+        window.unlock_all_scales()
+        message = window.status_label.text()
+        self.assertIn("1 variable-wide", message)
+        self.assertTrue(window.state.dirty)
+
+    def test_releasing_a_constraint_alone_still_counts_as_a_change(self):
+        """No tile was locked yet -- the constraint had not been applied to
+        one -- but something was released, so the workspace is unsaved and the
+        message says so rather than "no axis was locked"."""
+        window = self.window()
+        window.state.global_y_limits["ALT"] = (0.0, 1.0)
+        window.unlock_all_scales()
+        self.assertTrue(window.state.dirty)
+        self.assertNotIn("No axis was locked", window.status_label.text())
+
+    def test_every_tile_is_freed_to_be_re_framed(self):
+        """A tile that was being held to a window keeps that window unless it
+        is allowed to fit again."""
+        window = self.window()
+        for tile in window.state.pages[0].tiles:
+            tile.view_initialised = True
+        window.unlock_all_scales()
+        for tile in window.state.pages[0].tiles:
+            self.assertFalse(tile.view_initialised)
+
+
+class TestATileTakesASharedXRange(unittest.TestCase):
+    """What the other tiles do with a zoom made in one of them.
+
+    Three decline, each for a reason the user would give themselves: a 3D
+    tile, whose frame is a box rather than a pair of ranges; a tile whose x
+    axis is locked, because a lock is an instruction; and -- decided one level
+    up, in the window -- a tile plotting against a different channel, where
+    one axis's numbers mean nothing on the other.
+    """
+
+    def tile(self):
+        tile = make_drawable_tile()
+        state = tile._state
+        state.set_selected(0, 0, True)
+        state.tile.x_param, state.tile.y_params = "TIME", ["ALT"]
+        tile.rebuild()
+        return tile
+
+    def test_the_range_is_applied_and_stored(self):
+        tile = self.tile()
+        self.assertTrue(tile.apply_shared_x(2.0, 7.0))
+        self.assertEqual((tile.tile_state.x_min, tile.tile_state.x_max),
+                         (2.0, 7.0))
+        self.assertTrue(tile.tile_state.view_initialised)
+
+    def test_a_locked_x_axis_is_left_as_it_was(self):
+        tile = self.tile()
+        state = tile.tile_state
+        state.lock_x = True
+        state.x_min, state.x_max = 1.0, 4.0
+        self.assertFalse(tile.apply_shared_x(2.0, 7.0))
+        self.assertEqual((state.x_min, state.x_max), (1.0, 4.0))
+
+    def test_a_3d_tile_is_left_as_it_was(self):
+        tile = self.tile()
+        tile.tile_state.plot3d = True
+        self.assertFalse(tile.apply_shared_x(2.0, 7.0))
+
+    def test_an_empty_range_is_refused(self):
+        tile = self.tile()
+        self.assertFalse(tile.apply_shared_x(5.0, 5.0))
+        self.assertFalse(tile.apply_shared_x(7.0, 2.0))
+
+    def test_it_does_not_announce_a_view_change_of_its_own(self):
+        """Twenty-five tiles each announcing one would have the SCALE boxes
+        and the Inspect statistics recomputed twenty-five times over one
+        gesture. The window announces it once when the round is done."""
+        tile = self.tile()
+        seen = []
+        tile.view_changed.connect(lambda: seen.append(1))
+        tile.apply_shared_x(2.0, 7.0)
+        self.assertEqual(seen, [])
 
 
 class TestTheTileUsesTheDirectionalViewBox(unittest.TestCase):

@@ -794,6 +794,9 @@ class PlotTile(pg.PlotWidget):
     legend_moved = Signal()
     # A caption was dragged; the Text panel's position boxes have to follow.
     text_moved = Signal()
+    # (low, high) in x: a zoom that asked every tile to follow. Emitted by the
+    # tile the gesture happened in; the window hands it to the others.
+    x_zoom_shared = Signal(float, float)
 
     # Class-level defaults, and they are load-bearing. pyqtgraph's
     # PlotWidget.__init__ calls setCentralItem, which calls resizeEvent(None) --
@@ -829,6 +832,12 @@ class PlotTile(pg.PlotWidget):
         # otherwise, and swapping one in afterwards leaves the axes linked to
         # the box that was replaced.
         super().__init__(parent=parent, viewBox=DirectionalViewBox())
+        # A right-button or Ctrl zoom is answered by every tile, so the box
+        # tells the tile the x it settled on and the tile passes it up.
+        try:
+            self.getViewBox().shared_x_zoom = self._announce_x_zoom
+        except AttributeError:          # pragma: no cover - not our box
+            pass
         self._session = session
         self._state = state
         self._index = index
@@ -1002,6 +1011,12 @@ class PlotTile(pg.PlotWidget):
         names = [tile.x_param] + list(tile.y_params)
         if tile.plot3d and tile.z_param:
             names.append(tile.z_param)
+        # A difference reads its channel from both of its runs, and those runs
+        # need not be among the ones ticked for drawing -- so without this the
+        # two columns would be read lazily inside the draw, one at a time, off
+        # whatever share the file lives on.
+        if tile.diff_param:
+            names.append(tile.diff_param)
         # The alignment is found by reading the channel the condition is about,
         # so it has to be resident like any other -- and unlike the ISO
         # parameters below, the whole column is needed, not its first sample.
@@ -1102,8 +1117,15 @@ class PlotTile(pg.PlotWidget):
             view.setMouseMode(pg.ViewBox.RectMode)
 
         tile = self.tile_state
-        if not tile.plot3d and (tile.lock_x or tile.lock_y):
-            # A locked axis stays locked whatever the mouse mode says.
+        if not tile.plot3d:
+            # A locked axis stays locked whatever the mouse mode says -- and,
+            # just as importantly, an axis that is *no longer* locked stops
+            # being clamped. setLimits is a hard bound held on the view box,
+            # not on the tile, so it outlives the lock that set it: while this
+            # ran only for a tile that was still locked, clearing a lock left
+            # the old bound in force until something else happened to call
+            # _apply_axis_limits, and a fit made in between was silently
+            # clamped to the range the user had just released.
             self._apply_axis_limits(tile)
 
         if self.tile_state.plot3d:
@@ -1549,7 +1571,12 @@ class PlotTile(pg.PlotWidget):
         plot.getViewBox().setAspectLocked(False)
         self._gizmo.setVisible(False)
 
-        if tile.is_empty() or not self._state.plotted_sims():
+        # A difference names its own two runs, so it draws whether or not
+        # anything is ticked in DATA: a difference is a question about two
+        # particular runs, and having to tick them first -- which would also
+        # draw them -- is a step in the way of the question.
+        if tile.is_empty() or (not self._state.plotted_sims()
+                               and not tile.is_diff()):
             self._drop_groups(previous_groups)
             if self._legend is not None:
                 self._legend.setVisible(False)
@@ -1567,6 +1594,15 @@ class PlotTile(pg.PlotWidget):
             self._legend.setVisible(True)
         elif self._legend is not None:
             self._legend.setVisible(False)
+
+        if tile.is_diff():
+            # One curve from two runs, so none of the walk below applies: there
+            # is nothing to group, nothing to rank and no legend to cap.
+            self._rebuild_diff(plot, tile, previous_groups)
+            self._frame_after_rebuild(tile)
+            self._draw_overlays()
+            self._refresh_texts()
+            return
 
         # No preload here. The grid hoists it into one background call covering
         # every visible tile, so the data is already resident by the time this
@@ -1774,13 +1810,167 @@ class PlotTile(pg.PlotWidget):
         if tile.show_legend and self._legend is not None:
             self._place_legend(tile)
 
-        # The view is the user's. A rebuild happens for all sorts of reasons
-        # that say nothing about what should be on screen -- restyling a curve,
-        # toggling the grid, dragging a marker, coming back to a page -- and
-        # re-fitting on every one of them threw away whatever they had zoomed
-        # in on. So fit only when the tile has never been framed, which is the
-        # moment it first acquires a parameter; after that the frame moves when
-        # the user asks (Fit, double-click) or changes the SCALE limits.
+        self._frame_after_rebuild(tile)
+        self._draw_overlays()
+        self._refresh_texts()
+
+    # -------------------------------------------------------------- diff
+
+    def _rebuild_diff(self, plot, tile, previous_groups) -> None:
+        """Draw one curve: a parameter's difference between two runs.
+
+        The two runs are sampled at their own instants, and nothing says the
+        two sets of instants agree -- different runs of the same study often
+        differ in length, and runs from two files almost always do. So the
+        difference is taken on the first run's x, with the second run read at
+        those same x by linear interpolation. The first run is the reference
+        in a second sense too: the curve covers the stretch of x the two have
+        in common, because outside it there is nothing to subtract and
+        extrapolating would draw a difference that was never measured.
+
+        np.interp rather than anything of our own: it is one pass in C over a
+        sorted array, which is what this is, and the whole operation is two
+        channel reads and a subtraction.
+        """
+        a_run, b_run = tile.diff_runs()
+        label = self._diff_label(tile, a_run, b_run)
+
+        x, y = self._diff_samples(tile, a_run, b_run)
+        if x is None:
+            # Nothing the two runs share, or a channel one of them does not
+            # carry. The tile says so in its own right -- the title names the
+            # difference -- and an empty plot is the honest drawing of it.
+            self._drop_groups(previous_groups)
+            if self._legend is not None:
+                self._legend.setVisible(False)
+            self._sync_report = (0, 0)
+            return
+
+        styles = self._state.styles
+        # Keyed on the channel, so the colour of a difference of ALPHA is the
+        # colour of ALPHA -- and so the STYLE tab can restyle it like any
+        # other curve.
+        key = curve_color_key(tile, tile.diff_param, "", "", "")
+        color = styles.color_for(key)
+        dash = styles.dash_for(key)
+        symbol = styles.symbol_for(key)
+        width = styles.width_for(key)
+        marker = symbol or ("o" if tile.show_points else None)
+
+        curve_key = "diff|{0}|{1}|{2}|{3}|{4}".format(
+            a_run[0], a_run[1], b_run[0], b_run[1], tile.diff_param)
+        entry = CurveEntry(x, y, label, key, curve_key)
+        self._curves[curve_key] = entry
+
+        plan = _GroupPlan(color, dash, width, marker, styles.symbol_size,
+                          label if tile.show_legend else None)
+        plan.entries.append(entry)
+        self._adopt_groups(plot, previous_groups, [plan])
+
+        if tile.show_legend and self._legend is not None:
+            self._place_legend(tile)
+
+    def _diff_label(self, tile, a_run, b_run) -> str:
+        """"ALPHA: R3 - R7", with the file named when the two differ."""
+        return "{0}: {1} - {2}".format(
+            tile.diff_param,
+            self._run_name(a_run, with_file=a_run[0] != b_run[0]),
+            self._run_name(b_run, with_file=a_run[0] != b_run[0]))
+
+    def _run_name(self, run, with_file: bool = True) -> str:
+        """How a (file, run) pair is written for a human."""
+        file_index, sim_index = run
+        handle = self._session.file(file_index)
+        if handle is None:
+            return "?"
+        try:
+            name = handle.simulations[sim_index].sim_id
+        except (AttributeError, IndexError):
+            return "?"
+        if with_file:
+            return "{0}/{1}".format(handle.name, name)
+        return name
+
+    def _diff_samples(self, tile, a_run, b_run):
+        """(x, difference) for the stretch the two runs share, or (None, None).
+
+        The sync offsets are applied first when SYNC is on, because a diff of
+        two runs aligned on an event is exactly the case SYNC exists for: the
+        same manoeuvre flown twice, started at different clock times.
+        """
+        x_a = self._diff_channel(a_run, tile.x_param)
+        x_b = self._diff_channel(b_run, tile.x_param)
+        y_a = self._diff_channel(a_run, tile.diff_param)
+        y_b = self._diff_channel(b_run, tile.diff_param)
+        if x_a is None or x_b is None or y_a is None or y_b is None:
+            return None, None
+
+        # Trim each to the length its own pair agrees on. A channel shorter
+        # than the x it is plotted against is a half-written record, and
+        # subtracting past the end of one would read whatever follows it.
+        n_a, n_b = min(x_a.size, y_a.size), min(x_b.size, y_b.size)
+        if n_a < 2 or n_b < 2:
+            return None, None
+        x_a, y_a = x_a[:n_a], y_a[:n_a]
+        x_b, y_b = x_b[:n_b], y_b[:n_b]
+
+        offsets, found, missing = self._sync_plan(
+            tile, {a_run[0]: [a_run[1]], b_run[0]: [b_run[1]]})
+        self._sync_report = (found, missing)
+        shift_a = offsets.get(a_run) or 0.0
+        shift_b = offsets.get(b_run) or 0.0
+        if shift_a:
+            x_a = x_a + np.float32(shift_a)
+        if shift_b:
+            x_b = x_b + np.float32(shift_b)
+
+        # np.interp needs its reference sorted, and wants no NaN in the x it
+        # reads from. An x channel is monotonic in these files, but a bad
+        # record is not worth a wrong curve.
+        good = np.isfinite(x_b) & np.isfinite(y_b)
+        if good.sum() < 2:
+            return None, None
+        x_b, y_b = x_b[good], y_b[good]
+        if not np.all(np.diff(x_b) >= 0.0):
+            order = np.argsort(x_b, kind="stable")
+            x_b, y_b = x_b[order], y_b[order]
+
+        low = max(float(np.nanmin(x_a)), float(x_b[0]))
+        high = min(float(np.nanmax(x_a)), float(x_b[-1]))
+        if not (high > low):
+            return None, None            # the two never overlap in x
+
+        inside = np.isfinite(x_a) & (x_a >= low) & (x_a <= high)
+        if inside.sum() < 2:
+            return None, None
+        x = np.ascontiguousarray(x_a[inside], dtype=np.float32)
+        difference = (y_a[inside].astype(np.float32, copy=False)
+                      - np.interp(x, x_b, y_b).astype(np.float32, copy=False))
+        return x, np.ascontiguousarray(difference, dtype=np.float32)
+
+    def _diff_channel(self, run, name: str):
+        """One channel of one run, or None when it is not there to read."""
+        if not name:
+            return None
+        try:
+            data = self._session.channel(run[0], run[1], name)
+        except Exception:                      # pragma: no cover - a bad read
+            return None
+        if data is None or getattr(data, "size", 0) == 0:
+            return None
+        return data
+
+    def _frame_after_rebuild(self, tile) -> None:
+        """Put the view where it belongs, and redraw what needs redrawing.
+
+        The view is the user's. A rebuild happens for all sorts of reasons
+        that say nothing about what should be on screen -- restyling a curve,
+        toggling the grid, dragging a marker, coming back to a page -- and
+        re-fitting on every one of them threw away whatever they had zoomed
+        in on. So fit only when the tile has never been framed, which is the
+        moment it first acquires a parameter; after that the frame moves when
+        the user asks (Fit, double-click) or changes the SCALE limits.
+        """
         if tile.view_initialised and self._curves:
             self._restore_view(tile)
         else:
@@ -1798,8 +1988,6 @@ class PlotTile(pg.PlotWidget):
         # computed for and is left alone. Forcing here is what made every
         # rebuild re-decimate curves it had just proven identical.
         self._resample_visible()
-        self._draw_overlays()
-        self._refresh_texts()
 
     # -------------------------------------------------------- group reuse
 
@@ -2312,6 +2500,43 @@ class PlotTile(pg.PlotWidget):
         if not self._reproject_3d():
             self.rebuild()
 
+    # ------------------------------------------------------- shared x zoom
+
+    def _announce_x_zoom(self, low: float, high: float) -> None:
+        if high > low:
+            self.x_zoom_shared.emit(float(low), float(high))
+
+    def apply_shared_x(self, low: float, high: float) -> bool:
+        """Take the x range of a zoom made in another tile. True if applied.
+
+        Three tiles are left out of it, and each for a reason the user would
+        give themselves: a 3D tile, whose frame is a box and not a pair of
+        ranges; a tile whose x axis is locked, because a lock is an
+        instruction; and a tile plotting against a different channel
+        altogether, where the numbers of one axis mean nothing on the other.
+
+        The range event is suppressed while it is applied. Twenty-five tiles
+        each announcing a view change would have the SCALE boxes and the
+        Inspect statistics recomputed twenty-five times over one gesture; the
+        window announces it once when the round is done.
+        """
+        tile = self.tile_state
+        if tile.plot3d or tile.lock_x:
+            return False
+        if not (high > low):
+            return False
+
+        self._suppress_range_event = True
+        try:
+            self.getPlotItem().setXRange(low, high, padding=0)
+        finally:
+            self._suppress_range_event = False
+
+        tile.x_min, tile.x_max = float(low), float(high)
+        tile.view_initialised = True
+        self._resample_visible(force=True)
+        return True
+
     # --------------------------------------------------------- resampling
 
     def _on_range_changed(self, *_args) -> None:
@@ -2516,6 +2741,14 @@ class PlotTile(pg.PlotWidget):
 
         self._suppress_range_event = True
         try:
+            # Before the ranges, not only after them. Every setXRange and
+            # setYRange below is clamped by whatever bounds the view box is
+            # carrying, so a tile just released from a lock has to be released
+            # on the view box first or the fit is computed correctly and then
+            # thrown away. It is applied again at the end, where it is what
+            # pins a locked axis to the range just set for it.
+            self._apply_axis_limits(tile)
+
             if tile.lock_x:
                 plot.setXRange(tile.x_min, tile.x_max, padding=0)
             if tile.lock_y:

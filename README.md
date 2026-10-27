@@ -2,7 +2,7 @@
 
 A fast viewer for AOE simulation result files.
 
-**Version 2.2.3.** What it does:
+**Version 2.3.0.** What it does:
 
 - **Opens a study, not a file.** Add any number of result files, tick the runs
   you want, and compare them across a grid of plot tiles arranged in pages.
@@ -22,10 +22,13 @@ A fast viewer for AOE simulation result files.
 - **Compares runs on their own terms.** Filter runs by a value they hold
   constant, colour and dash them by independent keys, align them on an event
   rather than on the clock, and read any sample of any channel off the plot.
+  Where two runs are too alike to tell apart by eye, a tile can draw the
+  **difference** between them instead — including runs from two different
+  files, recorded at different instants.
 - **Derived channels** from an expression over the ones in the file, evaluated
   in the core.
 
-The full manual is `doc/aoeViewer-2.2.3-User-and-Reference-Guide.pdf`, built
+The full manual is `doc/aoeViewer-2.3.0-User-and-Reference-Guide.pdf`, built
 from the LaTeX source beside it.
 
 The heavy work — parsing, computed parameters, plot decimation — happens in a
@@ -82,6 +85,7 @@ seconds, and megabytes apiece.
   - [Fitting](#fitting)
   - [Pages and tiles](#pages-and-tiles)
   - [Workspaces](#workspaces)
+- [Differencing two runs](#differencing-two-runs)
 - [Computed parameters](#computed-parameters)
 - [HDF5 files](#hdf5-files)
   - [Files that declare their own structure](#files-that-declare-their-own-structure)
@@ -473,7 +477,23 @@ which makes it the better answer if you have the choice.
 ## Using it
 
 The window has a tab rail down the left edge, a panel beside it, and a grid of
-plot tiles filling the rest. A bar above the grid manages pages and tiles; a
+plot tiles filling the rest.
+
+**Four ways to reach a panel**, because thirteen names down a narrow column is
+a lot of aiming:
+
+- **Click** the name.
+- **Press its letter** — `D` for DATA, `P` for PARAMS, `F` for DIFF, and so
+  on; hover a name to see which. A bare letter, with no modifier, and it never
+  reaches a tab while anything is being typed into: a filter box, a formula, a
+  page name or a cell being edited all keep their keystrokes.
+- **Scroll** over the names. Only over the names — the wheel over the panel
+  itself still scrolls the panel.
+- **Arrow keys**, once the rail has the focus, which clicking a name gives it.
+  `Home` and `End` go to the first and last.
+
+**Drag a name up or down to rearrange the rail.** The order is saved with the
+workspace. Which panel a name opens never changes, however it is arranged. A bar above the grid manages pages and tiles; a
 status bar along the bottom carries the current summary, a progress bar while
 the application is busy, the crosshair readout and the size of the sample cache.
 
@@ -483,8 +503,8 @@ it, and bring PARAMS forward.
 
 ### The panels
 
-Thirteen panels, selected from the rail. Six act on the active tile only
-(PARAMS, STYLE, SCALE, SYNC, 3D, TEXT); the rest apply to everything.
+Thirteen panels, selected from the rail. Seven act on the active tile only
+(PARAMS, DIFF, STYLE, SCALE, SYNC, 3D, TEXT); the rest apply to everything.
 
 **DATA** — add and remove files, and tick which runs to plot. Every run of the
 first file is ticked automatically, so something is on screen straight away.
@@ -517,13 +537,15 @@ the rest keep the file order, and unticking one puts it straight back among
 them. The filter box accepts wildcards: `AL*` matches `ALPHA` and `ALT`.
 Filtering only hides rows — a selected name that does not match stays selected
 and reappears as soon as the filter lets it through. **Right-click a parameter**
-to alias it, make it the x axis, or copy its name.
+to make it the x axis or copy its name.
 
 **COMPUTE** — define derived channels from the ones in the file. See
-[Computed parameters](#computed-parameters).
+[Computed parameters](#computed-parameters). This is also where a channel gets
+a readable name: `Load factor = NZ` shows the new name everywhere and leaves
+the file untouched.
 
-**ALIAS** — give a channel a readable display name without touching the file,
-so the application shows "Load factor" while still reading `NZ`.
+**DIFF** — draw the difference between one channel's values in **two runs**,
+which may come from different files. See [Differencing two runs](#differencing-two-runs).
 
 **ISO** — filter runs by parameters that are constant within a run (Mach
 number, mass, altitude). **Several filters can be active at once and they
@@ -800,6 +822,18 @@ height of the tile for an x-only zoom, the full width for a y-only one — so th
 gesture is confirmed before you release the button. There is no mode to select
 and nothing to hold down.
 
+**Hold `Ctrl`, or drag with the right button, and every tile follows on x.**
+Whatever the shape of the drag: an area zoom hands over the x it took and
+leaves each tile's own y alone, and an x-only drag does the same. It is the
+gesture for "show me this manoeuvre in all of them" — a stretch picked out in
+one plot becomes the same stretch of the run everywhere.
+
+Three kinds of tile stay where they are, each for a reason you would give
+yourself: a 3D tile, whose frame is a box rather than a pair of ranges; a tile
+whose x axis is **locked** in SCALE, because a lock is an instruction; and a
+tile plotted against a *different* x channel, where the numbers of one axis
+mean nothing on the other. The status bar says how many tiles followed.
+
 The reason for the two constrained gestures is that the unconstrained one is
 usually not what is wanted: a stretch of x with y untouched is the common case,
 and doing that with a rectangle means dragging the full height of the tile by
@@ -813,7 +847,24 @@ panel forward.
 
 ### Fitting
 
-**Double-click any plot to fit it**; `Ctrl+0` fits every tile. A tile also
+**Double-click any plot to fit it**; `Ctrl+0` fits every tile, and so does
+**Fit** on the bar above the grid.
+
+**The open padlock beside Fit** takes every X and Y scale constraint off
+*every tile on every page*, releases every **variable-wide** constraint as
+well, and then fits everything. It is the way out of a page that was pinned to
+compare two runs and now will not show the next pair — every page, because
+locks left behind on the page you are not looking at are the next thing to look
+wrong.
+
+The variable-wide constraints have to go with them. A constraint declared for a
+parameter — *Apply to all tiles with this X*, in SCALE — is not held on the
+tiles: it lives on the workspace, and it is re-imposed on any tile that *later*
+acquires that parameter. Clearing only the tiles would leave them all free until
+the next parameter was added to one, which would come back constrained.
+
+Each tile's own stored limits are kept, so putting a lock back on by hand
+returns to the numbers it had. A tile also
 frames itself the moment it acquires its first curve, and then leaves the frame
 alone. Fitting an *empty* tile frames nothing and is not counted, so
 double-clicking a blank tile to open PARAMS — which is what the gesture is for
@@ -840,8 +891,11 @@ Page and tile management sits on a bar directly above the grid:
   about to remove.
 - **Grid** — a Word-style dropdown: sweep the mouse over the 5×5 matrix and
   click to set the layout. Cells beyond 25 tiles are greyed out.
-- **Tile** — arrow buttons swap the active tile with its neighbour, and
-  Copy/Cut/Paste/Clear move a tile's whole configuration.
+- **Tile** — arrow buttons swap the active tile with its neighbour, and four
+  symbol buttons move a tile's whole configuration: copy (two sheets), cut
+  (scissors), paste (clipboard) and clear (a crossed-out frame). They were
+  words until 2.3.0, which cost about 210 px of a bar that also holds the page
+  controls and the grid picker; hover one for what it does.
 
 Each tile is titled with what it is plotting, as `ALPHA, NZ = f(TIME)`. Every
 selected y is named, and a long list wraps onto a second line. The axes
@@ -855,8 +909,14 @@ status bar.
 
 `Ctrl+S` and `Ctrl+L` save and load a workspace: file paths, pages and their
 names, tiles, selections, computed parameters, aliases, *Colour by* / *Style
-by*, the names you gave files and runs, the interface size, the theme, and every
-colour and line style, as JSON (schema version 3, plus `app_version`).
+by*, each tile's difference, the order of the tab rail, the names you gave
+files and runs, the interface size, the theme, and every colour and line style,
+as JSON (schema version 3, plus `app_version`).
+
+A workspace written by an older version opens unchanged: with no rail order it
+uses the built-in one, with no difference on a tile it draws the parameters as
+before, and a rail order naming a panel this version does not have — `ALIAS`,
+removed in 2.3.0 — ignores that name and keeps the rest.
 
 Display names are keyed by identity rather than by position — a file by its
 path, a run by the core's `<file>::<id>::<ordinal>` key — because a workspace is
@@ -865,11 +925,15 @@ name pinned to "the seventh run" would then land on whichever run happens to sit
 there. A name whose file or run is not in the data is dropped without comment.
 
 **Reusing a workspace against another study** — remove the old file, add the new
-one — keeps every tile's axes. Closing a study leaves its formulas and aliases
-defined, so that opening the next one does not throw away the work set up for
-it; but a formula over columns that are not loaded evaluates to nothing and an
-alias resolves to a channel no file carries, so neither is a candidate for an
-axis while nothing is open.
+one — keeps every tile's axes. Closing a study leaves its formulas defined, so
+that opening the next one does not throw away the work set up for it; but a
+formula over columns that are not loaded evaluates to nothing, so it is not a
+candidate for an axis while nothing is open.
+
+*Aliases* above are a 2.2.x feature kept for compatibility: the core still
+resolves them and a workspace that carries them still loads, but nothing in the
+interface creates one any more — COMPUTE does the same job with
+`Load factor = NZ`, and does it in one place.
 
 Workspaces written by earlier versions open unchanged: anything they do not
 mention takes its default, and a workspace that names an interface size keeps
@@ -888,6 +952,56 @@ A rebuild that changes nothing draws nothing: the curve groups are adopted and
 their points reused, the plot's own settings are written only when one of them
 differs, and the markers and bands keep their items unless the annotations, the
 x channel, the drag mode or the curves have moved.
+
+---
+
+## Differencing two runs
+
+Two runs that look alike at tile scale can differ by three per cent somewhere
+in the middle, and the eye cannot find where. The **DIFF** panel puts that
+difference where it belongs — on the y axis, at the x it happened.
+
+Pick a parameter and two runs; the tile draws `A - B` against the tile's own x
+axis, chosen in PARAMS as usual.
+
+**One parameter and two runs, and no more.** A tile holding four differences of
+three channels answers nothing; a second difference is a second tile.
+
+**The two runs may come from different files**, which is the case this is most
+often wanted for: the same manoeuvre from two builds of the model. Every loaded
+run is offered, whether or not it is ticked in DATA — a difference is a question
+about two particular runs, and having to tick them first, which would also draw
+them, is a step in the way of the question.
+
+**The runs keep their own instants.** Nothing says two runs were recorded at
+the same times, and runs from two files almost never are. So the difference is
+taken on **run A's** x, with run B read at those same x by linear
+interpolation, over the stretch of x the two **have in common** — outside it
+there is nothing to subtract, and extrapolating would draw a difference that
+was never measured. Run A is the reference in both senses.
+
+**With SYNC on, both runs are aligned on their event first.** That is what
+makes a difference possible at all for the same manoeuvre flown at two
+different clock times.
+
+While a tile is differencing, the parameters ticked in PARAMS are left alone
+and not drawn: DIFF is the more specific instruction. *Stop differencing this
+tile* gives the tile back to them. Colour, dash and width come from STYLE as
+usual, keyed on the channel — so a difference of `ALPHA` is drawn in the
+colour `ALPHA` has.
+
+The tile is titled `ΔALT between two runs = f(TIME)`, and the legend row names
+both runs, with their files when the two differ.
+
+It reads four channels and no more — x and the parameter, from each of the two
+runs — and they go into the same batched preload as everything else on the
+page, so a diff of a run in a 3 GB file over a network share costs two column
+reads, not a walk of the file.
+
+Nothing is drawn when the two runs share no x at all, when one of them does not
+carry the channel, or when A and B are the same run; the panel says which of
+those it is, because a difference that cannot be drawn looks exactly like one
+that is drawn and happens to be zero.
 
 ---
 

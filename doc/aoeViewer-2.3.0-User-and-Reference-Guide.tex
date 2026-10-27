@@ -5,7 +5,7 @@
 % earlier one: where behaviour has changed, the text was rewritten rather than
 % appended to.
 %
-% Build:  pdflatex aoeViewer-2.2.3-User-and-Reference-Guide.tex   (three times,
+% Build:  pdflatex aoeViewer-2.3.0-User-and-Reference-Guide.tex   (three times,
 %         so the table of contents and the cross-references settle)
 
 \documentclass[11pt,a4paper,oneside]{report}
@@ -42,13 +42,13 @@
 \definecolor{aoeshade}{HTML}{F4F6F8}
 
 \hypersetup{
-  pdftitle={aoeViewer 2.2.3 -- User and Reference Guide},
+  pdftitle={aoeViewer 2.3.0 -- User and Reference Guide},
   pdfauthor={Paulo R. A. Gilz},
   pdfsubject={The interface, the algorithms, the file format, the C ABI and the scripting API},
   colorlinks=false,
 }
 
-\newcommand{\appver}{2.2.3}
+\newcommand{\appver}{2.3.0}
 
 \pagestyle{fancy}
 \fancyhf{}
@@ -213,9 +213,15 @@ parameter, style by file, and the eye reads both at once.
 expression over the channels that are there ---
 \code{deriv(THETA, TIME)}, \code{NZ / max(NZ)},
 \code{ALTITUDE[TIME=last] - ALTITUDE[TIME=first]} --- evaluated in the core,
-per run, and thereafter indistinguishable from a channel the file carried. An
-alias is a second name for an existing channel, so a cryptic column can be given
-a readable one without touching the data.
+per run, and thereafter indistinguishable from a channel the file carried. The
+same mechanism gives a cryptic column a readable name --- \code{Load factor =
+NZ} --- without touching the data.
+
+\textbf{The difference between two runs, where the runs themselves are too
+alike to tell apart.} A tile can draw one channel's difference between two runs,
+which may come from different files and need not have been recorded at the same
+instants: the second is read at the first's instants by interpolation, over the
+stretch they have in common. See Section~\ref{sec:diff}.
 
 \textbf{Drawing what the screen can show, exporting what the data says.} A tile
 with twenty-five runs of five hundred thousand samples does not hand two and a
@@ -389,7 +395,65 @@ changes. Down the left edge runs the tab rail, a 21-pixel strip of vertically
 painted labels which selects which of the thirteen panels is shown beside it.
 It holds tabs and nothing else --- the light/dark toggle is in the toolbar,
 where it does not compete with the tabs for the one dimension a short screen is
-short of. The
+short of.
+
+There are four ways to reach a panel, because thirteen names down a 21-pixel
+column is a lot of aiming. Click a name; press its letter; roll the wheel over
+the names; or walk them with the arrow keys once the rail has the focus, which
+clicking a name gives it. \key{Home} and \key{End} go to the first and last.
+Dragging a name up or down rearranges the rail, and the order is saved with the
+workspace. The
+
+\begin{center}
+\small
+\begin{tabular}{@{}llllll@{}}
+\toprule
+\key{D} & \tab{data} & \key{O} & \tab{iso} & \key{I} & \tab{inspect} \\
+\key{P} & \tab{params} & \key{S} & \tab{style} & \key{R} & \tab{area} \\
+\key{C} & \tab{compute} & \key{A} & \tab{scale} & \key{M} & \tab{markers} \\
+\key{F} & \tab{diff} & \key{Y} & \tab{sync} & \key{T} & \tab{text} \\
+ & & \key{3} & \tab{3d} & & \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The letters are taken from the labels wherever the obvious one was free:
+\tab{iso} gives up I to \tab{inspect}, which is reached far more often, and
+takes its O; \tab{scale} takes its A, since \tab{area} has R. Each name's
+tooltip says its letter, so none of this has to be remembered.
+
+\begin{aoenote}{A bare letter, and how it keeps out of the way of typing}
+A letter with no modifier, because these are navigation rather than commands:
+thirteen more \key{Ctrl} bindings would collide with the window's own.
+
+That makes the collision with \emph{typing} the thing to get right, and a
+\code{QShortcut} is the wrong tool for it --- a shortcut on a plain letter wins
+against the widget holding the focus, so typing a page name would jump tabs
+instead of writing a ``d''. A handler on the window is no better: a list or a
+table takes letters for its own type-ahead search and never passes them up.
+
+So the key is read by a filter on the application, before anyone else sees it,
+and handed straight back whenever something is being typed into --- a line
+edit, a spin box, an editable combo, a text area, or a cell editor, which is a
+line edit parented to a table. Anything custom is asked the general question
+Qt answers for itself: whether the widget has input-method handling enabled. A
+modifier held, or a modal dialog up, hands the key back too.
+\end{aoenote}
+
+\begin{aoenote}{Why the rail may be rearranged, and what does not move with it}
+Which panel a name opens never changes. Order is by position and identity is by
+panel index, and the two are kept apart deliberately: everything outside the
+rail --- the panel stack, the window's tab handler, the workspace --- refers to
+a panel by the index it was built with, so dragging the rail about cannot make
+the window show the wrong panel.
+
+A workspace records the order as a list of \emph{names}. A name this version
+does not have is ignored, and one it has that the workspace does not mention
+keeps its place at the end --- so a workspace written by 2.2.x, whose rail
+included \tab{alias}, still arranges the twelve tabs the two versions share.
+\end{aoenote}
+
+The
 panel itself occupies a splitter pane that can be dragged between 230 and 600
 pixels wide. To its right, the plot area is divided into the page and tile bar
 along its top and the grid of tiles below. The status bar along the bottom
@@ -477,7 +541,7 @@ frozen.
 Select & Moves markers and the edges of shaded areas; moves the legend and text captions. & inert & movable \\
 Inspect & Rubber-bands a slope line; a drag shorter than six pixels counts as a click and inspects instead. & inert & frozen \\
 Pan & Pans the view. On a 3D tile: turns it; middle-drag or \key{Shift}+drag slides it; right-drag or \key{Ctrl}+drag zooms. & inert & frozen \\
-Zoom & Rubber-bands a region to zoom into --- the area, the x axis alone or the y axis alone, according to the shape of the drag. & zooms & frozen \\
+Zoom & Rubber-bands a region to zoom into --- the area, the x axis alone or the y axis alone, according to the shape of the drag. With \key{Ctrl}, or with the right button, every tile follows on x. & zooms & frozen \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -532,6 +596,37 @@ one code path rather than three, and it is the one that was already correct.
 
 Dragging on an axis itself still means ``this axis only'', and is handled by
 pyqtgraph as before.
+
+\subsection*{Zooming every tile at once}
+\label{sec:globalzoom}
+
+Hold \key{Ctrl}, or drag with the \emph{right} button, and the x range the zoom
+settles on is given to every other tile as well. Whatever the shape of the drag:
+an area zoom hands over the x it took and leaves each tile's own y alone, and an
+x-only drag does the same. The gesture asks ``show me this stretch in all of
+them'' --- which is the usual question of a page of tiles, since they are
+nearly always plotted against the same x.
+
+Three kinds of tile stay where they are, each for a reason the user would give
+themselves: a 3D tile, whose frame is a box rather than a pair of ranges; a tile
+whose x axis is locked in \tab{scale}, because a lock is an instruction; and a
+tile plotted against a \emph{different} x channel, where the numbers of one
+axis mean nothing on the other. The status bar says how many tiles followed.
+
+\begin{aoenote}{Why it is read off the event rather than set as a mode}
+There is nothing to switch on beforehand and nothing left switched on
+afterwards, which matters for a gesture whose effect reaches twenty-four plots
+the user is not looking at.
+
+The range is applied with each tile's range events suppressed, and the window
+announces the change once when the round is done. Twenty-five tiles each
+announcing one would have the \tab{scale} boxes rewritten and the \tab{inspect}
+statistics --- which read every selected channel of the visible window ---
+recomputed twenty-five times over a single drag.
+
+A right \emph{click} that was never a drag is left alone, so the view box's own
+context menu still opens.
+\end{aoenote}
 
 \section{The status bar}
 \label{sec:statusbar}
@@ -696,9 +791,9 @@ fit on any screen; this makes it \emph{comfortable} on one.
 The tab rail selects one of thirteen panels. Selecting a tab refreshes that panel
 immediately and marks the others stale, so they are refreshed lazily when next
 shown --- which is why no panel is allowed to write application state while
-refreshing. Six of the panels act on the active tile only (\tab{params},
-\tab{style}, \tab{scale}, \tab{sync}, \tab{3d}, \tab{text}); the rest are
-global.
+refreshing. Seven of the panels act on the active tile only (\tab{params},
+\tab{diff}, \tab{style}, \tab{scale}, \tab{sync}, \tab{3d}, \tab{text}); the
+rest are global.
 
 Each panel sits in a scroll area, and the reason is the window's minimum size
 rather than the panel's own.
@@ -810,9 +905,7 @@ and the answer between two letters of the same word is not one anybody reads.
 It is the same delay, for the same reason, that the \tab{text} panel uses
 before it commits a caption.
 
-Right-clicking a channel offers \emph{Create alias for NAME\ldots}, \emph{Use as
-X axis} and \emph{Copy name}. The alias dialog is pre-filled with a readable
-guess made by replacing underscores with spaces and capitalising words.
+Right-clicking a channel offers \emph{Use as X axis} and \emph{Copy name}.
 
 The ticked channels of the active tile are listed \emph{first}, in the order
 they were ticked, and the rest follow in file order. That order is also the
@@ -856,20 +949,67 @@ MACH\_SQ, and ENERGY which depended on it}.
 The \emph{Help} button opens the complete syntax reference, which is also
 reproduced in Chapter~\ref{ch:formula}.
 
-\section{ALIAS --- a second name for a channel}
+\section{DIFF --- the difference between two runs}
+\label{sec:diff}
 
-Choose a channel, type a display name, press \emph{Add alias}. The new name
-appears everywhere a channel name can appear and resolves to the same data.
-Aliases are resolved in the core, chains are followed, and a cycle such as
-\code{A -> B -> A} is broken rather than hung. The defined list shows each alias
-with the name it resolves to, and \emph{Remove selected} deletes one.
+Two runs that look alike at tile scale can differ by three per cent somewhere in
+the middle, and the eye cannot find where. This panel puts that difference where
+it belongs: on the y axis, at the x it happened.
 
-\begin{aoenote}{Aliases are saved, and survive data that has moved on}
-An alias is written into the workspace and restored with it. If the channel
-behind it is not in the files the workspace reopens with, the alias is kept
-rather than dropped --- it costs nothing until it resolves, and the file it
-belongs to may be opened next --- and the load reports it so that an axis
-plotting nothing has an explanation.
+Choose a parameter and two runs. The tile then draws $A - B$ against the tile's
+own x axis, which is still chosen in PARAMS.
+
+One parameter and two runs, and no more. The question a difference answers is
+``where do these two part company, and by how much'', and a tile holding four
+differences of three channels answers nothing; a second difference is a second
+tile.
+
+Both lists offer every run of every open file, whether or not it is ticked in
+DATA. A difference is a question about two particular runs, and having to tick
+them first --- which would also draw them --- is a step in the way of the
+question. The two may come from different files, which is the case this is most
+often wanted for: the same manoeuvre from two builds of the model.
+
+\begin{aoenote}{The runs keep their own instants}
+Nothing says two runs were recorded at the same times, and runs from two files
+almost never are. So the difference is taken on \emph{run A's} x, with run B
+read at those same x by linear interpolation, over the stretch of x the two have
+in common. Outside that stretch there is nothing to subtract, and extrapolating
+would draw a difference that was never measured --- so the curve simply stops.
+Run A is the reference in both senses: its instants, and its extent.
+
+Where SYNC is on, both runs are aligned on their event before the subtraction.
+That is what makes the comparison possible at all for the same manoeuvre flown
+at two different clock times.
+\end{aoenote}
+
+While a tile is differencing, the parameters ticked in PARAMS are left alone and
+not drawn: DIFF is the more specific instruction about what the tile is for.
+\emph{Stop differencing this tile} gives the tile back to them. Colour, dash,
+width and marker come from STYLE as usual, keyed on the channel, so a difference
+of \code{ALPHA} is drawn in the colour \code{ALPHA} has.
+
+The tile is titled $\Delta$\code{ALT between two runs = f(TIME)}, and the legend
+row names both runs --- with their files when the two differ, without them when
+they do not.
+
+It reads four channels and no more: x and the parameter, from each of the two
+runs. They are collected into the same batched, multi-threaded preload as
+everything else on the page, so differencing a run of a 3\,GB file over a network
+share costs two column reads rather than a walk of the file.
+
+Nothing is drawn when the two runs share no x at all, when one of them does not
+carry the channel, or when A and B are the same run. The panel says which of
+those it is, because a difference that cannot be drawn looks exactly like one
+that is drawn and happens to be zero.
+
+\begin{aoenote}{Aliases, and where they went}
+Up to 2.2.3 this panel's place was taken by ALIAS, which gave a channel a second
+name. COMPUTE does the same job with \code{Load factor = NZ} and does it in one
+place, so the panel was removed in 2.3.0 and this one took its space. The core
+still resolves aliases and a workspace carrying them still loads --- they are
+reported on load exactly as before --- but nothing in the interface creates one
+any more.
 \end{aoenote}
 
 \section{ISO --- filtering runs by a value they hold constant}
@@ -1580,13 +1720,65 @@ and cannot be chosen.
 To its right, \emph{Tile N} names the active tile and four arrows swap it with
 its neighbour to the left, above, below or right; each arrow is enabled only when
 that move is possible, and the active index follows the tile so the move is its
-own inverse. Then \emph{Copy}, \emph{Cut}, \emph{Paste} and \emph{Clear} act
-on the active tile's whole configuration. Pasting installs an independent deep
-copy, so pasting twice gives two tiles that can then diverge. This clipboard
-lives in the process only and is not saved to a workspace.
+own inverse. Then four symbol buttons --- two offset sheets, scissors, a
+clipboard and a crossed-out frame --- copy, cut, paste and clear the active
+tile's whole configuration. Pasting installs an independent deep copy, so
+pasting twice gives two tiles that can then diverge. This clipboard lives in
+the process only and is not saved to a workspace.
+
+They were the four words until 2.3.0. As words they cost about 210\,px of a bar
+that also carries the page controls, the grid picker and the tile arrows; as
+symbols they cost four square buttons, and they are the symbols every other
+application uses for them. The tooltips still say the words.
 
 Last, behind its own rule, \emph{Fit} (\key{Ctrl+0}) auto-scales every tile,
-honouring axis locks; double-clicking one plot fits just that one.
+honouring axis locks; double-clicking one plot fits just that one. Beside it, an
+open padlock takes every X and Y scale constraint off every tile on
+\emph{every} page, releases every variable-wide constraint as well, and then
+fits everything.
+
+\begin{aoenote}{Why the padlock reaches pages you are not looking at}
+Locks are set to make a set of plots comparable, and they are set on several
+tiles at once --- often with \emph{Apply to all tiles} in \tab{scale}. A page
+left pinned behind the one on screen is then the next thing to look broken, and
+it looks broken in a way that gives no clue where to go and fix it.
+
+Each tile's stored limits are kept, so a lock put back on by hand returns to the
+numbers it had rather than to zero and one. The fit afterwards is not
+decoration: an unlock on its own changes nothing on screen --- the axes stay
+exactly where the lock was holding them --- so the button would read as doing
+nothing at all.
+\end{aoenote}
+
+\begin{aoenote}{One press, not two}
+A lock is held in two places. The tile carries \code{lock\_x} and
+\code{lock\_y}, and the view box carries a hard bound --- pyqtgraph's
+\code{setLimits} --- which is what stops a drag or a wheel taking the view
+straight back outside the range the lock imposed.
+
+The bound belongs to the view box, so it outlives the lock that set it.
+Clearing the flags and fitting in the same breath had the fit computed
+correctly and then clamped back to the range just released, and the bound was
+only dropped at the end of the fit --- which is why a second press appeared to
+work where the first had not. The bound is now released before the ranges are
+computed, and re-applied afterwards for whichever axis is still locked.
+\end{aoenote}
+
+\begin{aoenote}{Why it must release the variable-wide constraints too}
+A constraint declared for a \emph{parameter} rather than for a tile is not held
+on the tiles at all. It lives on the application state, in
+\code{global\_x\_limits} and \code{global\_y\_limits}, and
+\code{apply\_global\_limits()} re-imposes it on any tile that acquires that
+parameter --- which is precisely what makes such a constraint apply to tiles
+filled in after it was declared rather than only to the ones that existed at the
+time.
+
+So clearing the tiles alone is not an unlock. It leaves every tile momentarily
+free and then locks the next one that picks the parameter up: declare a
+constraint, press the padlock, drop a parameter on an empty tile, and the tile
+arrives constrained. The button has to release both, and the status bar reports
+the two counts separately.
+\end{aoenote}
 
 Fitting an \emph{empty} tile frames nothing, and is not recorded as having
 framed it. That matters because double-clicking is also how \tab{params} is
@@ -1635,6 +1827,8 @@ the same shape reuses the widgets and merely redraws them.
 \code{legend\_show\_file} & the file name appears & off \\
 \code{legend\_show\_sim} & the run's own identifier appears & off \\
 \code{legend\_show\_style} & withdrawn; read for compatibility, never drawn & off \\
+\code{diff\_param} & the channel differenced between two runs; empty for an ordinary tile & empty \\
+\code{diff\_a}, \code{diff\_b} & the two runs, as (file index, run index); A is the reference & $(-1,-1)$ \\
 \code{lock\_x}, \code{lock\_y} & the axis is frozen at the stored range & off \\
 \code{x\_min}, \code{x\_max} & horizontal range, in data units & 0.0, 1.0 \\
 \code{y\_min}, \code{y\_max} & vertical range, in data units even in log mode & 0.0, 1.0 \\
@@ -1642,7 +1836,7 @@ the same shape reuses the widgets and merely redraws them.
 \code{log\_y} & logarithmic y axis & off \\
 \code{show\_grid} & grid lines & on \\
 \code{show\_points} & fallback circular marker on every curve & off \\
-\code{color\_mode} & parameter, simulation or ISO & parameter \\
+\code{color\_mode} & parameter, file, simulation or ISO & parameter \\
 \code{color\_iso\_param} & the ISO parameter that colours the tile & empty \\
 \code{style\_mode} & none, file, simulation or ISO & none \\
 \code{style\_iso\_param} & the ISO parameter that dashes the tile & empty \\
@@ -3657,7 +3851,7 @@ two-space indentation. The schema is at version~3.
 \begin{aoecode}
 {
   "version": 3,
-  "app_version": "2.2.3",
+  "app_version": "2.3.0",
   "files":    ["/abs/path/run_a.aoe"],
   "computed": {"LOAD_FACTOR": "NZ * 9.80665"},
   "aliases":  {"Angle of attack": "ALPHA"},
@@ -3695,6 +3889,7 @@ two-space indentation. The schema is at version~3.
   "global_y_limits": {},
   "dark_mode": true,
   "ui_scale": 1.0,
+  "panel_order": ["DATA", "PARAMS", "DIFF", "STYLE"],
   "mouse_mode": 0
 }
 \end{aoecode}
@@ -3704,10 +3899,17 @@ Chapter~\ref{ch:pages}, including its captions and both encodings. Only the
 visible tiles of a page are written; loading pads the list back up to
 twenty-five.
 
-\code{ui\_scale} is absent from every workspace written before \appver{}, and
-from one written by hand; 1.0 is the size those were laid out at, and a value
+\code{ui\_scale} is absent from every workspace written before 2.1.2, and from
+one written by hand; 1.0 is the size those were laid out at, and a value
 outside the range is clamped rather than refused so that a workspace from a
 future version with a wider range still opens.
+
+\code{panel\_order} is the arrangement of the tab rail, as panel names, and is
+absent from everything written before \appver{}; those open in the order the
+window builds the panels in. A name this version does not have is ignored ---
+\tab{alias}, which 2.2.x had and this version does not --- and one it has that
+the list does not mention keeps its place at the end, so the tabs the two
+versions share are arranged either way and nothing is ever lost from the rail.
 
 \code{file\_names} and \code{sim\_names} are optional and written only when
 something was renamed (\S\ref{sec:workspaces}). \code{app\_version} records

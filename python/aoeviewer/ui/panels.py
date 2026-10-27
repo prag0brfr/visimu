@@ -812,7 +812,6 @@ class ParameterPanel(QWidget):
     """
 
     tile_changed = Signal()
-    alias_requested = Signal(str)
 
     def __init__(self, session: Session, state: AppState, parent=None):
         super().__init__(parent)
@@ -858,7 +857,8 @@ class ParameterPanel(QWidget):
         hint = QLabel(
             "Selected parameters are listed first. The filter hides names "
             "that do not match but does not change that order. "
-            "Right-click a parameter to rename it or give it an alias. "
+            "Right-click a parameter to use it as X or copy its name; "
+            "COMPUTE renames one. "
             "Legend, grid, log scale and markers are in the STYLE tab."
         )
         hint.setObjectName("Hint")
@@ -1025,43 +1025,18 @@ class ParameterPanel(QWidget):
         name = item.data(Qt.ItemDataRole.UserRole) or item.text()
 
         menu = QMenu(self)
-        alias_action = menu.addAction("Create alias for {0}...".format(name))
-        menu.addSeparator()
         x_action = menu.addAction("Use as X axis")
         copy_action = menu.addAction("Copy name")
 
         chosen = menu.exec(self.y_list.mapToGlobal(position))
         if chosen is None:
             return
-        if chosen is alias_action:
-            self._create_alias(name)
-        elif chosen is x_action:
+        if chosen is x_action:
             index = self.x_combo.findData(name)
             if index >= 0:
                 self.x_combo.setCurrentIndex(index)
         elif chosen is copy_action:
             QApplication.clipboard().setText(name)
-
-    def _create_alias(self, target: str) -> None:
-        """A second name for a channel, created where the channel is.
-
-        The ALIAS tab can do this too, but by the time you have found the
-        parameter in a list of four hundred and decided its name is unhelpful,
-        being sent to another tab to find it again is the wrong answer.
-        """
-        suggestion = target.replace("_", " ").title()
-        alias, accepted = QInputDialog.getText(
-            self, "Create alias",
-            "Show \"{0}\" under this name as well:".format(target),
-            text=suggestion,
-        )
-        if not accepted:
-            return
-        alias = alias.strip()
-        if not alias or alias == target:
-            return
-        self._session.set_alias(alias, target)
-        self.alias_requested.emit(alias)
 
     def _on_filter_typed(self, _text: str) -> None:
         """Restart the idle timer. Nothing is hidden or shown until it fires."""
@@ -4842,6 +4817,276 @@ class TextPanel(QWidget):
 # ==========================================================================
 
 
+# ==========================================================================
+# Diff
+# ==========================================================================
+
+
+class DiffPanel(QWidget):
+    """Draw the difference between one channel's values in two runs.
+
+    The question this answers is the one a page of overlaid curves cannot:
+    two runs that look alike at tile scale differ by three per cent somewhere
+    in the middle, and the eye cannot find where. A difference curve puts that
+    where it belongs -- on the y axis, at the x it happened.
+
+    One channel and two runs, and no more. A tile holding four differences of
+    three channels answers nothing; a second difference is a second tile. The
+    two runs may come from different files, which is the case this is most
+    often wanted for -- the same manoeuvre from two builds of the model.
+
+    The runs keep their own instants: the difference is taken on the first
+    run's x with the second read at those x by interpolation, over the stretch
+    of x they share. Where SYNC is on, both are aligned on their event first,
+    so two runs of the same manoeuvre flown at different clock times can be
+    differenced at all.
+    """
+
+    tile_changed = Signal()
+
+    # What "no run" is, in the same shape a run is.
+    NONE_RUN = (-1, -1)
+
+    # A class attribute, and that is deliberate: this is a QWidget, and a
+    # missing instance attribute reads as "some object" to any getattr with a
+    # default. The honest answer before the first refresh is "no runs listed".
+    _run_entries = None
+
+    def __init__(self, session: Session, state: AppState, parent=None):
+        super().__init__(parent)
+        self._session = session
+        self._state = state
+        self._updating = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
+
+        self.tile_label = QLabel("")
+        self.tile_label.setObjectName("Hint")
+        self.tile_label.setWordWrap(True)
+        layout.addWidget(self.tile_label)
+
+        chosen = QGroupBox("Difference")
+        form = QFormLayout(chosen)
+
+        # The tile's x axis, settable from here. It is the same setting PARAMS
+        # offers and writes the same field -- a difference is read against x
+        # like any other curve, and being sent to another tab to choose it is
+        # a step in the way of the one question this panel asks.
+        self.x_combo = QComboBox()
+        self.x_combo.setToolTip(
+            "The tile's X axis. The same setting as in PARAMS; either one "
+            "moves it.")
+        self.x_combo.currentIndexChanged.connect(self._on_x_changed)
+        form.addRow("X axis", self.x_combo)
+
+        self.param_combo = QComboBox()
+        self.param_combo.setToolTip(
+            "The channel to difference. One, because a tile of several "
+            "differences answers nothing.")
+        self.param_combo.currentIndexChanged.connect(self._on_changed)
+        form.addRow("Parameter", self.param_combo)
+
+        self.a_combo = QComboBox()
+        self.a_combo.setToolTip(
+            "The reference run. The difference is drawn against this run's X "
+            "values, over the stretch of X the two share.")
+        self.a_combo.currentIndexChanged.connect(self._on_changed)
+        form.addRow("Run A", self.a_combo)
+
+        self.b_combo = QComboBox()
+        self.b_combo.setToolTip("Subtracted from run A, read at run A's X.")
+        self.b_combo.currentIndexChanged.connect(self._on_changed)
+        form.addRow("Run B", self.b_combo)
+
+        layout.addWidget(chosen)
+
+        self.state_label = QLabel("")
+        self.state_label.setObjectName("Hint")
+        self.state_label.setWordWrap(True)
+        layout.addWidget(self.state_label)
+
+        clear = QPushButton("Stop differencing this tile")
+        clear.setToolTip(
+            "Give the tile back to the parameters ticked in PARAMS")
+        clear.clicked.connect(self._clear)
+        layout.addWidget(clear)
+
+        hint = QLabel(
+            "The X axis is the tile's own -- the same setting PARAMS shows, "
+            "changed from either -- and the curve is A - B against it.\n\n"
+            "The two runs need not be the same length or come from the same "
+            "file: B is read at A's X by linear interpolation, and the curve "
+            "covers the X the two have in common -- outside it there is "
+            "nothing to subtract.\n\n"
+            "While a tile is differencing, the parameters ticked in PARAMS "
+            "are left alone and not drawn. Colour, dash and width come from "
+            "STYLE as usual, keyed on the channel."
+        )
+        hint.setObjectName("Hint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        layout.addStretch(1)
+
+    # ------------------------------------------------------------- the runs
+
+    def _runs(self):
+        """Every loaded run as (label, (file index, run index)).
+
+        Every run, not only the ticked ones: a difference is a question about
+        two particular runs, and having to tick them in DATA first -- which
+        would also draw them -- is a step in the way of the question.
+        """
+        entries = [("--", self.NONE_RUN)]
+        for file_index in range(self._session.file_count):
+            handle = self._session.file(file_index)
+            if handle is None:
+                continue
+            for sim_index, sim in enumerate(handle.simulations):
+                entries.append(("{0}  /  {1}".format(handle.name, sim.sim_id),
+                                (file_index, sim_index)))
+        return entries
+
+    @staticmethod
+    def _position_of(entries, run) -> int:
+        """Where a run sits in the list, by value, in Python.
+
+        Not QComboBox.findData. Item data goes through a QVariant, and a
+        Python tuple does not come back out of one comparing equal to the
+        tuple that went in -- so the lookup reported "not in the list" for a
+        run that was in it, every refresh reset the box to "--", and the two
+        runs could not be chosen at all. Strings and numbers would have been
+        fine; the lesson is not to ask Qt to match anything else.
+        """
+        for position, (_label, candidate) in enumerate(entries):
+            if tuple(candidate) == tuple(run):
+                return position
+        return 0
+
+    def refresh(self) -> None:
+        self._updating = True
+        try:
+            tile = self._state.tile
+            self.tile_label.setText(
+                "Tile {0}:  {1}".format(self._state.active_tile + 1,
+                                        tile_title(tile)))
+
+            params = list(self._session.parameters)
+
+            self.x_combo.clear()
+            self.x_combo.addItem("--", "")
+            for name in params:
+                self.x_combo.addItem(self._session.label(name), name)
+            x_wanted = tile.x_param if tile.x_param in params else ""
+            x_index = self.x_combo.findData(x_wanted)
+            self.x_combo.setCurrentIndex(max(0, x_index))
+
+            self.param_combo.clear()
+            self.param_combo.addItem("--", "")
+            for name in params:
+                self.param_combo.addItem(self._session.label(name), name)
+            wanted = tile.diff_param if tile.diff_param in params else ""
+            index = self.param_combo.findData(wanted)
+            self.param_combo.setCurrentIndex(max(0, index))
+
+            # Held, because the combo's own item data cannot be trusted to
+            # hand a tuple back -- see _position_of.
+            self._run_entries = self._runs()
+            for combo, current in ((self.a_combo, tuple(tile.diff_a)),
+                                   (self.b_combo, tuple(tile.diff_b))):
+                combo.clear()
+                for label, run in self._run_entries:
+                    combo.addItem(label)
+                combo.setCurrentIndex(
+                    self._position_of(self._run_entries, current))
+
+            self.state_label.setText(self._describe(tile))
+        finally:
+            self._updating = False
+
+    def _describe(self, tile) -> str:
+        """What the tile is doing, in the words the user would use.
+
+        Said here because a difference that cannot be drawn looks exactly like
+        one that is drawn and happens to be zero.
+        """
+        if tile.is_diff():
+            return "Drawing the difference. The tile's other parameters are " \
+                   "not drawn while it does."
+        if not tile.x_param:
+            return "Choose an X axis above."
+        if not tile.diff_param:
+            return "Choose a parameter and two runs."
+        if tuple(tile.diff_a) == tuple(tile.diff_b) \
+                and tuple(tile.diff_a) != self.NONE_RUN:
+            return "Run A and run B are the same run; the difference would " \
+                   "be zero everywhere."
+        return "Choose two runs."
+
+    # -------------------------------------------------------------- changes
+
+    def _on_x_changed(self, _index: int = 0) -> None:
+        """The same field PARAMS writes, written from here."""
+        if self._updating:
+            return
+        chosen = self.x_combo.currentData() or ""
+        tile = self._state.tile
+        if chosen == tile.x_param:
+            return
+        tile.x_param = chosen
+        # A different x is a different plot, so the frame it had describes
+        # nothing.
+        tile.view_initialised = False
+        self._state.dirty = True
+        self.state_label.setText(self._describe(tile))
+        self.tile_changed.emit()
+
+    def _on_changed(self, _index: int = 0) -> None:
+        if self._updating:
+            return
+        tile = self._state.tile
+        tile.diff_param = self.param_combo.currentData() or ""
+        tile.diff_a = self._run_of(self.a_combo)
+        tile.diff_b = self._run_of(self.b_combo)
+        # A tile that has just become a diff has never been framed as one, and
+        # a difference occupies a completely different range from the channel
+        # it came from -- so it is fitted rather than keeping the view the
+        # curves left behind.
+        tile.view_initialised = False
+        self._state.dirty = True
+        self.state_label.setText(self._describe(tile))
+        self.tile_changed.emit()
+
+    def _run_of(self, combo):
+        """The run a combo is showing, read by position out of our own list."""
+        entries = getattr(self, "_run_entries", None)
+        if not isinstance(entries, list):
+            return self.NONE_RUN
+        position = combo.currentIndex()
+        if not (0 <= position < len(entries)):
+            return self.NONE_RUN
+        try:
+            first, second = entries[position][1]
+            return (int(first), int(second))
+        except (TypeError, ValueError):
+            return self.NONE_RUN
+
+    def _clear(self) -> None:
+        tile = self._state.tile
+        if not tile.diff_param and tuple(tile.diff_a) == self.NONE_RUN \
+                and tuple(tile.diff_b) == self.NONE_RUN:
+            return
+        tile.diff_param = ""
+        tile.diff_a = self.NONE_RUN
+        tile.diff_b = self.NONE_RUN
+        tile.view_initialised = False
+        self._state.dirty = True
+        self.refresh()
+        self.tile_changed.emit()
+
+
 class Plot3DPanel(QWidget):
     """Turn the active tile into a rotatable 3D projection of three channels.
 
@@ -5049,99 +5294,6 @@ class Plot3DPanel(QWidget):
                 other.show_3d_grid = tile.show_3d_grid
         self._state.dirty = True
         self.tile_changed.emit()
-
-
-# ==========================================================================
-# Parameter aliases
-# ==========================================================================
-
-
-class AliasPanel(QWidget):
-    """Give a channel a readable name without touching the file.
-
-    AOE files name channels whatever the writing code called them; an alias lets
-    the whole application show "Load factor" while still reading NZ. Chains are
-    resolved by the core and cycles are broken, so A->B->A cannot hang anything.
-    """
-
-    aliases_changed = Signal()
-
-    def __init__(self, session: Session, state: AppState, parent=None):
-        super().__init__(parent)
-        self._session = session
-        self._state = state
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(4)
-
-        layout.addWidget(_title("New alias"))
-
-        self.target_combo = QComboBox()
-        self.target_combo.setEditable(False)
-        layout.addWidget(QLabel("Channel"))
-        layout.addWidget(self.target_combo)
-
-        self.alias_edit = QLineEdit()
-        self.alias_edit.setPlaceholderText("Show it as, e.g. Load factor")
-        self.alias_edit.returnPressed.connect(self._add)
-        layout.addWidget(QLabel("Display name"))
-        layout.addWidget(self.alias_edit)
-
-        add = QPushButton("Add alias")
-        add.clicked.connect(self._add)
-        layout.addWidget(add)
-
-        self.message = QLabel("")
-        self.message.setObjectName("Hint")
-        self.message.setWordWrap(True)
-        layout.addWidget(self.message)
-
-        layout.addWidget(_title("Defined"))
-        self.list = QListWidget()
-        layout.addWidget(self.list, 1)
-
-        remove = QPushButton("Remove selected")
-        remove.clicked.connect(self._remove)
-        layout.addWidget(remove)
-
-    def refresh(self) -> None:
-        current = self.target_combo.currentText()
-        self.target_combo.clear()
-        self.target_combo.addItems(self._session.parameters)
-        if current:
-            self.target_combo.setCurrentText(current)
-
-        self.list.clear()
-        for name in sorted(self._session.parameters):
-            resolved = self._session.resolve(name)
-            if resolved != name:
-                item = QListWidgetItem("{0}  →  {1}".format(name, resolved))
-                item.setData(Qt.ItemDataRole.UserRole, name)
-                self.list.addItem(item)
-
-    def _add(self) -> None:
-        alias = self.alias_edit.text().strip()
-        target = self.target_combo.currentText().strip()
-        if not alias or not target:
-            self.message.setText("Pick a channel and type a display name.")
-            return
-        if alias == target:
-            self.message.setText("The alias and the channel are the same name.")
-            return
-        self._session.set_alias(alias, target)
-        self.alias_edit.clear()
-        self.message.setText("{0} now also reachable as {1}.".format(target, alias))
-        self.refresh()
-        self.aliases_changed.emit()
-
-    def _remove(self) -> None:
-        item = self.list.currentItem()
-        if item is None:
-            return
-        self._session.remove_alias(item.data(Qt.ItemDataRole.UserRole))
-        self.refresh()
-        self.aliases_changed.emit()
 
 
 # ==========================================================================

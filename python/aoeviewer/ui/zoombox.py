@@ -44,6 +44,11 @@ THIN_RATIO = 4.0
 # hundred, and the only way back is Fit.
 MIN_DRAG_PX = 6.0
 
+# A zoom that every tile follows on x. Two ways to ask for it, because two
+# habits exist: the right button, and Ctrl with the left. Neither changes what
+# the drag means -- an area drag, an x-only drag and a y-only drag all stay
+# what they were; the x of the result is simply handed to the other tiles as
+# well.
 AREA = "area"
 HORIZONTAL = "x"      # a flat drag: x from the drag, y left alone
 VERTICAL = "y"        # an upright drag: y from the drag, x left alone
@@ -100,17 +105,28 @@ def stretched(origin, current, bounds: QRectF, mode: str):
 class DirectionalViewBox(pg.ViewBox):
     """A view box whose rectangle zoom reads the direction of the drag.
 
-    Only the left-button rectangle drag on both axes is taken over. A drag
+    Only a rectangle drag on both axes, in zoom mode, is taken over. A drag
     with a specific axis --- which is what dragging on an axis itself produces
-    --- a middle or right drag, and pan mode are all handed back to pyqtgraph,
-    because none of them is the gesture this is about.
+    --- a middle drag, and pan mode are all handed back to pyqtgraph, because
+    none of them is the gesture this is about.
+
+    The left button zooms this tile. The right button, or Ctrl with the left,
+    zooms this tile and hands the x range it ended up with to `shared_x_zoom`,
+    which is how every other tile comes along. The shape of the drag is read
+    the same way in both cases: what the modifier changes is who the zoom
+    reaches, not what it means.
     """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Set by the tile. Called with (low, high) in data coordinates when a
+        # zoom was asked to reach the other tiles.
+        self.shared_x_zoom = None
 
     def mouseDragEvent(self, event, axis=None):
         if not self._is_area_zoom(event, axis):
             return super().mouseDragEvent(event, axis=axis)
 
-        event.accept()
         origin = event.buttonDownPos(event.button())
         current = event.pos()
         bounds = self.boundingRect()
@@ -121,11 +137,14 @@ class DirectionalViewBox(pg.ViewBox):
 
         if mode == NOTHING:
             # Nothing happens, and the band is taken down: a twitch while
-            # clicking must leave the view where it was.
+            # clicking must leave the view where it was. Not accepted either,
+            # so a right-click that was never a drag is still a right-click
+            # and the view box's own menu opens on it.
             if event.isFinish():
                 self._hide_band()
             return
 
+        event.accept()
         first, last = stretched(origin, current, bounds, mode)
 
         if not event.isFinish():
@@ -137,14 +156,39 @@ class DirectionalViewBox(pg.ViewBox):
         self.showAxRect(rect)
         self._remember(rect)
 
+        if self.is_global(event) and callable(self.shared_x_zoom):
+            # Normalised, because a drag that went right to left gives a
+            # rectangle with a negative width and "the x range" has no sign.
+            flat = rect.normalized()
+            self.shared_x_zoom(float(flat.left()), float(flat.right()))
+
     # ------------------------------------------------------------ helpers
+
+    @staticmethod
+    def is_global(event) -> bool:
+        """Whether this drag was asking for every tile to follow on x.
+
+        The right button, or Ctrl with any button. Read off the event rather
+        than from a mode, so there is nothing to set beforehand and nothing
+        left switched on afterwards.
+        """
+        try:
+            if event.button() == Qt.MouseButton.RightButton:
+                return True
+        except (AttributeError, TypeError):
+            pass
+        try:
+            return bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        except (AttributeError, TypeError):
+            return False
 
     def _is_area_zoom(self, event, axis) -> bool:
         """Whether this drag is the one we mean to reinterpret."""
         if axis is not None:
             return False
         try:
-            if event.button() != Qt.MouseButton.LeftButton:
+            if event.button() not in (Qt.MouseButton.LeftButton,
+                                      Qt.MouseButton.RightButton):
                 return False
         except (AttributeError, TypeError):
             return False

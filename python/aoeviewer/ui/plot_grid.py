@@ -29,6 +29,7 @@ class PlotGrid(QWidget):
     annotation_moved = Signal()
     legend_moved = Signal()
     text_moved = Signal()
+    x_zoom_shared = Signal(float, float)
 
     def __init__(self, session: Session, state: AppState, theme: Theme, parent=None):
         super().__init__(parent)
@@ -90,6 +91,7 @@ class PlotGrid(QWidget):
                 tile.annotation_moved.connect(self.annotation_moved.emit)
                 tile.legend_moved.connect(self.legend_moved.emit)
                 tile.text_moved.connect(self.text_moved.emit)
+                tile.x_zoom_shared.connect(self.x_zoom_shared.emit)
                 tile.apply_theme(self._theme)
                 self._layout.addWidget(tile, row, col)
                 self._tiles.append(tile)
@@ -128,6 +130,17 @@ class PlotGrid(QWidget):
         by_file: Dict[int, List[str]] = {}
         for file_index, _sim in self._state.plotted_sims():
             by_file.setdefault(file_index, sorted(names))
+        # A differencing tile names two runs of its own, and nothing says
+        # either is ticked for drawing -- so their files have to be in the
+        # batch as well, or the diff falls back to reading its columns one at
+        # a time while the window waits.
+        for tile in self._tiles:
+            state = tile.tile_state
+            runs = state.diff_runs()
+            if runs is None:
+                continue
+            for file_index, _sim_index in runs:
+                by_file.setdefault(file_index, sorted(names))
         return by_file
 
     def plotted_sims_by_file(self) -> Dict[int, List[int]]:

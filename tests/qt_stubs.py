@@ -113,10 +113,94 @@ class QWidget:
     def isEnabled(self):
         return self._enabled
 
+    def setFocusPolicy(self, policy):
+        # Recorded: which widget may take the focus decides whether a key
+        # reaches the one that handles it.
+        self.focus_policy = policy
+
+    def testAttribute(self, _attribute):
+        # False, and real rather than invented, because the tab shortcuts ask
+        # a widget whether it takes typed text and an _Any answer is truthy --
+        # which would make every widget in the window look like a text box.
+        return False
+
     def __getattr__(self, name):
         if name.startswith("__"):
             raise AttributeError(name)
         return _Any()
+
+
+class QApplication(_Any):
+    """The few class methods the application asks of itself.
+
+    Real answers rather than invented ones: whether a letter may be taken as
+    a tab shortcut turns on which widget has the focus and whether a dialog
+    is up, so both have to be answerable -- and "nothing focused, no dialog"
+    is the honest default for a stub with no event loop.
+    """
+
+    @staticmethod
+    def focusWidget():
+        return None
+
+    @staticmethod
+    def activeModalWidget():
+        return None
+
+    @staticmethod
+    def instance():
+        return None
+
+
+class QAbstractButton(QWidget):
+    """A checkable button that really remembers its text and its state.
+
+    The tab rail is a column of these and nothing else, and everything worth
+    testing about it -- which tab is current, what order the names are in,
+    what the tooltip advertises -- is read back off them. An _Any would answer
+    every one of those questions with a fresh object.
+    """
+
+    clicked = Signal(bool)
+
+    def __init__(self, *args, **kwargs):
+        QWidget.__init__(self, *args, **kwargs)
+        self._text = ""
+        self._tip = ""
+        self._checkable = False
+        self._checked = False
+        self.focus_policy = None
+        self._height = 40
+
+    def setText(self, text):
+        self._text = text
+
+    def text(self):
+        return self._text
+
+    def setToolTip(self, tip):
+        self._tip = tip
+
+    def toolTip(self):
+        return self._tip
+
+    def setCheckable(self, value):
+        self._checkable = bool(value)
+
+    def isCheckable(self):
+        return self._checkable
+
+    def setChecked(self, value):
+        self._checked = bool(value)
+
+    def isChecked(self):
+        return self._checked
+
+    def underMouse(self):
+        return False
+
+    def height(self):
+        return self._height
 
 
 class PlotDataItem:
@@ -232,6 +316,25 @@ class LegendItem:
         return _Any()
 
 
+def _clamped(view, axis, low, high):
+    """A requested range, held inside whatever bounds the view box carries.
+
+    Tolerant of a view box a test built by hand rather than from ViewBox
+    below: those have no bounds to hold anything inside, so the range is its
+    own answer.
+    """
+    low, high = float(low), float(high)
+    clamp = getattr(view, "clamp", None)
+    if not callable(clamp):
+        return low, high
+    try:
+        result = clamp(axis, low, high)
+        first, second = result
+        return float(first), float(second)
+    except (TypeError, ValueError):
+        return low, high
+
+
 class ViewBox(_Any):
     """pyqtgraph's view box, with the two pieces our subclass needs.
 
@@ -253,6 +356,43 @@ class ViewBox(_Any):
 
     def mouseDragEvent(self, event, axis=None):
         self.__dict__.setdefault("delegated_drags", []).append((event, axis))
+
+    # setLimits is a hard bound the view box *keeps*, and keeping it is the
+    # point: it outlives the lock that set it, so a stub that accepted the
+    # call and forgot it reported a fit as working when the real view box
+    # would have clamped it straight back to the range the user had just
+    # released. Modelled, therefore, rather than invented.
+
+    def setLimits(self, **kwargs):
+        limits = self.__dict__.setdefault("limits", {})
+        limits.update(kwargs)
+        self.__dict__.setdefault("limit_writes", []).append(dict(kwargs))
+
+    def clamp(self, axis, low, high):
+        """What pyqtgraph does to a requested range: hold it inside the hard
+        bounds, and inside the maximum span, before it becomes the view."""
+        limits = self.__dict__.get("limits") or {}
+        if not isinstance(limits, dict):
+            limits = {}
+        if axis == "x":
+            lo_key, hi_key, span_key = "xMin", "xMax", "maxXRange"
+        else:
+            lo_key, hi_key, span_key = "yMin", "yMax", "maxYRange"
+        floor, ceiling = limits.get(lo_key), limits.get(hi_key)
+        span = limits.get(span_key)
+
+        if span is not None and (high - low) > span:
+            middle = (low + high) / 2.0
+            low, high = middle - span / 2.0, middle + span / 2.0
+        if floor is not None and low < floor:
+            low, high = floor, high + (floor - low)
+        if ceiling is not None and high > ceiling:
+            low, high = low - (high - ceiling), ceiling
+        if floor is not None:
+            low = max(low, floor)
+        if ceiling is not None:
+            high = min(high, ceiling)
+        return low, high
 
 
 class _Axis:
@@ -332,11 +472,14 @@ class PlotItem:
             self.legend.removeItem(item)
 
     def setXRange(self, low, high, **kwargs):
+        # Through the view box's bounds, as the real one goes.
+        low, high = _clamped(self.vb, "x", low, high)
         self.range_writes.append(("x", float(low), float(high)))
         self._view_range[0] = [float(low), float(high)]
         self.vb._range[0] = [float(low), float(high)]
 
     def setYRange(self, low, high, **kwargs):
+        low, high = _clamped(self.vb, "y", low, high)
         self.range_writes.append(("y", float(low), float(high)))
         self._view_range[1] = [float(low), float(high)]
         self.vb._range[1] = [float(low), float(high)]
@@ -384,9 +527,20 @@ class PlotItem:
 
 
 class _ViewBox:
+    """The view box a PlotItem owns, as far as the tile uses one.
+
+    setLimits is modelled rather than invented, and the ranges a PlotItem sets
+    are held inside it: the bound a lock puts here outlives the lock, so a
+    stub that forgot the call reported a fit as working where the real view
+    box clamps it straight back to the range just released. See ViewBox.clamp
+    above, whose behaviour this shares.
+    """
+
     def __init__(self):
         self._range = [[0.0, 1.0], [0.0, 1.0]]
         self._width = 900
+        self.limits = {}
+        self.limit_writes = []
 
     def viewRange(self):
         return self._range
@@ -396,6 +550,13 @@ class _ViewBox:
 
     def boundingRect(self):
         return _Any()
+
+    def setLimits(self, **kwargs):
+        self.limits.update(kwargs)
+        self.limit_writes.append(dict(kwargs))
+
+    def clamp(self, axis, low, high):
+        return ViewBox.clamp(self, axis, low, high)
 
     def __getattr__(self, name):
         if name.startswith("__"):
@@ -428,6 +589,12 @@ class QComboBox:
         # difference between setting one row's style and setting five.
         self.focus_policy = policy
 
+    def setEditable(self, value):
+        self.editable = bool(value)
+
+    def isEditable(self):
+        return bool(getattr(self, "editable", False) is True)
+
     def showPopup(self):
         # The real one drops a list window; here it only has to exist, so
         # StyleCombo can call up to it.
@@ -449,9 +616,20 @@ class QComboBox:
     def count(self):
         return len(self._items)
 
+    # What a QVariant will and will not hand back intact. Anything else --
+    # a tuple, a list, an object -- goes into item data and does not come out
+    # of findData comparing equal to what went in, so the real widget answers
+    # "not in the list" for something that is in it. Modelled, because a stub
+    # that compared Python values reported a panel as working when the real
+    # one could not select a row at all: the DIFF tab's two run boxes reset to
+    # "--" on every refresh and the runs could not be chosen.
+    _MATCHABLE = (str, int, float, bool, type(None))
+
     def findData(self, data):
+        if not isinstance(data, self._MATCHABLE):
+            return -1
         for index, (_label, value) in enumerate(self._items):
-            if value == data:
+            if isinstance(value, self._MATCHABLE) and value == data:
                 return index
         return -1
 
@@ -488,6 +666,13 @@ class QComboBox:
 
     def currentData(self):
         return self._items[self._index][1] if self._index >= 0 else None
+
+    def currentIndex(self):
+        # An int, like Qt's, and for the same reason findText above is one: a
+        # panel that reads a choice by position -- which is what a choice
+        # whose value Qt cannot match for us has to do -- would otherwise be
+        # comparing an _Any against a length.
+        return self._index
 
     def __getattr__(self, name):
         if name.startswith("__"):
@@ -1117,6 +1302,20 @@ def _make_qt():
     qt.FocusPolicy = _Enum(NoFocus=0, TabFocus=1, ClickFocus=2,
                            StrongFocus=11, WheelFocus=15)
     qt.ItemDataRole = _Enum(DisplayRole=0, UserRole=256, ToolTipRole=3)
+    # The modifier bits are Qt's own, because the tab shortcuts combine them
+    # with `|` at class-definition time and test a key event against the mask.
+    qt.KeyboardModifier = _Enum(NoModifier=0,
+                                ShiftModifier=0x02000000,
+                                ControlModifier=0x04000000,
+                                AltModifier=0x08000000,
+                                MetaModifier=0x10000000)
+    # Distinct, and that is all the rail asks of them.
+    qt.Key = _Enum(Key_Up=0x01000013, Key_Down=0x01000015,
+                   Key_Left=0x01000012, Key_Right=0x01000014,
+                   Key_Home=0x01000010, Key_End=0x01000011,
+                   Key_Escape=0x01000000, Key_Return=0x01000004)
+    qt.WidgetAttribute = _Enum(WA_InputMethodEnabled=1,
+                               WA_TranslucentBackground=2)
     return qt
 
 
@@ -1231,6 +1430,68 @@ class QFontMetricsF:
         return self.LINE_HEIGHT * 0.2
 
 
+class _LayoutItem:
+    """What Qt's layouts hand back: an item wrapping a widget."""
+
+    def __init__(self, widget):
+        self._widget = widget
+
+    def widget(self):
+        return self._widget
+
+
+class QBoxLayout(_Any):
+    """A box layout that really keeps its items, in order.
+
+    Everything else about a layout is invented on demand like any other stub,
+    but membership is not: the tab rail rearranges itself by taking every
+    button out and putting them back in a new order, so a count() that never
+    reaches zero is an endless loop rather than a wrong answer.
+    """
+
+    def __init__(self, *args, **kwargs):
+        _Any.__init__(self, *args, **kwargs)
+        self.items = []
+
+    def addWidget(self, widget, *args, **kwargs):
+        self.items.append(widget)
+
+    def insertWidget(self, index, widget, *args, **kwargs):
+        try:
+            index = int(index)
+        except (TypeError, ValueError):
+            index = len(self.items)
+        self.items.insert(max(0, index), widget)
+
+    def addStretch(self, *args, **kwargs):
+        # A stretch is a spacer, not a widget: it occupies a place and has no
+        # widget of its own, which is exactly what None models here.
+        self.items.append(None)
+
+    def addSpacing(self, *args, **kwargs):
+        self.items.append(None)
+
+    def addLayout(self, layout, *args, **kwargs):
+        self.items.append(layout)
+
+    def count(self):
+        return len(self.items)
+
+    def itemAt(self, index):
+        if 0 <= index < len(self.items):
+            return _LayoutItem(self.items[index])
+        return None
+
+    def takeAt(self, index):
+        if 0 <= index < len(self.items):
+            return _LayoutItem(self.items.pop(index))
+        return None
+
+    def widgets(self):
+        """The widgets in it, in order. For tests to read the arrangement."""
+        return [item for item in self.items if item is not None]
+
+
 def install() -> None:
     """Put the stub modules into sys.modules, whether or not Qt is installed.
 
@@ -1250,6 +1511,17 @@ def install() -> None:
     core.Qt = _make_qt()
     for name in ("QObject", "QThread"):
         setattr(core, name, type(name, (_Any,), {}))
+
+    # Qt's own numbers, and on the class: the auto-module's placeholder only
+    # answers lookups on an instance, so QEvent.Type raised where the real one
+    # does not -- and the tab shortcuts compare a key press against it.
+    class QEvent(_Any):
+        Type = _Enum(MouseButtonPress=2, MouseButtonRelease=3,
+                     MouseMove=5, KeyPress=6, KeyRelease=7,
+                     FocusIn=8, FocusOut=9, Enter=10, Leave=11,
+                     Wheel=31, ShortcutOverride=51)
+
+    core.QEvent = QEvent
     # These two carry numbers rather than inventing attributes: the zoom reads
     # a drag's coordinates to decide which axes it means.
     core.QPointF = QPointF
@@ -1336,6 +1608,11 @@ def install() -> None:
         Policy = _Policy
 
     widgets.QSizePolicy = QSizePolicy
+    widgets.QApplication = QApplication
+    widgets.QAbstractButton = QAbstractButton
+    widgets.QBoxLayout = QBoxLayout
+    widgets.QVBoxLayout = QBoxLayout
+    widgets.QHBoxLayout = QBoxLayout
     widgets.QWidget = QWidget
     widgets.QComboBox = QComboBox
     widgets.QTableWidget = QTableWidget

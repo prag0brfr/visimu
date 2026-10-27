@@ -320,10 +320,20 @@ class TestDrawPathWiring(unittest.TestCase):
         one carries the key its points were computed for. So the skip in
         _resample_visible() is the whole mechanism, and forcing past it defeats
         the reuse that _adopt_groups() exists to find.
+
+        Read off _frame_after_rebuild, which is where the framing and the
+        redraw at the end of a rebuild live now that the diff path shares
+        them with the ordinary one.
         """
-        body = self._source("ui/plot_tile.py", "PlotTile", "rebuild")
+        body = self._source("ui/plot_tile.py", "PlotTile",
+                            "_frame_after_rebuild")
         self.assertIn("self._resample_visible()", body)
         self.assertNotIn("_resample_visible(force=True)", body)
+
+        rebuild = self._source("ui/plot_tile.py", "PlotTile", "rebuild")
+        self.assertNotIn("_resample_visible(force=True)", rebuild)
+        # And every path out of a rebuild that drew something goes through it.
+        self.assertIn("self._frame_after_rebuild(tile)", rebuild)
 
     def test_the_legend_is_capped(self):
         body = self._source("ui/plot_tile.py", "PlotTile", "rebuild")
@@ -467,10 +477,13 @@ class TestDrawPathWiring(unittest.TestCase):
         self.assertIn("fit_requested", toolbar)
         # It re-frames rather than rearranging, so it gets its own rule after
         # the copy/cut/paste group.
-        _before, _sep, after = toolbar.partition('"Clear", self._clear_tile')
+        _before, _sep, after = toolbar.partition('"clear", self._clear_tile')
         self.assertTrue(_sep, "the tile clipboard group has moved")
         self.assertIn("_separator()", after)
         self.assertIn("fit_button", after)
+        # And Unlock after Fit, since it is Fit with the locks taken off.
+        _f, _sep, after_fit = after.partition("fit_button")
+        self.assertIn("unlock_button", after_fit)
 
     def test_the_theme_toggle_lives_in_the_toolbar(self):
         """With the rest of what changes how the window looks.

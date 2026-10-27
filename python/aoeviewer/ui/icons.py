@@ -311,6 +311,75 @@ def _draw_moon(painter: QPainter, color: QColor) -> None:
     painter.drawPath(full.subtracted(bite))
 
 
+# ------------------------------------------------------------- tile actions
+#
+# Copy, cut, paste and clear were words in buttons, which cost about 210 px of
+# a bar that also holds the page controls, the grid picker and the tile
+# arrows. As symbols they cost four square buttons, and they are the four
+# symbols every other application uses for them -- the tooltips still say the
+# words.
+
+
+def _draw_copy(painter: QPainter, color: QColor) -> None:
+    """Two offset sheets, the back one peeking out behind the front."""
+    painter.setPen(_pen(color, 8.0))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawRoundedRect(QRectF(14, 14, 48, 56), 6.0, 6.0)
+    painter.drawRoundedRect(QRectF(38, 30, 48, 56), 6.0, 6.0)
+
+
+def _draw_cut(painter: QPainter, color: QColor) -> None:
+    """Scissors: two blades crossed, two finger holes below."""
+    painter.setPen(_pen(color, 8.0))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawLine(QPointF(24, 12), QPointF(66, 66))
+    painter.drawLine(QPointF(76, 12), QPointF(34, 66))
+    painter.drawEllipse(QRectF(16, 64, 24, 24))
+    painter.drawEllipse(QRectF(60, 64, 24, 24))
+
+
+def _draw_paste(painter: QPainter, color: QColor) -> None:
+    """A clipboard: a sheet with a clip at the top."""
+    painter.setPen(_pen(color, 8.0))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawRoundedRect(QRectF(22, 20, 56, 68), 7.0, 7.0)
+    painter.setBrush(QBrush(color))
+    painter.drawRoundedRect(QRectF(38, 10, 24, 18), 4.0, 4.0)
+
+
+def _draw_clear(painter: QPainter, color: QColor) -> None:
+    """An empty frame with a cross through it: the tile, emptied."""
+    painter.setPen(_pen(color, 8.0))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawRoundedRect(QRectF(14, 18, 72, 64), 7.0, 7.0)
+    painter.setPen(_pen(color, 7.0))
+    painter.drawLine(QPointF(34, 38), QPointF(66, 62))
+    painter.drawLine(QPointF(66, 38), QPointF(34, 62))
+
+
+def _draw_unlock(painter: QPainter, color: QColor) -> None:
+    """An open padlock: the body closed, the shackle swung clear on one side.
+
+    Open and not merely unlatched, because what the button does is undo every
+    lock at once, and a padlock that might be either is the one icon that
+    would need its tooltip read first.
+    """
+    painter.setPen(_pen(color, 8.0))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    # The shackle: a half circle rising from the left shoulder of the body and
+    # coming down outside it, which is what makes it read as off rather than
+    # on.
+    shackle = QPainterPath()
+    shackle.moveTo(30, 48)
+    shackle.lineTo(30, 34)
+    shackle.arcTo(QRectF(30, 10, 44, 44), 180.0, -180.0)
+    shackle.lineTo(74, 44)
+    painter.drawPath(shackle)
+    painter.setBrush(QBrush(color))
+    painter.setPen(_pen(color, 6.0))
+    painter.drawRoundedRect(QRectF(16, 48, 54, 42), 7.0, 7.0)
+
+
 _PAINTERS: Dict[str, Callable[[QPainter, QColor], None]] = {
     "select": _draw_select,
     "crosshair": _draw_crosshair,
@@ -322,6 +391,11 @@ _PAINTERS: Dict[str, Callable[[QPainter, QColor], None]] = {
     "image": _draw_image,
     "table": _draw_table,
     "fit": _draw_fit,
+    "copy": _draw_copy,
+    "cut": _draw_cut,
+    "paste": _draw_paste,
+    "clear": _draw_clear,
+    "unlock": _draw_unlock,
     "slope": _draw_slope,
     "cube": _draw_cube,
     "text-larger": _draw_text_larger,

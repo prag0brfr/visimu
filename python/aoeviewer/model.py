@@ -370,6 +370,19 @@ class TileState:
     style_mode: StyleMode = StyleMode.NONE
     style_iso_param: str = ""
 
+    # --- DIFF -----------------------------------------------------------
+    # One parameter, two runs, drawn as the difference between them. The runs
+    # are (file index, run index) pairs, as everywhere else in this state, so
+    # the two may come from different files.
+    #
+    # One parameter and two runs, and no more, on purpose: the question a diff
+    # answers is "where do these two runs part company, and by how much", and
+    # a tile holding four differences of three channels answers nothing. A
+    # second difference is a second tile.
+    diff_param: str = ""
+    diff_a: Tuple[int, int] = (-1, -1)
+    diff_b: Tuple[int, int] = (-1, -1)
+
     # --- 3D -------------------------------------------------------------
     # A 3D tile plots z against x and y as a projected wireframe path. It is a
     # projection drawn with the ordinary 2D machinery rather than an OpenGL
@@ -410,9 +423,34 @@ class TileState:
         self.view3d_cy = 0.0
         self.view3d_half = DEFAULT_3D_HALF
 
+    def diff_runs(self) -> Optional[Tuple[Tuple[int, int], Tuple[int, int]]]:
+        """The two runs to difference, or None when the tile is not a diff.
+
+        A diff needs a channel, an x axis and two *different* runs. Anything
+        less is a half-filled panel rather than a plot, and is drawn as the
+        empty tile it is.
+        """
+        if not self.diff_param or not self.x_param:
+            return None
+        first, second = tuple(self.diff_a), tuple(self.diff_b)
+        for run in (first, second):
+            if len(run) != 2 or run[0] < 0 or run[1] < 0:
+                return None
+        if first == second:
+            return None
+        return first, second
+
+    def is_diff(self) -> bool:
+        return self.diff_runs() is not None
+
     def is_empty(self) -> bool:
         if self.plot3d:
             return not (self.x_param and self.y_params and self.z_param)
+        # A diff carries its own channel, so it needs no Y parameter -- and a
+        # tile that has one is a diff whatever else is ticked in PARAMS,
+        # because DIFF is the more specific instruction.
+        if self.is_diff():
+            return False
         return not self.x_param or not self.y_params
 
     def to_dict(self) -> dict:
@@ -434,6 +472,9 @@ class TileState:
             "sync_level": self.sync_level,
             "sync_target": self.sync_target,
             "sync_target_value": self.sync_target_value,
+            "diff_param": self.diff_param,
+            "diff_a": list(self.diff_a),
+            "diff_b": list(self.diff_b),
             "lock_x": self.lock_x,
             "lock_y": self.lock_y,
             "x_min": self.x_min,
@@ -486,6 +527,15 @@ class TileState:
                     tile.style_mode = StyleMode.NONE
             elif key == "y_params":
                 tile.y_params = list(value)
+            elif key in ("diff_a", "diff_b"):
+                # Written as a list and wanted as a pair. Anything that is not
+                # a pair of numbers is no run, and reads as "no diff" rather
+                # than stopping the rest of the tile from loading.
+                try:
+                    first, second = value
+                    setattr(tile, key, (int(first), int(second)))
+                except (TypeError, ValueError):
+                    setattr(tile, key, (-1, -1))
             elif key == "texts":
                 tile.texts = [TextNote.from_dict(entry) for entry in value]
             elif hasattr(tile, key):
@@ -500,6 +550,12 @@ def tile_title(tile: "TileState", max_names: int = 4, wrap: int = 36) -> str:
     being truncated: axis labels no longer carry those names.
     """
     del max_names
+    if tile.is_diff():
+        # The runs are named by the panel, which knows the files; the title
+        # says what the curve is, which is the one thing the plot itself
+        # cannot show.
+        return "\u0394{0} between two runs = f({1}){2}".format(
+            tile.diff_param, tile.x_param, sync_note(tile))
     if tile.plot3d:
         if not (tile.x_param and tile.y_params and tile.z_param):
             return "3D tile — choose X, Y and Z"
@@ -920,6 +976,11 @@ class AppState:
         # who has set the window to suit their screen should not have to set
         # it again every time they open a workspace.
         self.ui_scale: float = UI_SCALE_DEFAULT
+        # The order of the tab names down the rail, as labels. Empty means the
+        # order the window builds them in. Labels rather than indices, so a
+        # workspace written by a version with a different set of panels still
+        # arranges the ones both versions have -- see TabRail.set_order.
+        self.panel_order: List[str] = []
         self.workspace_path: Optional[str] = None
         self.dirty: bool = False
         self.mouse_mode: MouseMode = MouseMode.SELECT
@@ -1583,13 +1644,14 @@ class AppState:
     def to_dict(self) -> dict:
         return {
             "version": 3,
-            "app_version": "2.2.3",
+            "app_version": "2.3.0",
             "pages": [p.to_dict() for p in self.pages],
             "active_page": self.active_page,
             "selected_sims": sorted(list(self.selected_sims)),
             "styles": self.styles.to_dict(),
             "dark_mode": self.dark_mode,
             "ui_scale": self.ui_scale,
+            "panel_order": list(self.panel_order),
             "mouse_mode": int(self.mouse_mode),
             "markers": [
                 {"x_param": m.x_param, "position": m.position,
@@ -1638,6 +1700,15 @@ class AppState:
             self.ui_scale = float(data.get("ui_scale", 1.0))
         except (TypeError, ValueError):
             self.ui_scale = 1.0
+
+        # The rail's arrangement. Absent from anything written before 2.3.0,
+        # which opens in the order the window builds the panels in. Names that
+        # this version does not have are dropped and ones it has but the
+        # workspace does not keep their place at the end, which is handled
+        # where the rail is told about them rather than here.
+        order = data.get("panel_order", [])
+        self.panel_order = ([name for name in order if isinstance(name, str)]
+                            if isinstance(order, list) else [])
         self.mouse_mode = MouseMode(int(data.get("mouse_mode", int(MouseMode.SELECT))))
         self.markers = [
             Marker(**{k: v for k, v in m.items() if k in Marker.__annotations__})

@@ -50,10 +50,10 @@ from ..theme import (
 )
 from . import icons
 from .panels import (
-    AliasPanel,
     AreaPanel,
     ComputePanel,
     DataPanel,
+    DiffPanel,
     InspectPanel,
     IsoPanel,
     MarkerPanel,
@@ -66,7 +66,7 @@ from .panels import (
 )
 from .plot_grid import PlotGrid
 from .plot_toolbar import PlotToolbar
-from .sidebar import TabRail
+from .sidebar import TabKeyFilter, TabRail
 from .tasks import TaskRunner
 
 from ..logging_setup import get_logger
@@ -367,13 +367,13 @@ class MainWindow(QMainWindow):
         self.data_panel = DataPanel(self.session, self.state)
         self.param_panel = ParameterPanel(self.session, self.state)
         self.compute_panel = ComputePanel(self.session, self.state)
+        self.diff_panel = DiffPanel(self.session, self.state)
         self.iso_panel = IsoPanel(self.session, self.state)
         self.style_panel = StylePanel(self.session, self.state)
         self.scale_panel = ScalePanel(self.session, self.state)
         self.sync_panel = SyncPanel(self.session, self.state)
         self.area_panel = AreaPanel(self.session, self.state)
         self.marker_panel = MarkerPanel(self.session, self.state)
-        self.alias_panel = AliasPanel(self.session, self.state)
         self.inspect_panel = InspectPanel(self.session, self.state)
         self.plot3d_panel = Plot3DPanel(self.session, self.state)
         self.text_panel = TextPanel(self.session, self.state)
@@ -382,7 +382,7 @@ class MainWindow(QMainWindow):
             ("DATA", self.data_panel),
             ("PARAMS", self.param_panel),
             ("COMPUTE", self.compute_panel),
-            ("ALIAS", self.alias_panel),
+            ("DIFF", self.diff_panel),
             ("ISO", self.iso_panel),
             ("STYLE", self.style_panel),
             ("SCALE", self.scale_panel),
@@ -399,6 +399,18 @@ class MainWindow(QMainWindow):
         # width no matter how many there are.
         self.rail = TabRail([name for name, _w in self._panels], theme)
         self.rail.tab_selected.connect(self._on_tab_selected)
+        # The arrangement is the user's, so it is kept with the rest of what
+        # they arranged.
+        self.rail.order_changed.connect(self._on_tab_order_changed)
+        self.rail.set_order(self.state.panel_order)
+        # A bare letter selects a tab, except while something is being typed
+        # into; the filter has to be on the application to see the key before
+        # a list or a table takes it for its own type-ahead search. Held as an
+        # attribute so it outlives this method.
+        self._tab_keys = TabKeyFilter(self.rail, self.select_panel, self)
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self._tab_keys)
 
         self.panel_stack = QStackedWidget()
         # 230, not 300. The window's minimum width is the sum of its parts, and
@@ -452,9 +464,9 @@ class MainWindow(QMainWindow):
         self.data_panel.selection_changed.connect(self._on_selection_changed)
         self.data_panel.files_changed.connect(self.refresh_all)
         self.param_panel.tile_changed.connect(self._on_tile_content_changed)
-        self.param_panel.alias_requested.connect(self._on_alias_created)
         self.plot3d_panel.tile_changed.connect(self._on_tile_content_changed)
         self.compute_panel.parameters_changed.connect(self.refresh_all)
+        self.diff_panel.tile_changed.connect(self._on_tile_content_changed)
         self.iso_panel.filter_changed.connect(self._on_iso_filter)
         self.style_panel.style_changed.connect(self.refresh_plots)
         self.style_panel.legend_applied.connect(self._on_legend_applied)
@@ -478,19 +490,20 @@ class MainWindow(QMainWindow):
         self.grid.cursor_moved.connect(self._on_cursor_moved)
         self.grid.view_changed.connect(self.scale_panel.follow_view)
         self.grid.view_changed.connect(self._on_view_changed)
+        self.grid.x_zoom_shared.connect(self._on_x_zoom_shared)
         self.grid.point_inspected.connect(self._on_point_inspected)
         self.grid.slope_measured.connect(self._on_slope_measured)
         self.grid.annotation_moved.connect(self._on_annotation_moved)
         self.grid.legend_moved.connect(self._on_legend_moved)
         self.grid.text_moved.connect(self._on_text_moved)
         self.inspect_panel.load_requested.connect(self._load_inspect)
-        self.alias_panel.aliases_changed.connect(self.refresh_all)
 
         self.plot_toolbar = PlotToolbar(self.state, theme)
         self.plot_toolbar.pages_changed.connect(self._on_pages_changed)
         self.plot_toolbar.tiles_changed.connect(self._on_tiles_rearranged)
         self.plot_toolbar.active_tile_changed.connect(self._on_tile_activated)
         self.plot_toolbar.fit_requested.connect(self.autoscale_all)
+        self.plot_toolbar.unlock_requested.connect(self.unlock_all_scales)
 
         plot_area = QWidget()
         plot_layout = QVBoxLayout(plot_area)
@@ -545,6 +558,22 @@ class MainWindow(QMainWindow):
             _log.exception("panel %s failed to refresh",
                            type(widget).__name__)
             return False
+
+    def select_panel(self, index: int) -> None:
+        """Show a panel and mark its tab, whoever asked.
+
+        The rail's own click path goes through _on_tab_selected, which is
+        already told which tab was pressed; a shortcut has to set the tab as
+        well as the stack.
+        """
+        if not (0 <= index < len(self._panels)):
+            return
+        self.rail.set_current(index)
+        self._on_tab_selected(index)
+
+    def _on_tab_order_changed(self) -> None:
+        self.state.panel_order = self.rail.order()
+        self.state.dirty = True
 
     def _on_tab_selected(self, index: int) -> None:
         self.panel_stack.setCurrentIndex(index)
@@ -1191,6 +1220,64 @@ class MainWindow(QMainWindow):
     def autoscale_all(self) -> None:
         self.grid.autoscale_all()
 
+    def unlock_all_scales(self) -> None:
+        """Drop every axis lock on every page, then fit.
+
+        Every page and not just this one: the locks were set to make a set of
+        plots comparable, and a page left pinned behind this one is the next
+        thing to look wrong. The stored per-tile limits are left as they are --
+        they are what the SCALE boxes show, and a lock put back on should come
+        back to the numbers it had rather than to zero and one.
+
+        The variable-wide constraints go as well, and they have to. A
+        constraint declared for a parameter is not held on the tiles; it lives
+        on the application state, and apply_global_limits() re-imposes it on
+        any tile that acquires that parameter. Clearing only the tiles left
+        every one of them free until the next tile picked the parameter up, at
+        which point it was locked again -- so the button read as not having
+        worked, which is exactly what it would have been.
+
+        Fitting afterwards because an unlock on its own changes nothing on
+        screen: the axes stay exactly where the lock was holding them, and the
+        button would read as doing nothing.
+        """
+        unlocked = 0
+        for page in self.state.pages:
+            for tile in page.tiles:
+                if tile.lock_x or tile.lock_y:
+                    tile.lock_x = False
+                    tile.lock_y = False
+                    unlocked += 1
+                # So that a tile freed here is re-framed rather than keeping
+                # the window the lock was holding it to.
+                tile.view_initialised = False
+
+        released = len(self.state.global_x_limits) + \
+            len(self.state.global_y_limits)
+        self.state.global_x_limits.clear()
+        self.state.global_y_limits.clear()
+
+        # The locks also disable the mouse per axis, so the tiles have to be
+        # told, not merely re-framed.
+        for tile in self.grid.tiles:
+            tile.apply_mouse_mode()
+        self.autoscale_all()
+
+        if unlocked or released:
+            self.state.dirty = True
+            self._refresh_panel(self.scale_panel)
+            if released:
+                self.status_label.setText(
+                    "Unlocked {0} tile(s), released {1} variable-wide "
+                    "constraint(s), and fitted every plot.".format(
+                        unlocked, released))
+            else:
+                self.status_label.setText(
+                    "Unlocked {0} tile(s) and fitted every plot.".format(
+                        unlocked))
+        else:
+            self.status_label.setText("No axis was locked; fitted every plot.")
+
     # ------------------------------------------------------------ inspect
 
     def _on_tile_params_requested(self, index: int) -> None:
@@ -1343,8 +1430,6 @@ class MainWindow(QMainWindow):
         nothing here to redraw."""
         self._refresh_panel(self.text_panel)
 
-    def _on_alias_created(self, alias: str) -> None:
-        self.status_label.setText("Alias '{0}' created.".format(alias))
         self.refresh_all()
 
     def _on_cursor_moved(self, text: str) -> None:
@@ -1357,6 +1442,38 @@ class MainWindow(QMainWindow):
         # figures sat still while the plot moved.
         if self._current_panel() is self.inspect_panel:
             self.inspect_panel.refresh_stats()
+
+    def _on_x_zoom_shared(self, low: float, high: float) -> None:
+        """A zoom asked for with the right button, or with Ctrl held.
+
+        Every other tile on the page takes the same x range, so a manoeuvre
+        picked out in one plot is the same stretch of the run in all of them.
+        Which tiles decline, and why, is in PlotTile.apply_shared_x; the tile
+        the gesture happened in has already zoomed itself.
+        """
+        page = self.state.page
+        try:
+            source = page.tiles[self.state.active_tile].x_param
+        except (AttributeError, IndexError):
+            source = None
+
+        applied = 0
+        for index, tile in enumerate(self.grid.tiles):
+            state = tile.tile_state
+            if source is not None and state.x_param != source:
+                continue
+            if index == self.state.active_tile:
+                continue            # it zoomed itself, and is where x came from
+            if tile.apply_shared_x(low, high):
+                applied += 1
+
+        if applied:
+            self.state.dirty = True
+            # Once, now the round is done, rather than once per tile.
+            self._on_view_changed()
+            self.scale_panel.follow_view()
+            self.status_label.setText(
+                "Zoomed {0} other tile(s) to the same X range.".format(applied))
 
     def _on_iso_filter(self) -> None:
         # Re-derive which runs the filters admit. The ISO panel declares the
