@@ -20,7 +20,7 @@ are still free to move inwards, which is how you deliberately exclude an
 outlier -- that is a gap the user asked for, and `values_outside` reports it.
 
 No Qt here, so the arithmetic can be tested without a running application --
-the same reason aoeviewer.scales is its own module.
+the same reason visimu.scales is its own module.
 """
 
 from __future__ import annotations

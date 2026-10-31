@@ -80,7 +80,7 @@ void run(const std::string& path, int sims, int rows) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::printf("aoeViewer parser benchmark  (%d worker threads)\n",
+    std::printf("visimu parser benchmark  (%d worker threads)\n",
                 static_cast<int>(aoe::ThreadPool::global().size()) + 1);
 
     const std::string path = (argc > 1) ? argv[1] : "aoe_bench_tmp.dat";

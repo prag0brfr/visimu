@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for aoeViewer.
+"""PyInstaller spec for visimu.
 
 Build with the helper script rather than calling PyInstaller directly:
 
@@ -20,15 +20,15 @@ Notes on the choices here:
   * The Qt exclusions matter more than they look. A default PySide6 bundle
     drags in WebEngine, Quick/QML, Multimedia, 3D and the SQL drivers, which
     together are the majority of the download and none of which this app uses.
-  * console=False on Windows only, unless AOEVIEWER_CONSOLE=1. On Linux a
+  * console=False on Windows only, unless VISIMU_CONSOLE=1. On Linux a
     console build keeps stderr visible, which is where a missing-library
     message would appear.
 
 Environment switches, all set by build_exe.py:
 
-    AOEVIEWER_ONEFILE=1          single-file build
-    AOEVIEWER_CONSOLE=1          keep a console window (Windows) for diagnosis
-    AOEVIEWER_RUNTIME_TMPDIR=... where --onefile unpacks itself at run time
+    VISIMU_ONEFILE=1          single-file build
+    VISIMU_CONSOLE=1          keep a console window (Windows) for diagnosis
+    VISIMU_RUNTIME_TMPDIR=... where --onefile unpacks itself at run time
 """
 
 import glob
@@ -60,9 +60,9 @@ if not os.path.isfile(CORE_PATH):
         "Build it first with 'make' (Linux) or 'build.bat' (Windows).".format(CORE_PATH)
     )
 
-ONEFILE = os.environ.get("AOEVIEWER_ONEFILE", "0") == "1"
-CONSOLE = os.environ.get("AOEVIEWER_CONSOLE", "0") == "1"
-RUNTIME_TMPDIR = os.environ.get("AOEVIEWER_RUNTIME_TMPDIR") or None
+ONEFILE = os.environ.get("VISIMU_ONEFILE", "0") == "1"
+CONSOLE = os.environ.get("VISIMU_CONSOLE", "0") == "1"
+RUNTIME_TMPDIR = os.environ.get("VISIMU_RUNTIME_TMPDIR") or None
 
 # ---------------------------------------------------------------------------
 # NumPy
@@ -193,7 +193,7 @@ EXCLUDES = [
 # from a fresh checkout -- but silently producing an unbranded executable is
 # not the right response to that. build_exe.py generates it before calling
 # PyInstaller; this is the backstop for anyone invoking the spec directly.
-ICON = os.path.join(PROJECT, "packaging", "aoeviewer.ico")
+ICON = os.path.join(PROJECT, "packaging", "visimu.ico")
 if not os.path.isfile(ICON):
     raise SystemExit(
         "The application icon is missing: {0}\n"
@@ -208,7 +208,7 @@ VERSION_FILE = None
 if sys.platform == "win32":
     try:
         sys.path.insert(0, os.path.join(PROJECT, "python"))
-        from aoeviewer import __version__ as _app_version
+        from visimu import __version__ as _app_version
 
         _parts = [int(p) for p in (_app_version.split(".") + ["0", "0", "0"])[:4]]
         VERSION_FILE = os.path.join(BUILD_DIR, "version_info.txt")
@@ -221,11 +221,11 @@ if sys.platform == "win32":
                 "  kids=[\n"
                 "    StringFileInfo([StringTable('040904B0', [\n"
                 "      StringStruct('CompanyName', 'Paulo R. A. Gilz'),\n"
-                "      StringStruct('FileDescription', 'aoeViewer'),\n"
+                "      StringStruct('FileDescription', 'visimu'),\n"
                 "      StringStruct('FileVersion', '{1}'),\n"
-                "      StringStruct('InternalName', 'aoeviewer'),\n"
-                "      StringStruct('OriginalFilename', 'aoeviewer.exe'),\n"
-                "      StringStruct('ProductName', 'aoeViewer'),\n"
+                "      StringStruct('InternalName', 'visimu'),\n"
+                "      StringStruct('OriginalFilename', 'visimu.exe'),\n"
+                "      StringStruct('ProductName', 'visimu'),\n"
                 "      StringStruct('ProductVersion', '{1}'),\n"
                 "    ])]),\n"
                 "    VarFileInfo([VarStruct('Translation', [1033, 1200])])\n"
@@ -244,21 +244,21 @@ try:
     import h5py as _h5py  # noqa: F401
 
     HDF5_HIDDEN = ["h5py", "h5py.defs", "h5py.utils", "h5py._proxy",
-                   "h5py.h5ac", "aoeviewer.hdf5"]
+                   "h5py.h5ac", "visimu.hdf5"]
     print("spec: h5py found, HDF5 support will be included")
 except Exception:  # pragma: no cover - build-time only
     HDF5_HIDDEN = []
     print("spec: h5py not installed, the build will not read HDF5 files")
 
 a = Analysis(
-    [os.path.join(PROJECT, "python", "aoeviewer", "__main__.py")],
+    [os.path.join(PROJECT, "python", "visimu", "__main__.py")],
     pathex=[os.path.join(PROJECT, "python")],
     binaries=[(CORE_PATH, ".")] + NUMPY_BINARIES,
     datas=NUMPY_DATAS + PYQTGRAPH_DATAS + [(ICON, ".")],
     # pyqtgraph resolves its Qt binding at import time, so the static analysis
     # misses it; naming it here keeps the frozen build from failing on start.
     hiddenimports=(
-        ["aoeviewer", "pyqtgraph", "PySide6.QtWidgets",
+        ["visimu", "pyqtgraph", "PySide6.QtWidgets",
          "PySide6.QtCore", "PySide6.QtGui"]
         + NUMPY_HIDDEN
         + HDF5_HIDDEN
@@ -285,7 +285,7 @@ if ONEFILE:
         a.zipfiles,
         a.datas,
         [],
-        name="aoeviewer",
+        name="visimu",
         debug=False,
         bootloader_ignore_signals=False,
         strip=False,
@@ -310,7 +310,7 @@ else:
         a.scripts,
         [],
         exclude_binaries=True,
-        name="aoeviewer",
+        name="visimu",
         debug=False,
         bootloader_ignore_signals=False,
         strip=False,
@@ -327,5 +327,5 @@ else:
         a.datas,
         strip=False,
         upx=False,
-        name="aoeviewer",
+        name="visimu",
     )

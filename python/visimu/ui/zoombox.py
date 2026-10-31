@@ -27,6 +27,7 @@ import pyqtgraph as pg
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtCore import QPointF
 
+from .. import zoomtrace
 from ..theme import ui_scale
 
 # The widest a drag's minor dimension may be and still count as a line, in
@@ -122,9 +123,30 @@ class DirectionalViewBox(pg.ViewBox):
         # Set by the tile. Called with (low, high) in data coordinates when a
         # zoom was asked to reach the other tiles.
         self.shared_x_zoom = None
+        # How many drag events this gesture has delivered, for the trace. A
+        # real attribute rather than a getattr default: a ViewBox answers
+        # getattr for names it has never heard of.
+        self._drag_steps = 0
 
     def mouseDragEvent(self, event, axis=None):
-        if not self._is_area_zoom(event, axis):
+        # Traced: this is where the band is decided, and a drag that never
+        # arrives here is a different fault from one that arrives and is
+        # handed back to pyqtgraph.
+        start = self._drag_flag(event, "isStart")
+        finish = self._drag_flag(event, "isFinish")
+        mine = self._is_area_zoom(event, axis)
+        if start or finish or not mine:
+            zoomtrace.log("vb.drag",
+                          axis=axis,
+                          button=zoomtrace.button_name(event),
+                          modifiers=zoomtrace.modifier_names(event),
+                          isStart=start, isFinish=finish, mine=mine,
+                          **zoomtrace.view_state(self))
+
+        if not mine:
+            # Handed to pyqtgraph: a drag on an axis, a middle drag, or pan
+            # mode. Worth seeing in the log, because "the band never appeared"
+            # and "the band appeared and did nothing" start here.
             return super().mouseDragEvent(event, axis=axis)
 
         origin = event.buttonDownPos(event.button())
@@ -135,13 +157,51 @@ class DirectionalViewBox(pg.ViewBox):
                          current.y() - origin.y(),
                          ui_scale())
 
+        self._drag_steps = int(self._drag_steps or 0) + 1
+        if start:
+            self._drag_steps = 1
+        if finish or zoomtrace.should_log_move(self._drag_steps):
+            zoomtrace.log("vb.shape", step=self._drag_steps, mode=mode,
+                          dx="{0:.1f}".format(current.x() - origin.x()),
+                          dy="{0:.1f}".format(current.y() - origin.y()),
+                          scale="{0:.2f}".format(ui_scale()),
+                          isFinish=finish)
+
         if mode == NOTHING:
-            # Nothing happens, and the band is taken down: a twitch while
-            # clicking must leave the view where it was. Not accepted either,
-            # so a right-click that was never a drag is still a right-click
-            # and the view box's own menu opens on it.
+            # Nothing is drawn and nothing is zoomed -- a gesture that ends
+            # this small must leave the view where it was -- but while it is
+            # still running it is *accepted*, and that is the whole of the fix
+            # for a zoom that worked only sometimes.
+            #
+            # pyqtgraph's scene does not deliver drag events to whoever is
+            # under the pointer. It waits until the pointer has moved a few
+            # pixels from the press, then offers that first event to the items
+            # near it; the one that accepts becomes the scene's `dragItem` and
+            # receives every later event of that gesture. Nobody accepting
+            # means no dragItem -- and because the search is made on that
+            # first event only, no further drag event is ever delivered,
+            # however far the mouse then travels.
+            #
+            # Refusing a first step that was merely small therefore killed the
+            # whole gesture. The scene's own threshold is around five pixels
+            # and this floor is six (scaled), so whether a zoom worked was
+            # decided by where in that narrow window the first delivered move
+            # happened to land: a quick flick cleared it, a slow careful drag
+            # did not. That is what "the zoom stops working after a while"
+            # was -- not a stuck state, a gesture that never started.
+            #
+            # Accepted only while the drag is live. A finished one has nothing
+            # left to claim, and leaving it unaccepted keeps a right-click
+            # that was never a drag a right-click, so the view box's own menu
+            # still opens on it.
             if event.isFinish():
                 self._hide_band()
+                zoomtrace.log("vb.nothing", reason="drag ended too small to "
+                              "mean anything", **zoomtrace.view_state(self))
+            else:
+                event.accept()
+                zoomtrace.log("vb.small", step=self._drag_steps,
+                              reason="kept: the gesture may still grow")
             return
 
         event.accept()
@@ -149,12 +209,22 @@ class DirectionalViewBox(pg.ViewBox):
 
         if not event.isFinish():
             self.updateScaleBox(first, last)
+            if zoomtrace.should_log_move(self._drag_steps):
+                zoomtrace.log("vb.band", step=self._drag_steps,
+                              visible=zoomtrace.view_state(self)
+                              .get("vb.bandVisible"))
             return
 
         self._hide_band()
         rect = self.childGroup.mapRectFromParent(QRectF(first, last))
         self.showAxRect(rect)
         self._remember(rect)
+        flat_rect = rect.normalized()
+        zoomtrace.log("vb.zoomed", mode=mode,
+                      rect="{0:.6g}..{1:.6g} x {2:.6g}..{3:.6g}".format(
+                          flat_rect.left(), flat_rect.right(),
+                          flat_rect.top(), flat_rect.bottom()),
+                      **zoomtrace.view_state(self))
 
         if self.is_global(event) and callable(self.shared_x_zoom):
             # Normalised, because a drag that went right to left gives a
@@ -163,6 +233,14 @@ class DirectionalViewBox(pg.ViewBox):
             self.shared_x_zoom(float(flat.left()), float(flat.right()))
 
     # ------------------------------------------------------------ helpers
+
+    @staticmethod
+    def _drag_flag(event, name: str) -> bool:
+        """isStart/isFinish off a drag event, defensively, for the trace."""
+        try:
+            return bool(getattr(event, name)())
+        except (AttributeError, TypeError):
+            return False
 
     @staticmethod
     def is_global(event) -> bool:
@@ -183,21 +261,35 @@ class DirectionalViewBox(pg.ViewBox):
             return False
 
     def _is_area_zoom(self, event, axis) -> bool:
-        """Whether this drag is the one we mean to reinterpret."""
+        """Whether this drag is the one we mean to reinterpret.
+
+        Each refusal is traced separately: which of the three it was says
+        whether the gesture never reached the right place, or reached it in
+        the wrong mode.
+        """
         if axis is not None:
+            zoomtrace.log("vb.notmine", why="axis drag", axis=axis)
             return False
         try:
             if event.button() not in (Qt.MouseButton.LeftButton,
                                       Qt.MouseButton.RightButton):
+                zoomtrace.log("vb.notmine", why="button",
+                              button=zoomtrace.button_name(event))
                 return False
         except (AttributeError, TypeError):
+            zoomtrace.log("vb.notmine", why="button unreadable")
             return False
         # state is a plain dict on every pyqtgraph that has this class, but it
         # is read defensively: being wrong here would disable zooming, and
         # falling back to pyqtgraph's own handler never can.
         try:
-            return self.state.get("mouseMode") == pg.ViewBox.RectMode
+            rect_mode = self.state.get("mouseMode") == pg.ViewBox.RectMode
+            if not rect_mode:
+                zoomtrace.log("vb.notmine", why="not in RectMode",
+                              **zoomtrace.view_state(self))
+            return rect_mode
         except (AttributeError, TypeError):
+            zoomtrace.log("vb.notmine", why="mouseMode unreadable")
             return False
 
     def _hide_band(self) -> None:

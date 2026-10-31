@@ -896,17 +896,17 @@ std::string user_cache_directory() {
     if (base.empty()) base = environment("APPDATA");
     if (base.empty()) base = environment("TEMP");
     if (base.empty()) return std::string();
-    return base + "\\aoeViewer\\cache";
+    return base + "\\visimu\\cache";
 #elif defined(__APPLE__)
     const std::string home = environment("HOME");
     if (home.empty()) return std::string();
-    return home + "/Library/Caches/aoeviewer";
+    return home + "/Library/Caches/visimu";
 #else
     const std::string xdg = environment("XDG_CACHE_HOME");
-    if (!xdg.empty()) return xdg + "/aoeviewer";
+    if (!xdg.empty()) return xdg + "/visimu";
     const std::string home = environment("HOME");
     if (home.empty()) return std::string();
-    return home + "/.cache/aoeviewer";
+    return home + "/.cache/visimu";
 #endif
 }
 

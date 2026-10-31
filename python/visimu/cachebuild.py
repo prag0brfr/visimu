@@ -59,7 +59,7 @@ def _fingerprint(path: str):
 
 def build_one(path: str) -> bool:
     """Read one file and write its sidecar. True if one was written."""
-    # Imported for its import side effect as much as its use: aoeviewer.hdf5
+    # Imported for its import side effect as much as its use: visimu.hdf5
     # sets HDF5_USE_FILE_LOCKING before h5py -- and therefore before the HDF5
     # library -- is loaded, which is what keeps rule 2 above true. Importing it
     # first means that holds however the rest of this function goes.
@@ -177,14 +177,14 @@ def command_for(paths: Sequence[str]) -> Optional[List[str]]:
     """How to start this module as a subprocess, frozen or from a checkout.
 
     Frozen, the executable is its own interpreter and re-executes itself with
-    the flag. From a checkout it is ``python -m aoeviewer``, which needs the
+    the flag. From a checkout it is ``python -m visimu``, which needs the
     package's parent on PYTHONPATH -- see `spawn`.
     """
     if not sys.executable:
         return None
     if getattr(sys, "frozen", False):
         return [sys.executable, FLAG] + list(paths)
-    return [sys.executable, "-m", "aoeviewer", FLAG] + list(paths)
+    return [sys.executable, "-m", "visimu", FLAG] + list(paths)
 
 
 def spawn(paths: Sequence[str]):
@@ -211,7 +211,7 @@ def spawn(paths: Sequence[str]):
     package_parent = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     if not frozen:
-        # The package's parent, so `-m aoeviewer` resolves in a source
+        # The package's parent, so `-m visimu` resolves in a source
         # checkout. Not when frozen: there, that path is inside the unpacked
         # bundle, which in a one-file build is a temporary directory the parent
         # removes when it exits -- so handing it to a child that outlives the
@@ -221,7 +221,7 @@ def spawn(paths: Sequence[str]):
         if package_parent not in existing.split(os.pathsep):
             env["PYTHONPATH"] = (package_parent + os.pathsep + existing
                                  if existing else package_parent)
-    # Belt and braces: aoeviewer.hdf5 sets this before importing h5py, and
+    # Belt and braces: visimu.hdf5 sets this before importing h5py, and
     # setting it in the environment too means it is right even if something
     # else reaches h5py first.
     env.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")

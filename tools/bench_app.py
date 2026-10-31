@@ -21,8 +21,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 import numpy as np
 
-from aoeviewer import Session
-from aoeviewer import session as session_module
+from visimu import Session
+from visimu import session as session_module
 
 
 def rss_mb() -> float:
@@ -68,7 +68,7 @@ def main(paths: List[str]) -> int:
         return 1
 
     total_mb = sum(os.path.getsize(p) for p in paths) / (1024.0 * 1024.0)
-    print("aoeViewer end-to-end benchmark")
+    print("visimu end-to-end benchmark")
     print("  core {0}, {1} worker threads".format(
         session_module.VERSION, session_module.WORKER_COUNT))
     print("  {0} file(s), {1:.0f} MB total".format(len(paths), total_mb))

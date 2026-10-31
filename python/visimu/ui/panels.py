@@ -9,14 +9,15 @@ them decoupled is what makes it cheap to add the remaining tabs later.
 from __future__ import annotations
 
 import fnmatch
+import os
 from contextlib import contextmanager
 
 from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
-from PySide6.QtCore import QRect, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QPainter, QPen
+from PySide6.QtCore import QRect, QSize, QStringListModel, Qt, QTimer, Signal
+from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -24,12 +25,14 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QColorDialog,
     QComboBox,
+    QCompleter,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
     QGridLayout,
     QGroupBox,
+    QFileDialog,
     QMessageBox,
     QHBoxLayout,
     QHeaderView,
@@ -48,13 +51,14 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QTextBrowser,
     QTextEdit,
+    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from .. import isogroups, sync
+from .. import diffconfig, isogroups, sync
 from ..model import (
     DASH_STYLES,
     SYMBOL_LABELS,
@@ -70,8 +74,53 @@ from ..model import (
     tile_title,
 )
 from ..session import CoreError, Session
-from ..theme import theme_for
+from ..theme import FONT_PX, px, theme_for
 from .plot_tile import LEGEND_POSITIONS
+
+
+def _bolded(widget, bold: bool) -> None:
+    """Set or clear bold on one widget, leaving its size alone.
+
+    The size needs saying out loud. This application sizes widget text in
+    *pixels*, from the stylesheet, so a font read back off a widget has
+    pointSizeF() == -1: the size is there, but not in the field Qt resolves
+    from. Handing such a font back to setFont() is what logs
+
+        QFont::setPointSize: Point size <= 0 (-1), must be greater than 0
+
+    -- harmless, and noise in a log that is read when something is wrong. So
+    the pixel size is written in explicitly before the font goes back, from
+    the same constant the stylesheet uses.
+    """
+    font = QFont(widget.font())
+    if font.pointSizeF() <= 0 and font.pixelSize() <= 0:
+        font.setPixelSize(max(1, px(FONT_PX)))
+    font.setBold(bool(bold))
+    widget.setFont(font)
+
+
+def _filter_row(edit: QLineEdit, clear) -> QHBoxLayout:
+    """A filter box with a clear button beside it.
+
+    Beside it, and not only Qt's own in-field cross: that one appears only
+    once there is text in the box, so a field at rest shows nothing to press
+    and the way to empty it is not discoverable. This button is always there.
+    Both are wired to the same place -- the box's own textChanged -- so
+    clearing re-filters the list exactly as typing does.
+    """
+    edit.setClearButtonEnabled(True)
+    row = QHBoxLayout()
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(3)
+    row.addWidget(edit, 1)
+
+    button = QToolButton()
+    button.setText("\u2715")
+    button.setToolTip("Clear the filter")
+    button.setCursor(Qt.CursorShape.PointingHandCursor)
+    button.clicked.connect(clear)
+    row.addWidget(button)
+    return row
 
 
 def _title(text: str) -> QLabel:
@@ -205,6 +254,9 @@ class DataPanel(QWidget):
         # the match is on any part of the name, not a prefix, because the
         # middle field is as often the interesting one as the first.
         self.filter_edit = QLineEdit()
+        # The clear button beside it is added by _filter_row below, which
+        # also turns on Qt's in-field cross. Both empty the box, and the box's
+        # own textChanged re-applies the filter.
         self.filter_edit.setPlaceholderText("Filter runs (e.g. 2.1, or 2.*.3 )")
         self.filter_edit.setToolTip(
             "Show only runs whose name contains what you type.\n"
@@ -218,7 +270,9 @@ class DataPanel(QWidget):
         self._filter_timer.setInterval(FILTER_IDLE_MS)
         self._filter_timer.timeout.connect(self._apply_filter)
         self.filter_edit.textChanged.connect(self._on_filter_typed)
-        layout.addWidget(self.filter_edit)
+        self.filter_clear = _filter_row(self.filter_edit,
+                                        lambda: self.filter_edit.setText(""))
+        layout.addLayout(self.filter_clear)
 
         self.filter_count = QLabel("")
         self.filter_count.setObjectName("Hint")
@@ -279,10 +333,19 @@ class DataPanel(QWidget):
 
     # ------------------------------------------------------------- filter
 
-    def _on_filter_typed(self, _text: str) -> None:
+    def _on_filter_typed(self, text: str) -> None:
         # Debounced for the same reason the PARAMS filter is: on a study of a
         # thousand runs, hiding and showing rows on every keystroke is visible
         # as lag while typing a four-character pattern.
+        #
+        # Emptying it is the exception: there is no next keystroke to wait for
+        # -- the clear button has just said "all of them" -- and a list that
+        # sits filtered for another half second reads as the button not having
+        # worked.
+        if not text.strip():
+            self._filter_timer.stop()
+            self._apply_filter()
+            return
         self._filter_timer.start()
 
     @staticmethod
@@ -831,32 +894,96 @@ class ParameterPanel(QWidget):
         layout.addWidget(self.x_combo)
 
         layout.addWidget(_title("Y axis"))
+        # Two lists rather than one with check boxes: available on the left of
+        # the stack, plotted below it. A check box in a 600-row list is a 13 px
+        # target that has to be hit one row at a time, and the question "what
+        # is on this tile" was answered by scanning for ticks. Here it is
+        # answered by looking at the second list, and several names move at
+        # once.
+        avail_label = QLabel("Available")
+        avail_label.setObjectName("Hint")
+        layout.addWidget(avail_label)
+
         self.filter_edit = QLineEdit()
-        self.filter_edit.setPlaceholderText("Filter (wildcards: AL* )")
-        # Filtering hides and shows rows, and these files carry hundreds of
-        # channels -- 585 in one of the dialects this reads -- so a keystroke
-        # is several hundred setHidden() calls and a relayout of the list. The
-        # answer between two keystrokes of the same word is not one anybody
-        # reads, so the list is refiltered once the typing pauses instead. The
-        # interval is the one the TEXT panel already settled on for the same
-        # reason, short enough to feel immediate.
+        self.filter_edit.setPlaceholderText("Filter available (wildcards: AL* )")
         self._filter_timer = QTimer(self)
         self._filter_timer.setSingleShot(True)
         self._filter_timer.setInterval(FILTER_IDLE_MS)
         self._filter_timer.timeout.connect(
             lambda: self._apply_filter(self.filter_edit.text()))
         self.filter_edit.textChanged.connect(self._on_filter_typed)
-        layout.addWidget(self.filter_edit)
+        layout.addLayout(_filter_row(self.filter_edit,
+                                     lambda: self.filter_edit.setText("")))
 
+        self.avail_list = QListWidget()
+        self.avail_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.avail_list.itemDoubleClicked.connect(
+            lambda _item: self._add_selected())
+        self.avail_list.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self.avail_list.customContextMenuRequested.connect(
+            lambda position: self._show_menu(self.avail_list, position))
+        layout.addWidget(self.avail_list, 1)
+
+        # The two directions, as symbols: the lists are stacked, so down means
+        # "plot these" and up means "take them off".
+        moves = QHBoxLayout()
+        self.add_button = QToolButton()
+        self.add_button.setText("\u25bc")
+        self.add_button.setToolTip("Plot the selected parameters  (or "
+                                  "double-click one)")
+        self.add_button.clicked.connect(self._add_selected)
+        moves.addWidget(self.add_button)
+
+        self.remove_button = QToolButton()
+        self.remove_button.setText("\u25b2")
+        self.remove_button.setToolTip("Stop plotting the selected parameters  "
+                                     "(or double-click one)")
+        self.remove_button.clicked.connect(self._remove_selected)
+        moves.addWidget(self.remove_button)
+
+        moves.addStretch(1)
+
+        self.clear_button = QToolButton()
+        self.clear_button.setText("\u2716")
+        self.clear_button.setToolTip("Plot nothing on this tile")
+        self.clear_button.clicked.connect(self._remove_everything)
+        moves.addWidget(self.clear_button)
+        layout.addLayout(moves)
+
+        plotted_label = QLabel("Plotted on this tile")
+        plotted_label.setObjectName("Hint")
+        layout.addWidget(plotted_label)
+
+        self.selected_filter = QLineEdit()
+        self.selected_filter.setPlaceholderText("Filter plotted")
+        self._selected_filter_timer = QTimer(self)
+        self._selected_filter_timer.setSingleShot(True)
+        self._selected_filter_timer.setInterval(FILTER_IDLE_MS)
+        self._selected_filter_timer.timeout.connect(
+            lambda: self._apply_selected_filter(self.selected_filter.text()))
+        self.selected_filter.textChanged.connect(self._on_selected_filter_typed)
+        layout.addLayout(_filter_row(
+            self.selected_filter, lambda: self.selected_filter.setText("")))
+
+        # Kept as y_list: it is the tile's y parameters, in the order the
+        # title, the legend and the CSV export use them, and everything
+        # outside this panel knows it by that name.
         self.y_list = QListWidget()
-        self.y_list.itemChanged.connect(self._on_y_changed)
+        self.y_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.y_list.itemDoubleClicked.connect(
+            lambda _item: self._remove_selected())
         self.y_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.y_list.customContextMenuRequested.connect(self._show_menu)
+        self.y_list.customContextMenuRequested.connect(
+            lambda position: self._show_menu(self.y_list, position))
         layout.addWidget(self.y_list, 1)
 
         hint = QLabel(
-            "Selected parameters are listed first. The filter hides names "
-            "that do not match but does not change that order. "
+            "Pick any number of names and move them with the arrows, or "
+            "double-click one to move it. Each list has its own filter; a "
+            "filter hides rows and never changes what is plotted. "
             "Right-click a parameter to use it as X or copy its name; "
             "COMPUTE renames one. "
             "Legend, grid, log scale and markers are in the STYLE tab."
@@ -879,38 +1006,123 @@ class ParameterPanel(QWidget):
                      for name in self._session.parameters)
 
     def _sync_selection(self) -> None:
-        """Point the x combo and the y ticks at the active tile, in place.
+        """Point the x combo and the two lists at the active tile, in place.
 
-        Everything is written only if it is wrong, so refreshing a panel whose
-        tile has not changed paints nothing at all.
+        Membership is reconciled by moving the rows that differ rather than by
+        rebuilding: these files carry four to six hundred channels, and a
+        rebuild on every tile click threw away the scroll position and both
+        filters' hidden flags along with the rows.
         """
         tile = self._state.tile
         self._updating = True
-        blocked = self.y_list.blockSignals(True)
         try:
             index = self.x_combo.findData(tile.x_param)
             if index >= 0 and index != self.x_combo.currentIndex():
                 self.x_combo.setCurrentIndex(index)
 
-            wanted = set(tile.y_params)
-            for row in range(self.y_list.count()):
-                item = self.y_list.item(row)
-                name = item.data(Qt.ItemDataRole.UserRole) or item.text()
-                state = (Qt.CheckState.Checked if name in wanted
-                         else Qt.CheckState.Unchecked)
-                if item.checkState() != state:
-                    item.setCheckState(state)
+            wanted = [name for name in tile.y_params]
+            wanted_set = set(wanted)
+            here = self._names_in(self.y_list)
+
+            # Out of the plotted list: anything the tile no longer plots.
+            leaving = [name for name in here if name not in wanted_set]
+            if leaving:
+                self._transfer(self.y_list, self.avail_list, leaving)
+            # Into it: anything it plots that is sitting in available.
+            arriving = [name for name in wanted
+                        if name not in set(self._names_in(self.y_list))]
+            if arriving:
+                self._transfer(self.avail_list, self.y_list, arriving)
+
+            if self._names_in(self.y_list) != wanted:
+                self._reorder_selected(wanted)
+            self._sort_available()
         finally:
-            self.y_list.blockSignals(blocked)
             self._updating = False
+
+    @staticmethod
+    def _names_in(widget) -> List[str]:
+        names = []
+        for row in range(widget.count()):
+            item = widget.item(row)
+            if item is None:
+                continue
+            names.append(item.data(Qt.ItemDataRole.UserRole) or item.text())
+        return names
+
+    def _transfer(self, source, target, names: Sequence[str]) -> None:
+        """Move named rows from one list to the other, keeping the widgets.
+
+        The items themselves travel, so a name carries its label and its data
+        across and nothing has to be rebuilt. Appended in the order given,
+        which for the plotted list is the order the tile draws them in.
+        """
+        wanted = list(names)
+        if not wanted:
+            return
+        by_name = {}
+        for row in range(source.count() - 1, -1, -1):
+            item = source.item(row)
+            name = item.data(Qt.ItemDataRole.UserRole) or item.text()
+            if name in set(wanted):
+                by_name[name] = source.takeItem(row)
+        for name in wanted:
+            item = by_name.get(name)
+            if item is not None:
+                item.setHidden(False)
+                target.addItem(item)
+
+    def _reorder_selected(self, wanted: Sequence[str]) -> None:
+        """Put the plotted list in the tile's own order.
+
+        Only this list, and it is short -- a handful of names -- so taking and
+        re-adding its rows costs nothing, unlike the available list beside it.
+        """
+        taken = {}
+        for row in range(self.y_list.count() - 1, -1, -1):
+            item = self.y_list.item(row)
+            name = item.data(Qt.ItemDataRole.UserRole) or item.text()
+            taken[name] = self.y_list.takeItem(row)
+        for name in wanted:
+            item = taken.pop(name, None)
+            if item is not None:
+                self.y_list.addItem(item)
+        # Anything left over is a name the tile does not plot; it belongs in
+        # available rather than being dropped on the floor.
+        for name, item in taken.items():
+            self.avail_list.addItem(item)
+
+    def _sort_available(self) -> None:
+        """Keep available in the session's own order.
+
+        The file's order, not the order things happened to be taken off the
+        tile in: that order is the one the engineer reading the file expects,
+        and it is what the old single list used.
+        """
+        names = self._names_in(self.avail_list)
+        if not names:
+            return
+        here = set(names)
+        wanted = [name for name in self._session.parameters if name in here]
+        wanted.extend(name for name in names if name not in set(wanted))
+        if wanted == names:
+            return
+        taken = {}
+        for row in range(self.avail_list.count() - 1, -1, -1):
+            item = self.avail_list.item(row)
+            name = item.data(Qt.ItemDataRole.UserRole) or item.text()
+            taken[name] = self.avail_list.takeItem(row)
+        for name in wanted:
+            item = taken.get(name)
+            if item is not None:
+                self.avail_list.addItem(item)
 
     def refresh(self) -> None:
         signature = self._list_signature()
         if signature == self._list_state:
-            # The filter is not touched: it depends only on the text in the
-            # box, which a refresh cannot have changed.
+            # The filters are not touched: each depends only on the text in
+            # its own box, which a refresh cannot have changed.
             self._sync_selection()
-            self._reorder_y_list()
             return
         self._list_state = signature
 
@@ -946,80 +1158,120 @@ class ParameterPanel(QWidget):
                 default = next((p for p in params if p.upper().startswith("TIME")), params[0])
                 self.x_combo.setCurrentIndex(max(0, self.x_combo.findData(default)))
 
-            # Four hundred channels is four hundred list items, and without
+            # Six hundred channels is six hundred list items, and without
             # these Qt relayouts and repaints the widget on every one of them.
-            self.y_list.setUpdatesEnabled(False)
-            blocked = self.y_list.blockSignals(True)
-            try:
-                self.y_list.clear()
-                for name in order_parameters(params, tile.y_params):
-                    item = QListWidgetItem(self._session.label(name))
-                    item.setData(Qt.ItemDataRole.UserRole, name)
-                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                    item.setCheckState(
-                        Qt.CheckState.Checked if name in tile.y_params
-                        else Qt.CheckState.Unchecked
-                    )
-                    self.y_list.addItem(item)
-            finally:
-                self.y_list.blockSignals(blocked)
-                self.y_list.setUpdatesEnabled(True)
-
+            plotted = [name for name in tile.y_params if name in set(params)]
+            available = [name for name in params if name not in set(plotted)]
+            for widget, names in ((self.avail_list, available),
+                                  (self.y_list, plotted)):
+                widget.setUpdatesEnabled(False)
+                blocked = widget.blockSignals(True)
+                try:
+                    widget.clear()
+                    for name in names:
+                        item = QListWidgetItem(self._session.label(name))
+                        item.setData(Qt.ItemDataRole.UserRole, name)
+                        widget.addItem(item)
+                finally:
+                    widget.blockSignals(blocked)
+                    widget.setUpdatesEnabled(True)
         finally:
             self._updating = False
         self._apply_filter(self.filter_edit.text())
+        self._apply_selected_filter(self.selected_filter.text())
 
-    def _reorder_y_list(self) -> None:
-        """Put the active tile's selected Y parameters at the top.
+    # --------------------------------------------------------- moving names
 
-        Items are moved, not rebuilt, so the filter's hidden flags and the
-        widget identities survive. Hidden (filtered-out) selected names still
-        travel to the top; they stay hidden until the filter lets them through.
+    def _add_selected(self) -> None:
+        """Plot every name picked in available."""
+        self._move_between(self.avail_list, self.y_list)
+
+    def _remove_selected(self) -> None:
+        """Stop plotting every name picked in the plotted list."""
+        self._move_between(self.y_list, self.avail_list)
+
+    def _remove_everything(self) -> None:
+        names = self._names_in(self.y_list)
+        if not names:
+            return
+        self._transfer(self.y_list, self.avail_list, names)
+        self._sort_available()
+        self._commit_selection()
+
+    def _move_between(self, source, target) -> None:
+        names = self._picked(source)
+        if not names:
+            return
+        self._transfer(source, target, names)
+        if target is self.avail_list:
+            self._sort_available()
+        self._commit_selection()
+
+    @staticmethod
+    def _picked(widget) -> List[str]:
+        """The names selected in one list, in the order the list holds them.
+
+        In list order rather than in the order they were clicked: that is the
+        order the user sees, and for the plotted list it decides the order the
+        tile draws them in.
+
+        Read as row numbers, and never as items. A QListWidgetItem carries
+        Qt's comparison operators and no __hash__, so it cannot go in a set --
+        `set(widget.selectedItems())` raises TypeError, which the first
+        version of this swallowed as "nothing is selected": the move buttons
+        did nothing at all, in silence. Rows cannot misbehave that way, and
+        they are what the rest of this panel works in.
         """
-        count = self.y_list.count()
-        if count == 0:
-            return
-        names = []
-        for row in range(count):
-            item = self.y_list.item(row)
-            names.append(item.data(Qt.ItemDataRole.UserRole) or item.text())
+        rows = set()
+        model = getattr(widget, "selectionModel", None)
+        if callable(model):
+            try:
+                selection = model()
+                for index in selection.selectedIndexes():
+                    rows.add(int(index.row()))
+            except (AttributeError, TypeError, RuntimeError):
+                rows = set()
 
-        # Ordered against the session's own order, not against the order the
-        # list is in. Reordering the list in place against itself has no way
-        # back: a name promoted to the top while it was ticked stayed there
-        # once it was unticked, because by then "the order as given" *was* the
-        # promoted one and order_parameters had nothing else to put it back
-        # into. Starting from the canonical order every time makes the
-        # promotion a function of the current selection alone.
-        canonical = [name for name in self._session.parameters if name in set(names)]
-        # Anything the list holds that the session no longer lists keeps its
-        # relative order at the end rather than vanishing from the rebuild.
-        known = set(canonical)
-        canonical.extend(name for name in names if name not in known)
-        wanted = order_parameters(canonical, self._state.tile.y_params)
-        if wanted == names:
+        if not rows:
+            # Older bindings, and the simpler widgets: ask the list where each
+            # selected item sits. widget.row() resolves it in C++, so it does
+            # not depend on getting the same Python wrapper back.
+            try:
+                for item in widget.selectedItems() or []:
+                    row = widget.row(item)
+                    if row is not None and int(row) >= 0:
+                        rows.add(int(row))
+            except (AttributeError, TypeError, RuntimeError):
+                return []
+
+        names = []
+        for row in sorted(rows):
+            item = widget.item(row)
+            if item is None or item.isHidden():
+                continue
+            names.append(item.data(Qt.ItemDataRole.UserRole) or item.text())
+        return names
+
+    def _commit_selection(self) -> None:
+        """Write the plotted list into the tile and redraw.
+
+        The list is the state: what it holds, in the order it holds it, is
+        tile.y_params.
+        """
+        if self._updating:
             return
-        blocked = self.y_list.blockSignals(True)
-        self.y_list.setUpdatesEnabled(False)
-        try:
-            taken = [self.y_list.takeItem(0) for _ in range(count)]
-            by_name = {}
-            for item in taken:
-                name = item.data(Qt.ItemDataRole.UserRole) or item.text()
-                by_name[name] = item
-            for name in wanted:
-                item = by_name.get(name)
-                if item is not None:
-                    self.y_list.addItem(item)
-        finally:
-            self.y_list.setUpdatesEnabled(True)
-            self.y_list.blockSignals(blocked)
-        self._apply_filter(self.filter_edit.text())
+        tile = self._state.tile
+        chosen = self._names_in(self.y_list)
+        if chosen == list(tile.y_params):
+            return
+        tile.y_params = chosen
+        self._state.dirty = True
+        self.tile_changed.emit()
 
     # ------------------------------------------------------- context menu
 
-    def _show_menu(self, position) -> None:
-        item = self.y_list.itemAt(position)
+    def _show_menu(self, widget, position) -> None:
+        item = widget.itemAt(position)
         if item is None:
             return
         name = item.data(Qt.ItemDataRole.UserRole) or item.text()
@@ -1028,7 +1280,7 @@ class ParameterPanel(QWidget):
         x_action = menu.addAction("Use as X axis")
         copy_action = menu.addAction("Copy name")
 
-        chosen = menu.exec(self.y_list.mapToGlobal(position))
+        chosen = menu.exec(widget.mapToGlobal(position))
         if chosen is None:
             return
         if chosen is x_action:
@@ -1038,16 +1290,40 @@ class ParameterPanel(QWidget):
         elif chosen is copy_action:
             QApplication.clipboard().setText(name)
 
-    def _on_filter_typed(self, _text: str) -> None:
-        """Restart the idle timer. Nothing is hidden or shown until it fires."""
+    def _on_filter_typed(self, text: str) -> None:
+        """Restart the idle timer. Nothing is hidden or shown until it fires.
+
+        Unless the box has just been emptied, which is answered at once; see
+        DataPanel._on_filter_typed.
+        """
         if self._updating:
+            return
+        if not text.strip():
+            self._filter_timer.stop()
+            self._apply_filter("")
             return
         self._filter_timer.start()
 
+    def _on_selected_filter_typed(self, text: str) -> None:
+        """The plotted list's own filter. Same rules as the one above."""
+        if self._updating:
+            return
+        if not text.strip():
+            self._selected_filter_timer.stop()
+            self._apply_selected_filter("")
+            return
+        self._selected_filter_timer.start()
+
+    def _apply_selected_filter(self, text: str) -> None:
+        self._filter_list(self.y_list, text)
+
     def _apply_filter(self, text: str) -> None:
+        self._filter_list(self.avail_list, text)
+
+    def _filter_list(self, widget, text: str) -> None:
         pattern = text.strip().upper()
-        for i in range(self.y_list.count()):
-            item = self.y_list.item(i)
+        for i in range(widget.count()):
+            item = widget.item(i)
             if not pattern:
                 item.setHidden(False)
                 continue
@@ -1068,20 +1344,6 @@ class ParameterPanel(QWidget):
         if not name:
             return
         self._state.tile.x_param = name
-        self._state.dirty = True
-        self.tile_changed.emit()
-
-    def _on_y_changed(self, _item: QListWidgetItem) -> None:
-        if self._updating:
-            return
-        tile = self._state.tile
-        chosen = []
-        for i in range(self.y_list.count()):
-            item = self.y_list.item(i)
-            if item.checkState() == Qt.CheckState.Checked:
-                chosen.append(item.data(Qt.ItemDataRole.UserRole) or item.text())
-        tile.y_params = chosen
-        self._reorder_y_list()
         self._state.dirty = True
         self.tile_changed.emit()
 
@@ -1229,6 +1491,42 @@ class FormulaHelpDialog(QDialog):
         layout.addWidget(buttons)
 
 
+# What a channel name is made of, for the purpose of completing one. The
+# formula language's own names are letters, digits and underscores, so a token
+# ends at an operator, a bracket, a comma or a space -- which is what makes
+# "NZ * AL" offer completions for AL rather than for the whole line.
+def _name_token(text: str, cursor: int):
+    """(start, end, token) of the name the cursor is in or at the end of.
+
+    Kept as a function of a string and an integer, free of any widget,
+    because this is the whole of the behaviour: which characters belong to the
+    name being typed, and therefore what gets replaced when a completion is
+    chosen. An expression is not a name -- the completer offers names *inside*
+    one -- so completing the whole field, which is what QCompleter does by
+    itself, is never right here.
+    """
+    if not isinstance(text, str):
+        return 0, 0, ""
+    cursor = max(0, min(int(cursor), len(text)))
+
+    def belongs(character: str) -> bool:
+        return character.isalnum() or character == "_"
+
+    start = cursor
+    while start > 0 and belongs(text[start - 1]):
+        start -= 1
+    end = cursor
+    while end < len(text) and belongs(text[end]):
+        end += 1
+    return start, end, text[start:end]
+
+
+def _with_name(text: str, cursor: int, name: str):
+    """(text, cursor) with the name under the cursor replaced by `name`."""
+    start, end, _token = _name_token(text, cursor)
+    return text[:start] + name + text[end:], start + len(name)
+
+
 class ComputePanel(QWidget):
     """Create and edit computed parameters."""
 
@@ -1263,6 +1561,23 @@ class ComputePanel(QWidget):
         self.expr_edit.returnPressed.connect(self._commit)
         layout.addWidget(self.expr_edit)
 
+        # Channel names, suggested as they are typed. These files carry
+        # hundreds of them -- 585 in one of the dialects this reads -- with
+        # names nobody recalls exactly, and the alternative was reading them
+        # off the PARAMS list and typing them back in.
+        #
+        # The completer is driven by hand rather than attached and left to it:
+        # QCompleter completes the *whole* field, and this field holds an
+        # expression. What is completed is the name under the cursor.
+        self._names = QStringListModel([])
+        self.completer = QCompleter(self._names, self)
+        self.completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.completer.setCompletionMode(
+            QCompleter.CompletionMode.PopupCompletion)
+        self.completer.setWidget(self.expr_edit)
+        self.completer.activated[str].connect(self._insert_completion)
+        self.expr_edit.textEdited.connect(self._suggest_names)
+
         self.message = QLabel("")
         self.message.setWordWrap(True)
         self.message.setObjectName("Hint")
@@ -1296,6 +1611,8 @@ class ComputePanel(QWidget):
     # ------------------------------------------------------------- refresh
 
     def refresh(self) -> None:
+        self._refresh_completions()
+
         selected = None
         if self.list.currentItem() is not None:
             selected = self.list.currentItem().data(Qt.ItemDataRole.UserRole)
@@ -1310,6 +1627,47 @@ class ComputePanel(QWidget):
                 self.list.addItem(item)
                 if name == selected:
                     self.list.setCurrentItem(item)
+
+    # ------------------------------------------------------- completion
+
+    def _suggest_names(self, text: str) -> None:
+        """Offer the channels whose names start with the word being typed.
+
+        textEdited, not textChanged: this must answer what the user typed and
+        stay silent when the field is filled in by the program -- picking a
+        formula out of the list to edit would otherwise drop a popup over it.
+        """
+        popup = self.completer.popup()
+        _start, _end, token = _name_token(text, self.expr_edit.cursorPosition())
+        if len(token) < 2:
+            # One letter matches most of a 585-channel file, which is a list
+            # to scroll rather than a suggestion.
+            if popup is not None:
+                popup.hide()
+            return
+
+        self.completer.setCompletionPrefix(token)
+        if self.completer.completionCount() == 0:
+            if popup is not None:
+                popup.hide()
+            return
+        self.completer.complete()
+
+    def _insert_completion(self, name: str) -> None:
+        """Put the chosen name in place of the word that was being typed."""
+        text, cursor = _with_name(self.expr_edit.text(),
+                                  self.expr_edit.cursorPosition(), name)
+        self.expr_edit.setText(text)
+        self.expr_edit.setCursorPosition(cursor)
+
+    def _refresh_completions(self) -> None:
+        """The names to suggest: every channel the session knows.
+
+        Computed ones included -- a formula may be written over another -- and
+        taken fresh on every refresh, because a file arriving is exactly when
+        the list changes.
+        """
+        self._names.setStringList(sorted(self._session.parameters))
 
     def _show_help(self) -> None:
         FormulaHelpDialog(self).exec()
@@ -1412,7 +1770,7 @@ class IsoGroupDialog(QDialog):
     To cell of the row above it are the same number, and changing either moves
     both. Independent intervals could overlap, or leave a gap that silently
     drops every run in it, and neither mistake shows up until a plot comes back
-    short. See aoeviewer.isogroups for the arithmetic.
+    short. See visimu.isogroups for the arithmetic.
 
     The Values column is the feedback that makes manual editing usable: it
     counts the distinct values each interval actually claims, the same way the
@@ -2836,18 +3194,14 @@ class StylePanel(QWidget):
             # for the same fact means it survives any platform style that
             # decides to draw the indicator its own way.
             for mode, radio in self.mode_buttons.items():
-                font = radio.font()
-                font.setBold(mode == tile.color_mode)
-                radio.setFont(font)
+                _bolded(radio, mode == tile.color_mode)
             self.iso_row.setVisible(tile.color_mode == ColorMode.ISO)
 
             style_button = self.style_group.button(int(tile.style_mode))
             if style_button is not None:
                 style_button.setChecked(True)
             for index, radio in enumerate(self.style_buttons):
-                font = radio.font()
-                font.setBold(index == int(tile.style_mode))
-                radio.setFont(font)
+                _bolded(radio, index == int(tile.style_mode))
             self.style_iso_row.setVisible(tile.style_mode == StyleMode.ISO)
 
             params = self._session.parameters
@@ -4843,9 +5197,20 @@ class DiffPanel(QWidget):
     """
 
     tile_changed = Signal()
+    # The whole-file comparison, which needs the window: it reads two files,
+    # touches the DATA and ISO filters, puts up a report and may add pages.
+    # None of that belongs to a panel.
+    run_file_diff = Signal()
+    show_report = Signal()
 
     # What "no run" is, in the same shape a run is.
     NONE_RUN = (-1, -1)
+
+    # What the groups of a freshly parsed configuration are drawn in, in
+    # order. The specification's four. They are only defaults: a group called
+    # BLACK is an identifier, not an instruction about colour, and the user
+    # changes any of them.
+    DEFAULT_GROUP_COLORS = ("#9aa3ad", "#e2544a", "#e59b3a", "#4caf6a")
 
     # A class attribute, and that is deliberate: this is a QWidget, and a
     # missing instance attribute reads as "some object" to any getattr with a
@@ -4928,7 +5293,111 @@ class DiffPanel(QWidget):
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
+        layout.addWidget(self._build_file_section())
+
         layout.addStretch(1)
+
+    # --------------------------------------------- the whole-file section
+
+    def _build_file_section(self) -> QGroupBox:
+        """Compare two whole files against a table of thresholds.
+
+        A different question from the one above, in the same tab because it is
+        the same word: there, how far apart are these two runs; here, has
+        anything moved anywhere between these two builds. The second is asked
+        of every run and every channel somebody wrote a threshold for, and its
+        answer is a report rather than a curve.
+        """
+        box = QGroupBox("Whole files (non-regression)")
+        outer = QVBoxLayout(box)
+        outer.setContentsMargins(6, 6, 6, 6)
+        outer.setSpacing(4)
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+
+        self.file_a_combo = QComboBox()
+        self.file_a_combo.setToolTip(
+            "The reference file. Differences are measured at its X values.")
+        self.file_a_combo.currentIndexChanged.connect(self._on_file_changed)
+        form.addRow("File A", self.file_a_combo)
+
+        self.file_b_combo = QComboBox()
+        self.file_b_combo.setToolTip("The file being checked against File A.")
+        self.file_b_combo.currentIndexChanged.connect(self._on_file_changed)
+        form.addRow("File B", self.file_b_combo)
+        outer.addLayout(form)
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(3)
+        self.config_label = QLabel("No thresholds chosen")
+        self.config_label.setObjectName("Hint")
+        self.config_label.setWordWrap(True)
+        row.addWidget(self.config_label, 1)
+        choose = QPushButton("Thresholds...")
+        choose.setToolTip(
+            "Choose the YAML file of groups and thresholds. The extension is "
+            "not checked; the structure is.")
+        choose.clicked.connect(self._choose_config)
+        row.addWidget(choose)
+        outer.addLayout(row)
+
+        # One row per group in the configuration, each with its colour. Built
+        # when a configuration is parsed, because the group names are the
+        # configuration's and nothing else knows them.
+        self.group_box = QGroupBox("Group colours")
+        self.group_layout = QFormLayout(self.group_box)
+        self.group_layout.setContentsMargins(6, 4, 6, 4)
+        self._group_swatches = {}
+        outer.addWidget(self.group_box)
+        self.group_box.setVisible(False)
+
+        buttons = QHBoxLayout()
+        buttons.setContentsMargins(0, 0, 0, 0)
+        buttons.setSpacing(3)
+        self.run_diff_button = QPushButton("Run diff")
+        self.run_diff_button.setToolTip(
+            "Compare every matched run of the two files against the "
+            "thresholds")
+        self.run_diff_button.clicked.connect(self.run_file_diff.emit)
+        buttons.addWidget(self.run_diff_button)
+        self.report_button = QPushButton("Show report")
+        self.report_button.setToolTip(
+            "Reopen the report of the last comparison")
+        self.report_button.clicked.connect(self.show_report.emit)
+        buttons.addWidget(self.report_button)
+        outer.addLayout(buttons)
+
+        self.file_state_label = QLabel("")
+        self.file_state_label.setObjectName("Hint")
+        self.file_state_label.setWordWrap(True)
+        outer.addWidget(self.file_state_label)
+
+        self.pages_combo = QComboBox()
+        self.pages_combo.setToolTip("Go to a page this comparison generated")
+        self.pages_combo.activated.connect(self._on_page_chosen)
+        self.pages_row = QWidget()
+        pages_layout = QHBoxLayout(self.pages_row)
+        pages_layout.setContentsMargins(0, 0, 0, 0)
+        pages_layout.setSpacing(3)
+        pages_layout.addWidget(QLabel("Pages"))
+        pages_layout.addWidget(self.pages_combo, 1)
+        outer.addWidget(self.pages_row)
+        self.pages_row.setVisible(False)
+
+        note = QLabel(
+            "The two files must hold the same runs, by identifier, and the "
+            "same channels. Runs are paired by name, not by position.\n\n"
+            "A run is flagged where |A - B| exceeds a threshold. Where two "
+            "groups are both exceeded, the higher threshold wins and is the "
+            "one shaded.\n\n"
+            "Nothing is plotted until you ask for it on a line of the report."
+        )
+        note.setObjectName("Hint")
+        note.setWordWrap(True)
+        outer.addWidget(note)
+        return box
 
     # ------------------------------------------------------------- the runs
 
@@ -5005,6 +5474,10 @@ class DiffPanel(QWidget):
             self.state_label.setText(self._describe(tile))
         finally:
             self._updating = False
+        # Outside the guard, because it manages its own: the two halves of
+        # this tab are independent, and the whole-file half is not about the
+        # active tile at all.
+        self.refresh_files()
 
     def _describe(self, tile) -> str:
         """What the tile is doing, in the words the user would use.
@@ -5072,6 +5545,176 @@ class DiffPanel(QWidget):
             return (int(first), int(second))
         except (TypeError, ValueError):
             return self.NONE_RUN
+
+    # ------------------------------------------- the whole-file comparison
+
+    def _file_entries(self):
+        """Every loaded file as (label, index)."""
+        entries = [("--", -1)]
+        for index in range(self._session.file_count):
+            handle = self._session.file(index)
+            if handle is not None:
+                entries.append((handle.name, index))
+        return entries
+
+    def refresh_files(self) -> None:
+        """Bring the whole-file section into line with the session and state.
+
+        Called from refresh(), and also after a comparison: the two files, the
+        configuration, the group colours and the generated pages are all
+        workspace state, and all of it can change without this panel being
+        the one that changed it.
+        """
+        self._updating = True
+        try:
+            self._file_entries_cache = self._file_entries()
+            for combo, current in (
+                    (self.file_a_combo, self._state.diff_file_a),
+                    (self.file_b_combo, self._state.diff_file_b)):
+                combo.clear()
+                for label, _index in self._file_entries_cache:
+                    combo.addItem(label)
+                position = 0
+                for at, (_label, index) in enumerate(self._file_entries_cache):
+                    if index == current:
+                        position = at
+                        break
+                combo.setCurrentIndex(position)
+
+            path = self._state.diff_config_path
+            rules = self._state.diff_rules
+            if path and rules:
+                self.config_label.setText(
+                    "{0}  --  {1} threshold(s) in {2} group(s)".format(
+                        os.path.basename(path), len(rules),
+                        len({rule.get("group") for rule in rules})))
+            elif path:
+                self.config_label.setText(
+                    "{0}  --  not read".format(os.path.basename(path)))
+            else:
+                self.config_label.setText("No thresholds chosen")
+            self.config_label.setToolTip(path)
+
+            self._rebuild_group_rows()
+
+            report = self._state.diff_report
+            if report:
+                flagged = len({flag.get("run_id")
+                               for flag in report.get("flags", [])})
+                self.file_state_label.setText(
+                    "Last comparison: {0} run(s) flagged.".format(flagged)
+                    if flagged else "Last comparison: nothing flagged.")
+            else:
+                self.file_state_label.setText("")
+            self.report_button.setEnabled(bool(report))
+
+            pages = self._state.diff_pages()
+            self.pages_combo.clear()
+            for index in pages:
+                self.pages_combo.addItem(self._state.pages[index].name)
+            self._diff_page_indices = list(pages)
+            self.pages_row.setVisible(bool(pages))
+        finally:
+            self._updating = False
+
+    def _rebuild_group_rows(self) -> None:
+        """One colour swatch per group named in the configuration."""
+        groups = []
+        for rule in self._state.diff_rules:
+            name = rule.get("group")
+            if name and name not in groups:
+                groups.append(name)
+
+        # Exactly as many rows as were added, taken from the top. Not a
+        # `while layout.count()`: a form row is a label *and* a field, the
+        # count moves by two or by one depending on how the row was made, and
+        # a loop that trusts it to reach zero is a loop that need not end.
+        for _ in range(len(self._group_swatches)):
+            self.group_layout.removeRow(0)
+        self._group_swatches = {}
+
+        for position, name in enumerate(groups):
+            colour = self._state.diff_group_colors.get(name) or \
+                self.DEFAULT_GROUP_COLORS[
+                    position % len(self.DEFAULT_GROUP_COLORS)]
+            self._state.diff_group_colors[name] = colour
+            swatch = ColorSwatch(colour)
+            swatch.setToolTip(
+                "What {0} is drawn in, in the report and on the plots"
+                .format(name))
+            swatch.color_picked.connect(
+                lambda value, group=name: self._on_group_color(group, value))
+            self._group_swatches[name] = swatch
+            self.group_layout.addRow(name, swatch)
+        self.group_box.setVisible(bool(groups))
+
+    def _on_group_color(self, group: str, colour: str) -> None:
+        self._state.diff_group_colors[group] = colour
+        self._state.dirty = True
+        # The bands on any generated page are drawn in it, and the report
+        # reads it when it is next opened.
+        self.tile_changed.emit()
+
+    def _on_file_changed(self, _index: int = 0) -> None:
+        if self._updating:
+            return
+        entries = getattr(self, "_file_entries_cache", None)
+        if not isinstance(entries, list):
+            return
+
+        def chosen(combo):
+            position = combo.currentIndex()
+            if 0 <= position < len(entries):
+                return int(entries[position][1])
+            return -1
+
+        self._state.diff_file_a = chosen(self.file_a_combo)
+        self._state.diff_file_b = chosen(self.file_b_combo)
+        self._state.dirty = True
+
+    def _choose_config(self) -> None:
+        """Pick a threshold configuration and read it now.
+
+        Read now rather than when the comparison runs, so that a file which is
+        not one of these says so while the user is still looking at the file
+        dialog -- and so the group colours can be offered before anything is
+        computed.
+        """
+        start = os.path.dirname(self._state.diff_config_path) \
+            if self._state.diff_config_path else ""
+        path, _filter = QFileDialog.getOpenFileName(
+            self.window(), "Choose a threshold configuration", start,
+            "Configurations (*.yaml *.yml *.txt);;All files (*)")
+        if not path:
+            return
+        try:
+            rules = diffconfig.read_rules(path)
+        except (diffconfig.ConfigError, OSError) as error:
+            QMessageBox.warning(self.window(), "Thresholds",
+                                "{0}\n\n{1}".format(path, error))
+            return
+
+        self._state.diff_config_path = path
+        self._state.diff_rules = [rule.to_dict() for rule in rules]
+        self._state.dirty = True
+
+        clashes = diffconfig.ties(rules)
+        self.refresh_files()
+        if clashes:
+            QMessageBox.warning(
+                self.window(), "Thresholds",
+                "Two groups share a threshold, so which of them has priority "
+                "is undefined and the shading may pick either:\n\n"
+                + "\n".join("{0}: {1}".format(param, ", ".join(groups))
+                             for param, groups in clashes[:12]))
+
+    def _on_page_chosen(self, position: int) -> None:
+        pages = getattr(self, "_diff_page_indices", None)
+        if not isinstance(pages, list) or not (0 <= position < len(pages)):
+            return
+        self._state.active_page = pages[position]
+        self._state.active_tile = 0
+        self.tile_changed.emit()
 
     def _clear(self) -> None:
         tile = self._state.tile
@@ -5350,7 +5993,8 @@ class InspectPanel(QWidget):
         self.filter_edit = QLineEdit()
         self.filter_edit.setPlaceholderText("Filter channels")
         self.filter_edit.textChanged.connect(self._apply_filter)
-        layout.addWidget(self.filter_edit)
+        layout.addLayout(_filter_row(self.filter_edit,
+                                     lambda: self.filter_edit.setText("")))
 
         self.tabs = QTabWidget()
         # Deliberately not connected here. addTab() moves the current index

@@ -40,7 +40,7 @@ from ..model import (
     curve_line_key,
     tile_title,
 )
-from .. import projection, scales, sync
+from .. import projection, scales, sync, zoomtrace
 from ..session import Session
 from ..theme import (
     PLOT_AXIS_PT,
@@ -54,7 +54,7 @@ from ..theme import (
     plot_font,
 )
 
-# The drawing budget lives in aoeviewer.scales, which imports no Qt, so the
+# The drawing budget lives in visimu.scales, which imports no Qt, so the
 # arithmetic behind it can be tested without a running application -- which is
 # exactly where the last mistake in it hid.
 from ..scales import (  # noqa: F401
@@ -70,8 +70,19 @@ from .zoombox import DirectionalViewBox
 # z = 0, so anything meant to be read *over* the data has to be above that.
 # Annotations are furniture the engineer places deliberately; a band or a
 # marker hidden behind whichever curve happens to cross it is not doing its job.
+VIOLATION_Z = -5    # the comparison's verdict, behind the two series it judges
 AREA_Z = 5          # shaded bands: translucent, so the data still reads through
 MARKER_Z = 10       # marker lines and their dots
+
+# The two files of a comparison, drawn in two colours. Fixed rather than taken
+# from the palette: on a page of sixteen overlays the question is always "which
+# of these two is which", and the answer should not change from tile to tile
+# because the palette was walked in a different order.
+FDIFF_COLOR_A = "#4da3ff"
+FDIFF_COLOR_B = "#ff8a3d"
+# How much of the shading is colour. A band is a verdict about a stretch of
+# the run, and both curves have to stay readable through it.
+VIOLATION_ALPHA = 0.22
 GRID_3D_Z = -20     # the back walls of a 3D box, behind everything
 
 # Most rows a legend may have. pyqtgraph builds a QGraphicsGridLayout with two
@@ -92,6 +103,12 @@ MAX_LEGEND_ROWS = 60
 # carries it on the light ground and the core on the dark one.
 INSPECT_DOT_Z = 40
 INSPECT_DOT_SIZE = 9.0
+
+# How far the pointer may travel between a double click and its release and
+# still count as a click rather than the start of a drag, in pixels. Small:
+# the hand does not move while double-clicking, and anything larger would
+# start swallowing the fit people are asking for.
+DOUBLE_CLICK_SLACK = 4.0
 INSPECT_DOT_COLOUR = "#ffffff"
 INSPECT_DOT_EDGE = "#101215"
 
@@ -797,6 +814,8 @@ class PlotTile(pg.PlotWidget):
     # (low, high) in x: a zoom that asked every tile to follow. Emitted by the
     # tile the gesture happened in; the window hands it to the others.
     x_zoom_shared = Signal(float, float)
+    # A double right-click: fit every tile, not just this one.
+    fit_all_requested = Signal()
 
     # Class-level defaults, and they are load-bearing. pyqtgraph's
     # PlotWidget.__init__ calls setCentralItem, which calls resizeEvent(None) --
@@ -815,6 +834,11 @@ class PlotTile(pg.PlotWidget):
     _index = -1
     _suppress_range_event = True
     _slope_origin = None
+    # An armed double-click fit: "one", "all", or None. Class attributes, so a
+    # press that arrives before the first release reads as "nothing armed"
+    # rather than as some object.
+    _double_click = None
+    _double_click_from = None
     _slope_item = None
     _slope_text = None
     _rotating_from = None
@@ -847,6 +871,13 @@ class PlotTile(pg.PlotWidget):
         self._groups: List[DrawGroup] = []
         self._legend: Optional[pg.LegendItem] = None
         self._overlays: List[pg.GraphicsObject] = []
+        # Moves delivered during the drag in progress, for the trace.
+        self._drag_moves = 0
+        # The violation bands of a comparison overlay. A list of their own
+        # rather than _overlays, which _draw_overlays() clears on every pass:
+        # these belong to the tile's data and not to the markers and areas
+        # that come and go with the annotation tabs.
+        self._fdiff_items: List[pg.GraphicsObject] = []
         self._suppress_range_event = False
         # What was last written to the PlotItem's own settings, so a rebuild
         # that would write the same thing writes nothing. See _apply_axes().
@@ -1137,6 +1168,10 @@ class PlotTile(pg.PlotWidget):
             view.setMouseEnabled(x=enabled, y=enabled)
             view.setMouseMode(pg.ViewBox.RectMode)
 
+        zoomtrace.log("mousemode", tile=self._index, mode=mode.name,
+                      plot3d=tile.plot3d,
+                      **zoomtrace.view_state(view))
+
         movable = self._annotations_movable()
         for overlay in self._overlays:
             if isinstance(overlay, (pg.InfiniteLine, pg.LinearRegionItem)):
@@ -1151,6 +1186,17 @@ class PlotTile(pg.PlotWidget):
         self.setCursor(cursors.get(mode, Qt.CursorShape.ArrowCursor))
 
     def wheelEvent(self, event) -> None:
+        # Traced too: "the zoom stopped working" may mean the wheel as much as
+        # the band, and the two fail for different reasons.
+        try:
+            notches = int(event.angleDelta().y())
+        except (AttributeError, TypeError, ValueError):
+            notches = "?"
+        zoomtrace.log("wheel", tile=self._index,
+                      mode=self._state.mouse_mode.name,
+                      delta=notches, plot3d=self.tile_state.plot3d,
+                      **zoomtrace.view_state(self.getPlotItem().vb))
+
         # Pan mode is "move without zooming", so the wheel must do nothing --
         # otherwise a scroll during a drag silently rescales the plot.
         if self._state.mouse_mode in (MouseMode.SELECT, MouseMode.CROSSHAIR,
@@ -1549,6 +1595,17 @@ class PlotTile(pg.PlotWidget):
             self._legend.clear()
 
         tile = self.tile_state
+
+        # The comparison's bands, dropped unless this tile is still one of its
+        # overlays. They belong to the tile *state*, but they are drawn on the
+        # tile *widget* -- and the widgets are reused across pages, which is
+        # what makes changing page quick. So a widget that drew page one's
+        # sixteenth overlay and is now drawing page two's second tile, or a
+        # tile on a page that has nothing to do with the comparison, arrives
+        # here still holding the bands of whatever it drew last. Only
+        # _rebuild_file_diff() puts them back.
+        if not tile.is_file_diff() and self._fdiff_items:
+            self._clear_violation_bands()
         self._slope_item.setVisible(False)
         self._slope_text.setVisible(False)
         # 2D and 3D want different things from the same mouse mode, so the
@@ -1575,8 +1632,14 @@ class PlotTile(pg.PlotWidget):
         # anything is ticked in DATA: a difference is a question about two
         # particular runs, and having to tick them first -- which would also
         # draw them -- is a step in the way of the question.
+        #
+        # The comparison's overlays are the same case for the same reason.
+        # They name their run and their two files, and they were generated to
+        # answer one question about it -- so unticking a run in DATA
+        # afterwards must not blank the page that answered it.
         if tile.is_empty() or (not self._state.plotted_sims()
-                               and not tile.is_diff()):
+                               and not tile.is_diff()
+                               and not tile.is_file_diff()):
             self._drop_groups(previous_groups)
             if self._legend is not None:
                 self._legend.setVisible(False)
@@ -1599,6 +1662,18 @@ class PlotTile(pg.PlotWidget):
             # One curve from two runs, so none of the walk below applies: there
             # is nothing to group, nothing to rank and no legend to cap.
             self._rebuild_diff(plot, tile, previous_groups)
+            self._frame_after_rebuild(tile)
+            self._draw_overlays()
+            self._refresh_texts()
+            return
+
+        if tile.is_file_diff():
+            # Two curves of one channel, from two files, and the bands the
+            # comparison found between them. Like a diff, it ignores what is
+            # ticked in PARAMS and DATA: the tile was generated to answer one
+            # question about one run, and a filter changed three tabs away
+            # should not empty it.
+            self._rebuild_file_diff(plot, tile, previous_groups)
             self._frame_after_rebuild(tile)
             self._draw_overlays()
             self._refresh_texts()
@@ -1816,6 +1891,130 @@ class PlotTile(pg.PlotWidget):
 
     # -------------------------------------------------------------- diff
 
+    def _rebuild_file_diff(self, plot, tile, previous_groups) -> None:
+        """Overlay one channel of one run as two files recorded it.
+
+        The counterpart of _rebuild_diff and not a variant of it: a difference
+        curve answers "by how much", and this answers "where, and does it
+        matter". Both series are drawn as they were recorded, and the bands
+        the comparison computed are washed in behind them -- so the eye reads
+        the two traces parting company and the colour says which threshold
+        that crossing broke.
+
+        The bands are not recomputed here. They were computed once, against a
+        configuration that may since have been edited, and they are carried on
+        the tile; redoing the arithmetic on every rebuild would also mean
+        redoing it on every pan.
+        """
+        run_a = self._fdiff_run(tile.fdiff_file_a, tile.fdiff_run)
+        run_b = self._fdiff_run(tile.fdiff_file_b, tile.fdiff_run)
+
+        plans = []
+        for run, colour, handle_index in (
+                (run_a, FDIFF_COLOR_A, tile.fdiff_file_a),
+                (run_b, FDIFF_COLOR_B, tile.fdiff_file_b)):
+            if run is None:
+                continue
+            x = self._diff_channel(run, tile.x_param)
+            y = self._diff_channel(run, tile.fdiff_param)
+            if x is None or y is None:
+                continue
+            count = min(x.size, y.size)
+            if count < 1:
+                continue
+            label = self._fdiff_label(handle_index, tile)
+            # Through the registry, so STYLE can restyle a generated page like
+            # any other, while the first drawing is the fixed pair of colours.
+            key = "fdiff|{0}".format(handle_index)
+            styles = self._state.styles
+            if not styles.has_color(key):
+                styles.set_color(key, colour)
+            entry_key = "fdiff|{0}|{1}|{2}".format(
+                handle_index, tile.fdiff_run, tile.fdiff_param)
+            entry = CurveEntry(x[:count], y[:count], label, key, entry_key)
+            self._curves[entry_key] = entry
+            plan = _GroupPlan(styles.color_for(key), styles.dash_for(key),
+                              styles.width_for(key),
+                              styles.symbol_for(key)
+                              or ("o" if tile.show_points else None),
+                              styles.symbol_size,
+                              label if tile.show_legend else None)
+            plan.entries.append(entry)
+            plans.append(plan)
+
+        if not plans:
+            # Neither file carries the run or the channel any more -- the files
+            # were closed, or reloaded from a build that renamed things. The
+            # saved bands are not drawn over an empty tile: they would be a
+            # verdict with nothing to judge.
+            self._drop_groups(previous_groups)
+            self._clear_violation_bands()
+            if self._legend is not None:
+                self._legend.setVisible(False)
+            self._sync_report = (0, 0)
+            return
+
+        self._adopt_groups(plot, previous_groups, plans)
+        self._draw_violation_bands(plot, tile)
+        self._sync_report = (0, 0)
+
+        if tile.show_legend and self._legend is not None:
+            self._place_legend(tile)
+
+    def _fdiff_run(self, file_index: int, run_id: str):
+        """The (file, run) pair for a run named by identifier, or None.
+
+        By name, because that is what the two files were matched on: the run
+        the user is looking at can sit at a different index in each of them.
+        """
+        handle = self._session.file(file_index)
+        if handle is None or not run_id:
+            return None
+        for sim_index, sim in enumerate(handle.simulations):
+            if sim.sim_id == run_id:
+                return (file_index, sim_index)
+        return None
+
+    def _fdiff_label(self, file_index: int, tile) -> str:
+        """"File1 - RUN2 - BETA", as the specification writes it."""
+        handle = self._session.file(file_index)
+        name = handle.name if handle is not None else "?"
+        return "{0} - {1} - {2}".format(name, tile.fdiff_run,
+                                        tile.fdiff_param)
+
+    def _clear_violation_bands(self) -> None:
+        plot = self.getPlotItem()
+        for item in self._fdiff_items:
+            plot.removeItem(item)
+        self._fdiff_items = []
+
+    def _draw_violation_bands(self, plot, tile) -> None:
+        """Wash in the stretches of x where a threshold was crossed.
+
+        One band per region, in the group's colour, and not movable: unlike an
+        AREA band this is not an annotation the user placed but a measurement,
+        and dragging it would make it say something that was never computed.
+        """
+        self._clear_violation_bands()
+        colours = getattr(self._state, "diff_group_colors", {}) or {}
+        for group, low, high in tile.fdiff_bands:
+            colour = QColor(colours.get(group) or "#9aa3ad")
+            colour.setAlphaF(VIOLATION_ALPHA)
+            if high <= low:
+                # A single sample. A region of zero width draws nothing, so it
+                # is given the narrowest band that is visible at any zoom: a
+                # hairline at the sample, which is where it happened.
+                span = (low, low)
+            else:
+                span = (low, high)
+            region = pg.LinearRegionItem(values=span,
+                                         brush=pg.mkBrush(colour),
+                                         movable=False)
+            region.setZValue(VIOLATION_Z)
+            region.setToolTip("{0}: {1:g} to {2:g}".format(group, low, high))
+            plot.addItem(region, ignoreBounds=True)
+            self._fdiff_items.append(region)
+
     def _rebuild_diff(self, plot, tile, previous_groups) -> None:
         """Draw one curve: a parameter's difference between two runs.
 
@@ -1833,7 +2032,12 @@ class PlotTile(pg.PlotWidget):
         channel reads and a subtraction.
         """
         a_run, b_run = tile.diff_runs()
-        label = self._diff_label(tile, a_run, b_run)
+        # Two forms of the same thing. The curve carries the plain one, which
+        # is what the crosshair readout prints; the legend row carries the
+        # broken one, which is HTML and would print its own markup anywhere
+        # else.
+        label = self._diff_label(tile, a_run, b_run, wrap=False)
+        legend_row = self._diff_label(tile, a_run, b_run, wrap=True)
 
         x, y = self._diff_samples(tile, a_run, b_run)
         if x is None:
@@ -1863,19 +2067,37 @@ class PlotTile(pg.PlotWidget):
         self._curves[curve_key] = entry
 
         plan = _GroupPlan(color, dash, width, marker, styles.symbol_size,
-                          label if tile.show_legend else None)
+                          legend_row if tile.show_legend else None)
         plan.entries.append(entry)
         self._adopt_groups(plot, previous_groups, [plan])
 
         if tile.show_legend and self._legend is not None:
             self._place_legend(tile)
 
-    def _diff_label(self, tile, a_run, b_run) -> str:
-        """"ALPHA: R3 - R7", with the file named when the two differ."""
-        return "{0}: {1} - {2}".format(
+    def _diff_label(self, tile, a_run, b_run, wrap: bool = True) -> str:
+        """The name of a difference curve, on one line or two.
+
+        One line was the whole row: channel, both runs and, when the two come
+        from different files, both file names -- which is the usual case and
+        the longest one. On a tile a quarter of a page wide that row ran past
+        the plot it was labelling. So the channel takes the first line and the
+        two runs the second:
+
+            ALPHA
+            build-a/R3 - build-b/R7
+
+        A legend row is HTML -- pyqtgraph renders it through a LabelItem --
+        so the break is a <br> rather than a newline, which the row would
+        collapse to a space. `wrap` is off for the crosshair readout and
+        anywhere else the name is read as text, where that markup would be
+        printed rather than obeyed.
+        """
+        with_file = a_run[0] != b_run[0]
+        return "{0}{1}{2} - {3}".format(
             tile.diff_param,
-            self._run_name(a_run, with_file=a_run[0] != b_run[0]),
-            self._run_name(b_run, with_file=a_run[0] != b_run[0]))
+            "<br>" if wrap else ": ",
+            self._run_name(a_run, with_file=with_file),
+            self._run_name(b_run, with_file=with_file))
 
     def _run_name(self, run, with_file: bool = True) -> str:
         """How a (file, run) pair is written for a human."""
@@ -2080,7 +2302,7 @@ class PlotTile(pg.PlotWidget):
 
     # ------------------------------------------------------------------ 3D
 
-    # The arithmetic lives in aoeviewer.projection: it needs no Qt, so it can
+    # The arithmetic lives in visimu.projection: it needs no Qt, so it can
     # be tested without a QApplication, which is where the interesting failures
     # would be.
     project_3d = staticmethod(projection.project)
@@ -2327,7 +2549,7 @@ class PlotTile(pg.PlotWidget):
         no numeric scale anywhere on it. You could see the shape of a
         trajectory and not read a single number off it.
 
-        The geometry is in aoeviewer.projection, which has no Qt in it, so the
+        The geometry is in visimu.projection, which has no Qt in it, so the
         wall selection can be asserted at every rotation rather than eyeballed
         at one.
         """
@@ -2589,7 +2811,7 @@ class PlotTile(pg.PlotWidget):
             tile.y_min = self._from_view_y(y_low, log)
             tile.y_max = self._from_view_y(y_high, log)
 
-    # Log-axis conversion lives in aoeviewer.scales, which imports no Qt so the
+    # Log-axis conversion lives in visimu.scales, which imports no Qt so the
     # arithmetic can be tested without a running application. See that module
     # for why the tile's y range is kept in data units throughout.
     _to_view_y = staticmethod(scales.to_view)
@@ -2640,7 +2862,7 @@ class PlotTile(pg.PlotWidget):
         # Built from the final target, after the budget above has had its say,
         # so the key can never describe a resampling that did not happen. The
         # quantisation, and why the span has to be part of it, are in
-        # aoeviewer.scales -- which imports no Qt, so that arithmetic can be
+        # visimu.scales -- which imports no Qt, so that arithmetic can be
         # tested without a running application.
         key = resample_key(x_range, target, tile.log_y)
 
@@ -2904,11 +3126,19 @@ class PlotTile(pg.PlotWidget):
                     movable=movable,
                     hoverPen=pg.mkPen(marker.color, width=3.0),
                 )
+                # Connected whether or not it is movable *now*. The mode can
+                # change under an item that is already on the plot --
+                # apply_mouse_mode() calls setMovable() on the overlays it
+                # finds rather than rebuilding them -- and an item made while
+                # dragging was off then became draggable with nothing
+                # listening: pyqtgraph moved the line, the model never heard,
+                # and no other tile followed. A line that is not movable emits
+                # nothing, so the connection costs nothing until it matters.
+                line.sigPositionChangeFinished.connect(
+                    lambda item, m=marker: self._marker_dragged(m, item)
+                )
                 if movable:
                     line.setCursor(Qt.CursorShape.SizeHorCursor)
-                    line.sigPositionChangeFinished.connect(
-                        lambda item, m=marker: self._marker_dragged(m, item)
-                    )
                 line.setZValue(MARKER_Z)
                 plot.addItem(line, ignoreBounds=True)
                 self._overlays.append(line)
@@ -2927,12 +3157,13 @@ class PlotTile(pg.PlotWidget):
                     brush=pg.mkBrush(color),
                     movable=movable,
                 )
+                # Connected unconditionally; see the marker above.
+                region.sigRegionChangeFinished.connect(
+                    lambda item, a=area: self._area_dragged(a, item)
+                )
                 if movable:
                     # Both edges and the band as a whole become draggable.
                     region.setHoverBrush(pg.mkBrush(self._hover_colour(area)))
-                    region.sigRegionChangeFinished.connect(
-                        lambda item, a=area: self._area_dragged(a, item)
-                    )
                 # In front of the curves, not behind them. A band is a
                 # translucent wash marking a phase of the run, and the whole
                 # point of it is to see which part of the trace it covers --
@@ -3121,6 +3352,27 @@ class PlotTile(pg.PlotWidget):
         if self._index >= 0:
             self.activated.emit(self._index)
 
+        # Traced before anything is done to the event: what the scene thinks
+        # is in progress *as the press arrives* is the question, and this
+        # handler is about to change it.
+        state = dict(zoomtrace.view_state(self.getPlotItem().vb))
+        state.update(zoomtrace.scene_state(self))
+        zoomtrace.log("press", tile=self._index,
+                      mode=self._state.mouse_mode.name,
+                      button=zoomtrace.button_name(event),
+                      modifiers=zoomtrace.modifier_names(event),
+                      at=zoomtrace.position(event),
+                      armed=self._double_click,
+                      plot3d=self.tile_state.plot3d,
+                      **state)
+        self._drag_moves = 0
+
+        # A fresh press means any earlier gesture is over, whatever became of
+        # its release. Belt and braces: nothing downstream should ever find a
+        # double click still armed from a gesture that has been and gone.
+        self._double_click = None
+        self._double_click_from = None
+
         tile = self.tile_state
 
         # 3D navigation follows the convention every simulation viewer shares:
@@ -3146,6 +3398,8 @@ class PlotTile(pg.PlotWidget):
 
             if self._nav_action is not None:
                 self._rotating_from = event.position()
+                zoomtrace.log("press.taken", by="3d nav",
+                              action=self._nav_action)
                 event.accept()
                 return
 
@@ -3156,12 +3410,34 @@ class PlotTile(pg.PlotWidget):
             self._slope_origin = self._data_point(event.position())
             self._slope_item.setVisible(False)
             self._slope_text.setVisible(False)
+            zoomtrace.log("press.taken", by="slope origin")
             event.accept()
             return
 
+        zoomtrace.log("press.passed", to="pyqtgraph")
         super().mousePressEvent(event)
+        # After, as well as before: the scene registers a press by appending
+        # to clickEvents, and that is what it later turns into a drag. A press
+        # that leaves clickEvents unchanged never reached it.
+        zoomtrace.log("press.after", **zoomtrace.scene_state(self))
 
     def mouseMoveEvent(self, event) -> None:
+        # Only while a button is down: a hover is a move too, and tracing
+        # those would bury the gesture in the log. Throttled, and the total is
+        # reported on the release.
+        try:
+            dragging = int(event.buttons()) != 0
+        except (AttributeError, TypeError, ValueError):
+            dragging = False
+        if dragging:
+            self._drag_moves = int(self._drag_moves or 0) + 1
+            if zoomtrace.should_log_move(self._drag_moves):
+                zoomtrace.log("move", tile=self._index,
+                              n=self._drag_moves,
+                              buttons=zoomtrace.buttons_held(event),
+                              at=zoomtrace.position(event),
+                              **zoomtrace.scene_state(self))
+
         if self._rotating_from is not None:
             delta = event.position() - self._rotating_from
             self._rotating_from = event.position()
@@ -3187,9 +3463,34 @@ class PlotTile(pg.PlotWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        state = dict(zoomtrace.view_state(self.getPlotItem().vb))
+        state.update(zoomtrace.scene_state(self))
+        zoomtrace.log("release", tile=self._index,
+                      mode=self._state.mouse_mode.name,
+                      button=zoomtrace.button_name(event),
+                      at=zoomtrace.position(event),
+                      armed=self._double_click,
+                      moves=self._drag_moves,
+                      **state)
+
+        if self._double_click is not None:
+            # Resolved, and then handed on rather than consumed. pyqtgraph
+            # drives its rubber-band zoom from the scene's press, move and
+            # release events, so a release that stops here leaves its scene
+            # believing a drag is still in progress -- and from then on the
+            # band never appears again, on this tile or the next one clicked.
+            #
+            # That is what "the zoom stops working after a few zooms" was: a
+            # double click followed by a drag is exactly what consecutive
+            # zooming produces, and this branch ate the release that would
+            # have ended it.
+            moved = self._resolve_double_click(event)
+            zoomtrace.log("release.doubleclick", resolved=True, moved=moved)
+
         if self._rotating_from is not None:
             self._rotating_from = None
             self._nav_action = None
+            zoomtrace.log("release.taken", by="3d nav")
             event.accept()
             return
 
@@ -3206,10 +3507,19 @@ class PlotTile(pg.PlotWidget):
                 self._slope_item.setVisible(False)
                 self._slope_text.setVisible(False)
                 self._inspect_at(event.position())
+            zoomtrace.log("release.taken", by="slope/inspect")
             event.accept()
             return
 
+        zoomtrace.log("release.passed", to="pyqtgraph",
+                      **zoomtrace.scene_state(self))
         super().mouseReleaseEvent(event)
+        # The decisive line. A release that reached the scene clears the
+        # button it was holding; one that did not leaves dragButtons as it
+        # was, and from then on every press is read as the continuation of a
+        # drag that has already ended -- which is what a band that never
+        # appears again looks like from the outside.
+        zoomtrace.log("release.after", **zoomtrace.scene_state(self))
 
     # -------------------------------------------------------------- slope
 
@@ -3353,18 +3663,79 @@ class PlotTile(pg.PlotWidget):
             self._inspect_dot.setVisible(False)
 
     def mouseDoubleClickEvent(self, event) -> None:
-        """Fit the view, and ask for the parameter panel.
+        """Arm a fit. Left fits this tile and opens PARAMS; right fits them all.
 
         Double-clicking a tile is how you say "this one, now" -- so as well as
-        re-framing it, it makes the tile active and opens PARAMS, which is
-        where nine times out of ten the next click was going anyway. The
-        activation goes first: PARAMS shows the active tile, and opening it on
-        the previous one would be worse than not opening it at all.
+        re-framing it, the left button makes the tile active and opens PARAMS,
+        which is where nine times out of ten the next click was going anyway.
+        The activation goes first: PARAMS shows the active tile, and opening it
+        on the previous one would be worse than not opening it at all.
+
+        Armed rather than done, and that is the fix for a zoom that would not
+        stick. Qt reports the second press of two quick clicks as a double
+        click whether or not a drag follows it, so two rectangle zooms dragged
+        in quick succession near the same spot arrived here -- and the fit
+        threw away the zoom the first drag had just made. In Zoom mode, where
+        dragging *is* the gesture and one drag follows another, that read as
+        the zoom working only sometimes.
+
+        So the fit waits for the release, and happens only if the pointer
+        stayed put. A double click that turns out to be the start of a drag
+        does nothing instead of undoing the view.
         """
         self.activated.emit(self._index)
-        self.autoscale()
-        self.params_requested.emit(self._index)
+        self._double_click = (
+            "all" if event.button() == Qt.MouseButton.RightButton else "one")
+        self._double_click_from = event.position()
+        # Qt reports the second press of two quick clicks as a double click
+        # whether a drag follows or not, so this is the event that stands in
+        # for a press -- and the scene never sees one. That makes it the prime
+        # suspect for a drag the scene will not start.
+        zoomtrace.log("doubleclick", tile=self._index,
+                      mode=self._state.mouse_mode.name,
+                      button=zoomtrace.button_name(event),
+                      arming=self._double_click,
+                      at=zoomtrace.position(event),
+                      **zoomtrace.scene_state(self))
         event.accept()
+
+    def _resolve_double_click(self, event) -> bool:
+        """Carry out an armed fit, if the pointer never moved. True if it did.
+
+        Judged in pixels, with the same threshold a slope drag uses: the
+        question is whether the hand moved, not what the numbers under it were.
+        """
+        gesture = self._double_click
+        self._double_click = None
+        origin = self._double_click_from
+        self._double_click_from = None
+        if gesture is None:
+            return False
+
+        try:
+            now = event.position()
+            dx = abs(float(now.x()) - float(origin.x()))
+            dy = abs(float(now.y()) - float(origin.y()))
+            moved = max(dx, dy) > DOUBLE_CLICK_SLACK
+        except (AttributeError, TypeError):
+            # Nothing to compare: treat it as the click it was reported as.
+            moved = False
+        if moved:
+            # It was the beginning of a drag. The drag itself is lost either
+            # way -- Qt has already spent that press on a double click -- but
+            # the view the user had is not.
+            zoomtrace.log("doubleclick.abandoned", gesture=gesture,
+                          dx="{0:.1f}".format(dx), dy="{0:.1f}".format(dy))
+            return True
+
+        zoomtrace.log("doubleclick.fired", gesture=gesture)
+
+        if gesture == "all":
+            self.fit_all_requested.emit()
+        else:
+            self.autoscale()
+            self.params_requested.emit(self._index)
+        return True
 
     def autoscale(self) -> None:
         """Fit the data, except on axes the user has fixed.

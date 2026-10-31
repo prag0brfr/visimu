@@ -1,5 +1,5 @@
 # Author: Paulo R. A. Gilz
-"""aoeViewer - fast viewer for AOE simulation result files.
+"""visimu - fast viewer for AOE simulation result files.
 
 The heavy lifting (parsing, formula evaluation, decimation) lives in a C++ core
 reached through a plain C ABI; this package is the Python front end plus a
@@ -7,7 +7,7 @@ scripting API over the same core.
 
 Typical scripted use::
 
-    from aoeviewer import Session
+    from visimu import Session
 
     with Session() as session:
         f = session.add_file("results/run_042.aoe")
@@ -18,11 +18,11 @@ Typical scripted use::
             print(sim.sim_id, a.max())
 """
 
-__version__ = "2.3.0"
+__version__ = "2.4.0"
 
 # Imported lazily rather than at module import.
 #
-# Loading `aoeviewer` used to pull in the core library and NumPy immediately,
+# Loading `visimu` used to pull in the core library and NumPy immediately,
 # which meant a failure in either happened *before* logging could be installed
 # -- so the one thing that would explain it was never written down. It also made
 # `--version` and `--help` fail on a machine where the core was missing, which
@@ -39,7 +39,7 @@ _LAZY = {
 def __getattr__(name):
     module_name = _LAZY.get(name)
     if module_name is None:
-        raise AttributeError("module 'aoeviewer' has no attribute {0!r}".format(name))
+        raise AttributeError("module 'visimu' has no attribute {0!r}".format(name))
     import importlib
 
     module = importlib.import_module("." + module_name, __name__)

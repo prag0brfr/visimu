@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Author: Paulo R. A. Gilz
-"""Build the standalone aoeViewer executable.
+"""Build the standalone visimu executable.
 
     python packaging/build_exe.py             one folder  (recommended)
     python packaging/build_exe.py --onefile   single file
@@ -34,7 +34,7 @@ import subprocess
 import sys
 
 PROJECT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-SPEC = os.path.join(PROJECT, "packaging", "aoeviewer.spec")
+SPEC = os.path.join(PROJECT, "packaging", "visimu.spec")
 
 
 def core_library_name() -> str:
@@ -46,14 +46,14 @@ def core_library_name() -> str:
 
 
 def ensure_icon() -> None:
-    """Generate packaging/aoeviewer.ico if it is not there.
+    """Generate packaging/visimu.ico if it is not there.
 
     It is drawn by a script rather than committed as a binary, so on a fresh
     checkout it does not exist yet. Building an unbranded executable and saying
     nothing would be the wrong way to handle that, and making the user run a
     second command by hand is unnecessary when this one can do it.
     """
-    icon = os.path.join(PROJECT, "packaging", "aoeviewer.ico")
+    icon = os.path.join(PROJECT, "packaging", "visimu.ico")
     if os.path.isfile(icon):
         return
 
@@ -201,6 +201,34 @@ def ensure_samples(quiet: bool = False) -> None:
     print("Samples: done.")
 
 
+def ensure_diff_samples(quiet: bool = False) -> None:
+    """Generate the non-regression pair and its thresholds, if absent.
+
+    Separate from ensure_samples() and run before it: these are a few hundred
+    kilobytes written in a second, where the flight-data samples are hundreds
+    of megabytes integrated over minutes. A build interrupted while the big
+    ones are being made should still leave the comparison something to open.
+
+    Like the others, failure is reported and does not fail the build.
+    """
+    folder = os.path.join(PROJECT, "sample")
+    sys.path.insert(0, os.path.join(PROJECT, "tools"))
+    try:
+        from gen_diff_samples import generate
+    except ImportError as exc:
+        print("Comparison samples: skipped ({0})".format(exc))
+        return
+    try:
+        written = generate(folder, quiet=quiet)
+    except OSError as exc:
+        print("Comparison samples: skipped ({0})".format(exc))
+        return
+    if not quiet:
+        print("Comparison samples: {0}".format(
+            "{0} written".format(len(written)) if written
+            else "already in {0}".format(folder)))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -235,14 +263,14 @@ def main() -> int:
             shutil.rmtree(path, ignore_errors=True)
 
     env = dict(os.environ)
-    env["AOEVIEWER_ONEFILE"] = "1" if args.onefile else "0"
-    env["AOEVIEWER_CONSOLE"] = "1" if args.debug else "0"
-    env.pop("AOEVIEWER_RUNTIME_TMPDIR", None)
+    env["VISIMU_ONEFILE"] = "1" if args.onefile else "0"
+    env["VISIMU_CONSOLE"] = "1" if args.debug else "0"
+    env.pop("VISIMU_RUNTIME_TMPDIR", None)
     if args.runtime_tmpdir:
         if args.onefile:
             # Passed through verbatim: PyInstaller expands it on the target
-            # machine, so "%LOCALAPPDATA%\\aoeviewer" is a valid value here.
-            env["AOEVIEWER_RUNTIME_TMPDIR"] = args.runtime_tmpdir
+            # machine, so "%LOCALAPPDATA%\\visimu" is a valid value here.
+            env["VISIMU_RUNTIME_TMPDIR"] = args.runtime_tmpdir
         else:
             print("Note: --runtime-tmpdir only affects --onefile builds; ignoring it.")
 
@@ -264,14 +292,14 @@ def main() -> int:
 
     suffix = ".exe" if sys.platform == "win32" else ""
     if args.onefile:
-        target = os.path.join(dist, "aoeviewer" + suffix)
+        target = os.path.join(dist, "visimu" + suffix)
     else:
-        target = os.path.join(dist, "aoeviewer", "aoeviewer" + suffix)
+        target = os.path.join(dist, "visimu", "visimu" + suffix)
 
     print("\nBuilt.")
     print("  Output: {0}".format(target))
     if not args.onefile:
-        print("  Ship the whole 'aoeviewer' folder; the executable is inside it.")
+        print("  Ship the whole 'visimu' folder; the executable is inside it.")
 
     if os.path.isdir(dist):
         total = 0
@@ -284,6 +312,7 @@ def main() -> int:
     # for, and integrating half a gigabyte of flight data in front of it would
     # make every rebuild feel like the first one.
     if not args.no_samples:
+        ensure_diff_samples()
         ensure_samples()
 
     # Explorer caches icons per path; a rebuilt executable at a path that once
@@ -338,11 +367,11 @@ def selftest(target: str) -> int:
 
 
 def print_log_tail(directory: str, lines: int = 60) -> None:
-    path = os.path.join(directory, "aoeviewer.log")
+    path = os.path.join(directory, "visimu.log")
     if not os.path.isfile(path):
-        path = os.path.join(os.path.expanduser("~"), ".aoeviewer", "aoeviewer.log")
+        path = os.path.join(os.path.expanduser("~"), ".visimu", "visimu.log")
     if not os.path.isfile(path):
-        print("  No aoeviewer.log was written either.")
+        print("  No visimu.log was written either.")
         return
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as handle:

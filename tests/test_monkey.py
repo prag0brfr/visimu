@@ -34,8 +34,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 import numpy as np
 
-from aoeviewer import CoreError, Session
-from aoeviewer.model import (
+from visimu import CoreError, Session
+from visimu.model import (
     DEFAULT_3D_HALF,
     MAX_3D_HALF,
     MAX_TILES,
@@ -53,9 +53,9 @@ from aoeviewer.model import (
     save_workspace,
     tile_title,
 )
-from aoeviewer import isogroups
-from aoeviewer import projection
-from aoeviewer.scales import MAX_TILE_POINTS, resample_target
+from visimu import isogroups
+from visimu import projection
+from visimu.scales import MAX_TILE_POINTS, resample_target
 from gen_sample import generate
 
 # Kept small deliberately: the point is the number of *operations*, not the

@@ -39,17 +39,17 @@ import numpy as np
 import qt_stubs  # noqa: F401  (installs the stub modules; must precede the ui import)
 from PySide6.QtCore import Qt  # noqa: E402  (the stub installed above)
 
-from aoeviewer import isogroups
-from aoeviewer import scales
-from aoeviewer import theme as theme_module
-from aoeviewer import model
-from aoeviewer import sync
-from aoeviewer.model import MAX_TILES, AppState, StyleRegistry, TileState
-from aoeviewer.scales import resample_key
-from aoeviewer.ui import main_window
-from aoeviewer.ui import panels
-from aoeviewer.ui import plot_grid as pg_grid
-from aoeviewer.ui import plot_tile as pt
+from visimu import isogroups
+from visimu import scales
+from visimu import theme as theme_module
+from visimu import model
+from visimu import sync
+from visimu.model import MAX_TILES, AppState, StyleRegistry, TileState
+from visimu.scales import resample_key
+from visimu.ui import main_window
+from visimu.ui import panels
+from visimu.ui import plot_grid as pg_grid
+from visimu.ui import plot_tile as pt
 
 
 class _Theme:
@@ -76,10 +76,22 @@ def make_tile(index: int = 0) -> pt.PlotTile:
     tile._curves = {}
     tile._groups = []
     tile._overlays = []
+    # The comparison's bands. A list of their own on the widget, and a rebuild
+    # drops them unless the tile is still one of the comparison's overlays --
+    # so every tile needs one, whatever it is drawing.
+    tile._fdiff_items = []
+    # Counted by the zoom trace. A real zero, because a PlotWidget answers
+    # getattr for names it has never heard of and a default would never fire.
+    tile._drag_moves = 0
     tile._legend = None
     tile._border_active = None
     tile._axes_applied = None
     tile._overlays_drawn_for = None
+    # What the widget would have handed back to Qt. The real PlotWidget stub
+    # sets this in __init__, which is skipped here, and whether an event is
+    # passed on or eaten is the difference between pyqtgraph's rubber band
+    # working and never appearing again.
+    tile.events_passed_on = []
     return tile
 
 
@@ -1572,7 +1584,7 @@ class TestInspectDot(unittest.TestCase):
     def test_leaving_inspect_takes_the_mark_off(self):
         # Outside Inspect the panel is not reporting anything, so a dot still
         # sitting on a sample is a claim that is no longer true.
-        from aoeviewer.model import MouseMode
+        from visimu.model import MouseMode
 
         self.tile._show_inspect_dot(1.0, 2.0)
         self.tile._state.mouse_mode = MouseMode.PAN
@@ -1580,7 +1592,7 @@ class TestInspectDot(unittest.TestCase):
         self.assertFalse(self.tile._inspect_dot.opts["visible"])
 
     def test_staying_in_inspect_leaves_it(self):
-        from aoeviewer.model import MouseMode
+        from visimu.model import MouseMode
 
         self.tile._state.mouse_mode = MouseMode.CROSSHAIR
         self.tile._show_inspect_dot(1.0, 2.0)
@@ -1779,7 +1791,7 @@ class TestAnnotationsHaveNoCaptions(unittest.TestCase):
     """
 
     def test_no_marker_carries_a_caption(self):
-        from aoeviewer.model import AreaBand, Marker
+        from visimu.model import AreaBand, Marker
 
         self.assertFalse(hasattr(Marker(), "label"))
         self.assertFalse(hasattr(AreaBand(), "label"))
@@ -1787,7 +1799,7 @@ class TestAnnotationsHaveNoCaptions(unittest.TestCase):
     def test_nothing_passes_label_options_to_pyqtgraph(self):
         source = (os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "python", "aoeviewer", "ui", "plot_tile.py"))
+            "python", "visimu", "ui", "plot_tile.py"))
         with open(source, encoding="utf-8") as handle:
             text = handle.read()
         # The keyword, not the word: the comment explaining why it is gone
@@ -1989,22 +2001,59 @@ def make_data_panel(session=None):
     return panel
 
 
+def names_in(widget):
+    """The parameter names a list holds, in order."""
+    return [widget.item(i).data(Qt.ItemDataRole.UserRole) or widget.item(i).text()
+            for i in range(widget.count())]
+
+
+def hidden_in(widget):
+    """name -> whether the filter is hiding it."""
+    return {widget.item(i).data(Qt.ItemDataRole.UserRole): widget.item(i).isHidden()
+            for i in range(widget.count())}
+
+
+def pick(widget, *names):
+    """Select rows by parameter name, as a click with Ctrl held would."""
+    wanted = set(names)
+    chosen = [widget.item(i) for i in range(widget.count())
+              if (widget.item(i).data(Qt.ItemDataRole.UserRole)
+                  or widget.item(i).text()) in wanted]
+    widget.selectedItems = lambda: list(chosen)
+    return chosen
+
+
 def make_param_panel(session=None):
+    """The PARAMS panel: an x combo and two filtered lists of channels."""
     panel = object.__new__(panels.ParameterPanel)
     panel._session = session or _ListSession()
     panel._state = AppState()
     panel._updating = False
     panel._list_state = None
     panel.x_combo = qt_stubs.QComboBox()
+    panel.avail_list = qt_stubs.QListWidget()
     panel.y_list = qt_stubs.QListWidget()
+    from PySide6.QtWidgets import QAbstractItemView
+    for widget in (panel.avail_list, panel.y_list):
+        widget.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection)
     panel.filter_edit = qt_stubs.QLineEdit()
+    panel.selected_filter = qt_stubs.QLineEdit()
+    panel.tile_changed = qt_stubs.Signal().__get__(panel)
+
     from PySide6.QtCore import QTimer as _StubTimer
     panel._filter_timer = _StubTimer()
     panel._filter_timer.setSingleShot(True)
     panel._filter_timer.timeout.connect(
         lambda: panel._apply_filter(panel.filter_edit.text()))
     panel.filter_edit.textChanged.connect(panel._on_filter_typed)
-    panel.y_list.itemChanged.connect(panel._on_y_changed)
+
+    panel._selected_filter_timer = _StubTimer()
+    panel._selected_filter_timer.setSingleShot(True)
+    panel._selected_filter_timer.timeout.connect(
+        lambda: panel._apply_selected_filter(panel.selected_filter.text()))
+    panel.selected_filter.textChanged.connect(panel._on_selected_filter_typed)
+
     panel.x_combo.currentTextChanged.connect(panel._on_x_changed)
     return panel
 
@@ -2389,58 +2438,131 @@ class TestListsDoNotBlink(unittest.TestCase):
         panel.refresh()
         self.assertEqual(fired, [])
 
-    def test_ticking_a_parameter_keeps_the_same_list_items(self):
+    def test_a_move_keeps_the_same_list_items(self):
+        """The items travel between the lists; nothing is rebuilt.
+
+        Six hundred channels is six hundred list items, and a rebuild on every
+        move would take the scroll position and both filters' hidden flags
+        with it.
+        """
         panel = make_param_panel()
         panel.refresh()
-        before = [panel.y_list.item(i) for i in range(panel.y_list.count())]
+        before = {id(item) for item in
+                  [panel.avail_list.item(i)
+                   for i in range(panel.avail_list.count())]}
 
         panel._state.tile.y_params = ["ALT"]
         panel.refresh()
 
-        after = [panel.y_list.item(i) for i in range(panel.y_list.count())]
-        self.assertEqual({id(item) for item in after}, {id(item) for item in before})
-        self.assertEqual(after[0].data(Qt.ItemDataRole.UserRole), "ALT")
+        after = {id(item) for item in
+                 [panel.avail_list.item(i)
+                  for i in range(panel.avail_list.count())]
+                 + [panel.y_list.item(i)
+                    for i in range(panel.y_list.count())]}
+        self.assertEqual(before, after)
 
-    def test_selected_parameters_are_listed_first_and_filter_still_hides(self):
+    def test_the_two_lists_divide_the_channels_between_them(self):
         panel = make_param_panel()
         panel._state.tile.y_params = ["MACH"]
         panel.refresh()
-        names = [panel.y_list.item(i).data(Qt.ItemDataRole.UserRole)
-                 for i in range(panel.y_list.count())]
-        self.assertEqual(names[0], "MACH")
-        self.assertEqual(set(names), {"TIME", "ALT", "MACH"})
+        self.assertEqual(names_in(panel.y_list), ["MACH"])
+        self.assertEqual(names_in(panel.avail_list), ["TIME", "ALT"])
 
-        panel._apply_filter("AL")
-        hidden = {panel.y_list.item(i).data(Qt.ItemDataRole.UserRole):
-                  panel.y_list.item(i).isHidden()
-                  for i in range(panel.y_list.count())}
-        self.assertTrue(hidden["MACH"])
-        self.assertTrue(hidden["TIME"])
-        self.assertFalse(hidden["ALT"])
-        self.assertEqual(
-            panel.y_list.item(0).data(Qt.ItemDataRole.UserRole), "MACH")
-
-    def test_unticking_a_parameter_sends_it_back_down_the_list(self):
-        # It was promoted to the top while it was selected; unticking it has to
-        # undo that. The reorder used to run against the list's own order, in
-        # which the promoted name simply *was* first, so there was nothing left
-        # to put it back into.
+    def test_available_keeps_the_file_order(self):
+        """The order the engineer reading the file expects, not the order
+        things happened to be taken off the tile in."""
         panel = make_param_panel()
+        panel._state.tile.y_params = ["ALT"]
         panel.refresh()
-        order = [panel.y_list.item(i).data(Qt.ItemDataRole.UserRole)
-                 for i in range(panel.y_list.count())]
-
-        panel._state.tile.y_params = ["MACH"]
-        panel.refresh()
-        self.assertEqual(
-            panel.y_list.item(0).data(Qt.ItemDataRole.UserRole), "MACH")
-
         panel._state.tile.y_params = []
         panel.refresh()
-        self.assertEqual(
-            [panel.y_list.item(i).data(Qt.ItemDataRole.UserRole)
-             for i in range(panel.y_list.count())],
-            order)
+        self.assertEqual(names_in(panel.avail_list), ["TIME", "ALT", "MACH"])
+
+    def test_the_plotted_list_keeps_the_tile_order(self):
+        """It is the order the title, the legend and the CSV export use."""
+        panel = make_param_panel()
+        panel._state.tile.y_params = ["MACH", "ALT"]
+        panel.refresh()
+        self.assertEqual(names_in(panel.y_list), ["MACH", "ALT"])
+
+    def test_moving_names_down_plots_them(self):
+        panel = make_param_panel()
+        panel.refresh()
+        asked = []
+        panel.tile_changed.connect(lambda: asked.append(1))
+
+        pick(panel.avail_list, "ALT", "MACH")
+        panel._add_selected()
+
+        self.assertEqual(panel._state.tile.y_params, ["ALT", "MACH"])
+        self.assertEqual(names_in(panel.y_list), ["ALT", "MACH"])
+        self.assertEqual(names_in(panel.avail_list), ["TIME"])
+        self.assertTrue(asked, "the plots were not told")
+        self.assertTrue(panel._state.dirty)
+
+    def test_moving_names_up_stops_plotting_them(self):
+        panel = make_param_panel()
+        panel._state.tile.y_params = ["TIME", "ALT", "MACH"]
+        panel.refresh()
+
+        pick(panel.y_list, "ALT")
+        panel._remove_selected()
+
+        self.assertEqual(panel._state.tile.y_params, ["TIME", "MACH"])
+        self.assertEqual(names_in(panel.avail_list), ["ALT"])
+
+    def test_several_names_move_at_once(self):
+        """The reason for the two lists: a check box is one row at a time."""
+        panel = make_param_panel()
+        panel.refresh()
+        pick(panel.avail_list, "TIME", "ALT", "MACH")
+        panel._add_selected()
+        self.assertEqual(names_in(panel.avail_list), [])
+        self.assertEqual(panel._state.tile.y_params, ["TIME", "ALT", "MACH"])
+
+    def test_a_move_with_nothing_picked_does_nothing(self):
+        panel = make_param_panel()
+        panel.refresh()
+        asked = []
+        panel.tile_changed.connect(lambda: asked.append(1))
+        panel._add_selected()
+        panel._remove_selected()
+        self.assertEqual(asked, [])
+
+    def test_clearing_plots_nothing(self):
+        panel = make_param_panel()
+        panel._state.tile.y_params = ["ALT", "MACH"]
+        panel.refresh()
+        panel._remove_everything()
+        self.assertEqual(panel._state.tile.y_params, [])
+        self.assertEqual(names_in(panel.avail_list), ["TIME", "ALT", "MACH"])
+
+    def test_a_hidden_row_does_not_move_with_the_selection(self):
+        """A filter hides rows and never changes what is plotted, so a name
+        the filter is hiding is not part of what the user just picked."""
+        panel = make_param_panel()
+        panel.refresh()
+        pick(panel.avail_list, "ALT", "MACH")
+        panel._apply_filter("AL")           # MACH is now hidden
+        panel._add_selected()
+        self.assertEqual(panel._state.tile.y_params, ["ALT"])
+
+    def test_each_list_has_its_own_filter(self):
+        panel = make_param_panel()
+        panel._state.tile.y_params = ["ALT", "MACH"]
+        panel.refresh()
+
+        panel._apply_selected_filter("MA")
+        self.assertEqual(hidden_in(panel.y_list),
+                         {"ALT": True, "MACH": False})
+        # And the other list is untouched by it.
+        self.assertEqual(hidden_in(panel.avail_list), {"TIME": False})
+
+        panel._apply_filter("TI")
+        self.assertEqual(hidden_in(panel.avail_list), {"TIME": False})
+        self.assertEqual(hidden_in(panel.y_list),
+                         {"ALT": True, "MACH": False},
+                         "the plotted filter was disturbed")
 
     def test_typing_in_the_filter_does_not_refilter_per_keystroke(self):
         """These files carry hundreds of channels.
@@ -2452,24 +2574,33 @@ class TestListsDoNotBlink(unittest.TestCase):
         """
         panel = make_param_panel()
         panel.refresh()
-        hidden = lambda: [panel.y_list.item(i).isHidden()
-                          for i in range(panel.y_list.count())]
-        before = hidden()
+        before = list(hidden_in(panel.avail_list).values())
 
         panel.filter_edit.setText("AL")
         self.assertTrue(panel._filter_timer.pending,
                         "typing must arm the timer")
-        self.assertEqual(hidden(), before,
+        self.assertEqual(list(hidden_in(panel.avail_list).values()), before,
                          "nothing may be hidden until the typing stops")
 
         panel._filter_timer.fire()
-        self.assertNotEqual(hidden(), before)
-        states = {panel.y_list.item(i).data(Qt.ItemDataRole.UserRole):
-                  panel.y_list.item(i).isHidden()
-                  for i in range(panel.y_list.count())}
+        states = hidden_in(panel.avail_list)
         self.assertFalse(states["ALT"])
         self.assertTrue(states["TIME"])
         self.assertTrue(states["MACH"])
+
+    def test_emptying_the_filter_answers_at_once(self):
+        """There is no next keystroke to wait for: the clear button has just
+        said "all of them", and a list that stays filtered for another half
+        second reads as the button not having worked."""
+        panel = make_param_panel()
+        panel.refresh()
+        panel.filter_edit.setText("AL")
+        panel._filter_timer.fire()
+        self.assertTrue(hidden_in(panel.avail_list)["TIME"])
+
+        panel.filter_edit.setText("")
+        self.assertFalse(panel._filter_timer.pending)
+        self.assertEqual(set(hidden_in(panel.avail_list).values()), {False})
 
     def test_the_filter_is_still_applied_without_waiting_on_a_refresh(self):
         # A refresh rebuilds the rows, so the filter has to be re-applied then
@@ -2480,23 +2611,37 @@ class TestListsDoNotBlink(unittest.TestCase):
         panel._list_state = None          # force a genuine rebuild
         panel.refresh()
 
-        states = {panel.y_list.item(i).data(Qt.ItemDataRole.UserRole):
-                  panel.y_list.item(i).isHidden()
-                  for i in range(panel.y_list.count())}
+        states = hidden_in(panel.avail_list)
         self.assertFalse(states["ALT"])
         self.assertTrue(states["TIME"])
 
-    def test_the_parameter_tick_still_arrives(self):
+    def test_switching_tile_moves_the_names_without_a_rebuild(self):
+        """Clicking another tile is a refresh, and the rows are the same rows:
+        only which list they are in changes."""
         panel = make_param_panel()
-        panel.refresh()
         panel._state.tile.y_params = ["MACH"]
         panel.refresh()
+        before = {id(panel.y_list.item(0))}
 
-        states = {panel.y_list.item(i).data(Qt.ItemDataRole.UserRole):
-                  panel.y_list.item(i).checkState()
-                  for i in range(panel.y_list.count())}
-        self.assertEqual(states["MACH"], Qt.CheckState.Checked)
-        self.assertEqual(states["ALT"], Qt.CheckState.Unchecked)
+        page = panel._state.page
+        page.rows, page.cols = 1, 2
+        panel._state.active_tile = 1
+        panel._state.tile.y_params = ["ALT"]
+        panel.refresh()
+
+        self.assertEqual(names_in(panel.y_list), ["ALT"])
+        self.assertEqual(names_in(panel.avail_list), ["TIME", "MACH"])
+        moved = {id(panel.avail_list.item(i))
+                 for i in range(panel.avail_list.count())}
+        self.assertTrue(before & moved, "MACH was rebuilt rather than moved")
+
+    def test_a_name_the_tile_plots_but_the_file_lacks_is_dropped(self):
+        """A workspace opened against another study names channels that are
+        not there. They are not invented as rows."""
+        panel = make_param_panel()
+        panel._state.tile.y_params = ["ALT", "NOSUCH"]
+        panel.refresh()
+        self.assertEqual(names_in(panel.y_list), ["ALT"])
 
     def test_switching_tile_moves_the_x_combo_without_a_rebuild(self):
         # The common case: clicking another tile refreshes this panel, and the
@@ -2520,7 +2665,7 @@ class TestListsDoNotBlink(unittest.TestCase):
         panel.refresh()
         session.parameters.append("NZ")
         panel.refresh()
-        self.assertEqual(panel.y_list.count(), 4)
+        self.assertEqual(panel.avail_list.count(), 4)
 
     def test_a_changed_alias_does_rebuild_the_list(self):
         # The displayed label is what the row says, so renaming a channel has
@@ -2530,7 +2675,7 @@ class TestListsDoNotBlink(unittest.TestCase):
         panel.refresh()
         session.label = lambda name: "renamed " + name
         panel.refresh()
-        self.assertTrue(panel.y_list.item(0).text().startswith("renamed"))
+        self.assertTrue(panel.avail_list.item(0).text().startswith("renamed"))
 
 
 class TestTheCappedLegendSaysSo(unittest.TestCase):
@@ -2542,7 +2687,7 @@ class TestTheCappedLegendSaysSo(unittest.TestCase):
     """
 
     def test_the_row_names_the_cap(self):
-        from aoeviewer.model import ColorMode
+        from visimu.model import ColorMode
 
         session = _DrawSession(
             iso_values=tuple(float(i) for i in range(pt.MAX_LEGEND_ROWS + 5)))
@@ -2591,7 +2736,7 @@ class TestTheLegendBudgetIsSpentOnRows(unittest.TestCase):
     """
 
     def tile_for(self, runs_per_file=40):
-        from aoeviewer.model import ColorMode
+        from visimu.model import ColorMode
 
         session = _TwoFileSession(runs_per_file)
         tile = make_drawable_tile(session)
@@ -2741,7 +2886,7 @@ class TestTheRailHoldsTabsAndNothingElse(unittest.TestCase):
     """
 
     def build(self, labels):
-        from aoeviewer.ui import sidebar
+        from visimu.ui import sidebar
 
         made = []
         real = sidebar.VerticalTabButton
@@ -2763,7 +2908,7 @@ class TestTheRailHoldsTabsAndNothingElse(unittest.TestCase):
         self.assertEqual(len(rail._buttons), len(labels))
 
     def test_the_rail_no_longer_offers_the_theme(self):
-        from aoeviewer.ui import sidebar
+        from visimu.ui import sidebar
 
         # On the class, not the instance: the stub widget invents any
         # attribute asked of an instance, so an instance check would pass
@@ -2823,7 +2968,7 @@ class TestTheRailIsRearrangeableAndNavigable(unittest.TestCase):
     LABELS = ["DATA", "PARAMS", "COMPUTE", "ISO", "STYLE"]
 
     def rail(self):
-        from aoeviewer.ui import sidebar
+        from visimu.ui import sidebar
         return sidebar.TabRail(self.LABELS, theme_module.theme_for(True))
 
     def shown(self, rail):
@@ -2959,7 +3104,7 @@ class TestTheRailIsRearrangeableAndNavigable(unittest.TestCase):
     # ----------------------------------------------------------- shortcuts
 
     def test_every_panel_has_a_letter_and_no_two_share_one(self):
-        from aoeviewer.ui import sidebar
+        from visimu.ui import sidebar
 
         letters = list(sidebar.SHORTCUTS.values())
         self.assertEqual(sorted(letters), sorted(set(letters)), letters)
@@ -2969,10 +3114,10 @@ class TestTheRailIsRearrangeableAndNavigable(unittest.TestCase):
     def test_the_letters_name_the_panels_the_window_builds(self):
         """The two lists are written in different files; a panel renamed in
         one and not the other would silently lose its shortcut."""
-        from aoeviewer.ui import sidebar
+        from visimu.ui import sidebar
 
         here = os.path.dirname(os.path.abspath(__file__))
-        path = os.path.join(here, os.pardir, "python", "aoeviewer",
+        path = os.path.join(here, os.pardir, "python", "visimu",
                             "ui", "main_window.py")
         body = io.open(path, encoding="utf-8").read()
         start = body.index("self._panels = [")
@@ -3007,7 +3152,7 @@ class TestABareLetterOnlySelectsATabWhenNothingIsBeingTypedInto(
     """
 
     def setUp(self):
-        from aoeviewer.ui import sidebar
+        from visimu.ui import sidebar
 
         self.sidebar = sidebar
         self.rail = sidebar.TabRail(["DATA", "PARAMS", "STYLE"],
@@ -3118,7 +3263,7 @@ class TestTheColourSwatchKeepsItsColourToItself(unittest.TestCase):
         import ast
 
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        path = os.path.join(root, "python", "aoeviewer", *module.split("/"))
+        path = os.path.join(root, "python", "visimu", *module.split("/"))
         with open(path, encoding="utf-8") as handle:
             text = handle.read()
         tree = ast.parse(text, filename=path)
@@ -3141,7 +3286,7 @@ class TestTheUiScaleReachesThePlots(unittest.TestCase):
     """
 
     def setUp(self):
-        from aoeviewer import theme
+        from visimu import theme
 
         self.theme = theme
         self.addCleanup(theme.set_ui_scale, 1.0)
@@ -3189,7 +3334,7 @@ class TestOverlaysAreRedrawnOnlyWhenTheyChange(unittest.TestCase):
     """
 
     def setUp(self):
-        from aoeviewer.model import AreaBand, Marker
+        from visimu.model import AreaBand, Marker
 
         self.session = _DrawSession()
         self.tile = make_drawable_tile(self.session)
@@ -3234,7 +3379,7 @@ class TestOverlaysAreRedrawnOnlyWhenTheyChange(unittest.TestCase):
                             [id(item) for item in before])
 
     def test_an_added_marker_reaches_the_plot(self):
-        from aoeviewer.model import Marker
+        from visimu.model import Marker
 
         before = len(self.tile._overlays)
         self.tile._state.markers.append(
@@ -3273,7 +3418,7 @@ class TestFirstSwitchToIsoColouring(unittest.TestCase):
         self.panel.style_changed
 
     def test_choosing_iso_names_the_parameter(self):
-        from aoeviewer.model import ColorMode
+        from visimu.model import ColorMode
 
         self.panel._on_mode_changed(int(ColorMode.ISO))
 
@@ -3282,7 +3427,7 @@ class TestFirstSwitchToIsoColouring(unittest.TestCase):
         self.assertTrue(tile.color_iso_param)
 
     def test_it_prefers_a_parameter_already_set_up_as_an_iso(self):
-        from aoeviewer.model import ColorMode
+        from visimu.model import ColorMode
 
         self.panel._state.iso_state("MACH")
         self.panel._on_mode_changed(int(ColorMode.ISO))
@@ -3292,14 +3437,14 @@ class TestFirstSwitchToIsoColouring(unittest.TestCase):
     def test_the_entries_are_iso_entries_not_run_entries(self):
         # The symptom exactly: with the name still empty, _style_entries() fell
         # through to the simulation branch and CURVES listed runs.
-        from aoeviewer.model import ColorMode
+        from visimu.model import ColorMode
 
         self.panel._on_mode_changed(int(ColorMode.ISO))
         for _label, key in self.panel._style_entries():
             self.assertTrue(key.startswith("iso::"), key)
 
     def test_a_choice_already_made_is_left_alone(self):
-        from aoeviewer.model import ColorMode
+        from visimu.model import ColorMode
 
         self.panel._state.tile.color_iso_param = "ALT"
         self.panel._on_mode_changed(int(ColorMode.ISO))
@@ -3314,7 +3459,7 @@ class TestFirstSwitchToIsoColouring(unittest.TestCase):
         self.assertEqual(state.default_iso_param(params), "MACH")
 
         state.apply_parameter_defaults(params)
-        from aoeviewer.model import ColorMode
+        from visimu.model import ColorMode
         state.tile.color_mode = ColorMode.ISO
         state.tile.color_iso_param = ""
         state.apply_parameter_defaults(params)
@@ -3322,11 +3467,120 @@ class TestFirstSwitchToIsoColouring(unittest.TestCase):
                          state.default_iso_param(params))
 
     def test_no_parameters_means_no_choice_to_make(self):
-        from aoeviewer.model import ColorMode
+        from visimu.model import ColorMode
 
         self.panel._session.parameters = []
         self.panel._on_mode_changed(int(ColorMode.ISO))
         self.assertEqual(self.panel._state.tile.color_iso_param, "")
+
+
+class TestDraggingAnAnnotationReachesTheModel(unittest.TestCase):
+    """A drag that does not reach the model reaches no other tile either.
+
+    apply_mouse_mode() makes the overlays it finds movable rather than
+    rebuilding them, so the mode can change under an item already on the plot.
+    The drag handler used to be connected only when the item was *created*
+    movable -- so a band added while in Zoom mode, then dragged after
+    switching to Select, moved on screen and nowhere else: pyqtgraph moved
+    that one item, the model never heard, and every other tile kept the old
+    position. Forcing a rebuild by moving a tile was the workaround, because
+    the rebuilt items were made in Select mode and carried the connection.
+    """
+
+    def setUp(self):
+        from visimu.model import AreaBand, Marker, MouseMode
+
+        self.modes = MouseMode
+        self.session = _DrawSession()
+        self.tile = make_drawable_tile(self.session)
+        state = self.tile._state
+        state.selected_sims.update({(0, 0)})
+        state.tile.x_param, state.tile.y_params = "TIME", ["ALT"]
+        state.markers.append(Marker(x_param="TIME", position=1.0))
+        state.areas.append(AreaBand(x_param="TIME", x_min=1.0, x_max=2.0))
+        self.state = state
+        self.moved = []
+        self.tile.annotation_moved.connect(lambda: self.moved.append(1))
+
+    def items(self):
+        """The marker line and the band. By type, not by attribute: the stub
+        base invents any attribute asked of it, so hasattr says yes to
+        everything."""
+        import pyqtgraph as pg
+
+        line = region = None
+        for item in self.tile._overlays:
+            if isinstance(item, pg.LinearRegionItem):
+                region = item
+            elif isinstance(item, pg.InfiniteLine):
+                line = item
+        return line, region
+
+    def drawn_in(self, mode):
+        """Draw the overlays with that mouse mode in force."""
+        self.state.mouse_mode = mode
+        self.tile.rebuild()
+
+    def test_a_band_drawn_in_select_mode_reaches_the_model(self):
+        self.drawn_in(self.modes.SELECT)
+        _line, region = self.items()
+        region.drag_to(5.0, 6.0)
+        self.assertEqual((self.state.areas[0].x_min, self.state.areas[0].x_max),
+                         (5.0, 6.0))
+        self.assertTrue(self.moved)
+
+    def test_a_band_drawn_in_zoom_mode_reaches_it_too(self):
+        """The bug. Drawn while dragging was off, dragged after it came back."""
+        self.drawn_in(self.modes.ZOOM)
+        _line, region = self.items()
+        self.assertFalse(region.movable, "the premise: it was not draggable")
+
+        self.state.mouse_mode = self.modes.SELECT
+        self.tile.apply_mouse_mode()
+        self.assertTrue(region.movable, "the mode change did not reach it")
+
+        region.drag_to(5.0, 6.0)
+        self.assertEqual((self.state.areas[0].x_min, self.state.areas[0].x_max),
+                         (5.0, 6.0))
+        self.assertTrue(self.moved, "no other tile would have been told")
+
+    def test_a_marker_drawn_in_zoom_mode_reaches_it_too(self):
+        self.drawn_in(self.modes.ZOOM)
+        line, _region = self.items()
+        self.state.mouse_mode = self.modes.SELECT
+        self.tile.apply_mouse_mode()
+
+        line.drag_to(7.5)
+        self.assertEqual(self.state.markers[0].position, 7.5)
+        self.assertTrue(self.moved)
+
+    def test_the_other_tiles_draw_it_where_the_model_now_says(self):
+        """What the user sees once the model has heard: the band is in the
+        same place on every tile drawn against that channel."""
+        self.drawn_in(self.modes.SELECT)
+        page = self.state.page
+        page.rows, page.cols = 1, 2
+        page.tiles[1].x_param, page.tiles[1].y_params = "TIME", ["ALT"]
+        other = make_drawable_tile(self.session)
+        other._state = self.state
+        other._index = 1
+        other.rebuild()
+
+        _line, region = self.items()
+        region.drag_to(5.0, 6.0)
+        other.rebuild()                      # what the window does next
+
+        import pyqtgraph as pg
+
+        bands = [item.getRegion() for item in other._overlays
+                 if isinstance(item, pg.LinearRegionItem)]
+        self.assertEqual(bands, [(5.0, 6.0)])
+
+    def test_a_drag_that_moves_nothing_says_nothing(self):
+        self.drawn_in(self.modes.SELECT)
+        _line, region = self.items()
+        region.drag_to(1.0, 2.0)             # where it already was
+        self.assertEqual(self.moved, [])
 
 
 class TestAnnotationMoveReachesEveryTile(unittest.TestCase):
@@ -3343,7 +3597,7 @@ class TestAnnotationMoveReachesEveryTile(unittest.TestCase):
     def test_the_plots_are_refreshed_before_the_lists(self):
         source = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "python", "aoeviewer", "ui", "main_window.py")
+            "python", "visimu", "ui", "main_window.py")
         with open(source, encoding="utf-8") as handle:
             body = handle.read()
         start = body.index("def _apply_annotation_move")
@@ -3416,7 +3670,7 @@ class TestAddingAnnotations(unittest.TestCase):
     def test_a_band_is_described_by_its_span(self):
         # The span is what identifies a band now that there is no caption, so
         # the row has to carry the parameter and both ends of it.
-        from aoeviewer.model import AreaBand
+        from visimu.model import AreaBand
 
         panel = panels.AreaPanel(self.session, self.state)
         text = panel._describe(AreaBand(x_param="TIME", x_min=2.0, x_max=5.0))
@@ -3427,7 +3681,7 @@ class TestAddingAnnotations(unittest.TestCase):
     def test_neither_panel_reads_a_caption_off_the_model(self):
         # The field is gone from both dataclasses; anything still reaching for
         # it raises AttributeError at exactly the wrong moment.
-        from aoeviewer.model import AreaBand, Marker
+        from visimu.model import AreaBand, Marker
 
         area_panel = panels.AreaPanel(self.session, self.state)
         marker_panel = panels.MarkerPanel(self.session, self.state)
@@ -3465,7 +3719,7 @@ class TestLegendOrderIsIntrinsic(unittest.TestCase):
               ("group 15 - 20", 15.0, 20.0, True)]
 
     def setUp(self):
-        from aoeviewer.model import ColorMode
+        from visimu.model import ColorMode
 
         self.session = _DrawSession(iso_values=(18.0, 5.0, 12.0))
         self.tile = make_drawable_tile(self.session)
@@ -3552,7 +3806,7 @@ class TestLegendOrderIsIntrinsic(unittest.TestCase):
                           "ALT"])
 
     def test_parameter_mode_follows_the_tile_s_own_parameter_order(self):
-        from aoeviewer.model import ColorMode
+        from visimu.model import ColorMode
 
         tile = self.tile._state.tile
         tile.color_mode = ColorMode.PARAMETER
@@ -3570,7 +3824,7 @@ class TestLegendOrderIsIntrinsic(unittest.TestCase):
         # differ by text too, or they merge into one and the key stops being
         # a key. Before this, "show ISO" wrote nothing at all here, because
         # only the colour mode's ISO label was ever consulted.
-        from aoeviewer.model import ColorMode, StyleMode
+        from visimu.model import ColorMode, StyleMode
 
         tile = self.tile._state.tile
         tile.color_mode = ColorMode.PARAMETER
@@ -3585,7 +3839,7 @@ class TestLegendOrderIsIntrinsic(unittest.TestCase):
     def test_the_same_iso_parameter_is_not_written_twice(self):
         # Colour by ISO and dash by ISO on one parameter is an ordinary
         # pairing; "MACH = 5 | MACH = 5" is not.
-        from aoeviewer.model import StyleMode
+        from visimu.model import StyleMode
 
         tile = self.tile._state.tile
         tile.style_mode = StyleMode.ISO
@@ -3596,7 +3850,7 @@ class TestLegendOrderIsIntrinsic(unittest.TestCase):
             ["ALT | MACH = 5", "ALT | MACH = 12", "ALT | MACH = 18"])
 
     def test_simulation_mode_follows_file_then_run(self):
-        from aoeviewer.model import ColorMode
+        from visimu.model import ColorMode
 
         tile = self.tile._state.tile
         tile.color_mode = ColorMode.SIMULATION
@@ -3917,7 +4171,7 @@ class TestFilteredRunsAreNotDrawn(unittest.TestCase):
     """The end of the chain: a held-back run puts no curve on a tile."""
 
     def setUp(self):
-        from aoeviewer.model import ColorMode
+        from visimu.model import ColorMode
 
         self.session = _DrawSession(iso_values=(40000.0, 75000.0, 120000.0))
         self.tile = make_drawable_tile(self.session)
@@ -4391,11 +4645,333 @@ class TestTheSyncWorkspace(unittest.TestCase):
 class _ClickEvent:
     """What the tile reads off a mouse event, and nothing else."""
 
-    def __init__(self):
+    def __init__(self, button=None, at=(10.0, 10.0)):
+        from PySide6.QtCore import Qt
+
         self.accepted = False
+        self._button = Qt.MouseButton.LeftButton if button is None else button
+        self._at = at
+
+    def button(self):
+        return self._button
+
+    def position(self):
+        return qt_stubs.QPointF(*self._at)
 
     def accept(self):
         self.accepted = True
+
+
+class TestAFontGoesBackWithASizeOnIt(unittest.TestCase):
+    """Reading a font off a widget and handing it back logs a warning.
+
+    This application sizes widget text in pixels, from the stylesheet, so a
+    font read back off a widget has pointSizeF() == -1 -- the size is there,
+    but not in the field Qt resolves from. Giving that font to setFont() logs
+    "QFont::setPointSize: Point size <= 0 (-1)", which is harmless and is
+    noise in a log that gets read when something is wrong.
+    """
+
+    class _Font:
+        """A font whose size is unresolved, as a stylesheet leaves it."""
+
+        def __init__(self, point=-1.0, pixel=-1):
+            self.point = point
+            self.pixel = pixel
+            self.bold = None
+
+        def pointSizeF(self):
+            return self.point
+
+        def pixelSize(self):
+            return self.pixel
+
+        def setPixelSize(self, size):
+            self.pixel = size
+
+        def setBold(self, bold):
+            self.bold = bool(bold)
+
+    class _Widget:
+        def __init__(self, font):
+            self._font = font
+            self.given = None
+
+        def font(self):
+            return self._font
+
+        def setFont(self, font):
+            self.given = font
+
+    def bolded(self, font, bold=True):
+        from PySide6.QtGui import QFont
+        from visimu.ui import panels as _panels
+
+        widget = self._Widget(font)
+        # QFont(other) copies; the stub hands back whatever it is given.
+        original = _panels.QFont
+        _panels.QFont = lambda other: other
+        try:
+            _panels._bolded(widget, bold)
+        finally:
+            _panels.QFont = original
+        return widget.given
+
+    def test_an_unresolved_size_is_written_in(self):
+        given = self.bolded(self._Font(point=-1.0, pixel=-1))
+        self.assertGreater(given.pixelSize(), 0,
+                           "the font went back with no size at all")
+        self.assertTrue(given.bold)
+
+    def test_a_pixel_size_is_left_as_it_is(self):
+        """Already resolved: nothing to fix, and the panel's own size wins
+        over this helper's idea of it."""
+        given = self.bolded(self._Font(point=-1.0, pixel=13))
+        self.assertEqual(given.pixelSize(), 13)
+
+    def test_a_point_size_is_left_as_it_is(self):
+        given = self.bolded(self._Font(point=9.0, pixel=-1))
+        self.assertEqual(given.pixelSize(), -1)
+        self.assertEqual(given.pointSizeF(), 9.0)
+
+    def test_bold_is_cleared_as_well_as_set(self):
+        given = self.bolded(self._Font(point=9.0), bold=False)
+        self.assertIs(given.bold, False)
+
+    def test_the_radios_go_through_it(self):
+        """Both sets of them: Colour by and Style by."""
+        body = self.source_of_panels()
+        self.assertEqual(body.count("_bolded(radio,"), 2)
+        self.assertNotIn("radio.setFont(font)", body,
+                         "a radio still re-applies its own font")
+
+    @staticmethod
+    def source_of_panels():
+        here = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(here, os.pardir, "python", "visimu",
+                            "ui", "panels.py")
+        return io.open(path, encoding="utf-8").read()
+
+
+class TestTheHelpWindow(unittest.TestCase):
+    """The reference is generated from the shortcut table, not retyped.
+
+    A letter changed in one place and not the other would be worse than no
+    reference at all: a reminder that lies is read as the truth.
+    """
+
+    def test_every_tab_is_listed_with_its_letter_and_a_note(self):
+        from visimu.ui import help_dialog
+        from visimu.ui.sidebar import SHORTCUTS
+
+        html = help_dialog.help_html()
+        for label, letter in SHORTCUTS.items():
+            self.assertIn("<b>%s</b>" % letter, html, label)
+            self.assertIn("<b>%s</b>" % label, html, label)
+            self.assertTrue(help_dialog.PANEL_NOTES.get(label),
+                            "%s has no description" % label)
+
+    def test_it_describes_no_tab_that_does_not_exist(self):
+        from visimu.ui import help_dialog
+        from visimu.ui.sidebar import SHORTCUTS
+
+        self.assertEqual(set(help_dialog.PANEL_NOTES), set(SHORTCUTS))
+
+    def test_the_window_shortcuts_are_named(self):
+        from visimu.ui import help_dialog
+
+        html = help_dialog.help_html()
+        for keys in ("Ctrl+N", "Ctrl+L", "Ctrl+S", "Ctrl+Shift+S",
+                     "Ctrl+0", "Ctrl+1", "Ctrl+-"):
+            self.assertIn(keys, html, keys)
+
+
+class TestEveryTextFilterCanBeCleared(unittest.TestCase):
+    """A clear button beside each filter box, which empties it.
+
+    Beside it, and not only Qt's in-field cross: that one appears only once
+    there is text in the box, so a field at rest shows nothing to press and
+    the way to empty it is not discoverable -- which is how this was reported
+    as missing. Both are wired through the box's own textChanged, so clearing
+    re-filters the list exactly as typing does.
+
+    Read off the source because it is a property of how each panel is built,
+    and a filter added later without one should be noticed here.
+    """
+
+    def source(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(here, os.pardir, "python", "visimu",
+                            "ui", "panels.py")
+        return io.open(path, encoding="utf-8").read()
+
+    def boxes(self, body):
+        return re.findall(r"self\.(\w*filter\w*) = QLineEdit\(\)", body)
+
+    def test_every_filter_box_gets_one(self):
+        """Every one of them: DATA's, both of PARAMS', and INSPECT's.
+
+        By occurrence rather than by name, since three different panels each
+        call theirs filter_edit and checking the first would leave the other
+        two unexamined.
+        """
+        body = self.source()
+        made = list(re.finditer(r"self\.(\w*filter\w*) = QLineEdit\(\)", body))
+        self.assertGreaterEqual(len(made), 4, "a filter box has gone missing")
+        for match in made:
+            name = match.group(1)
+            # Within the lines that configure that box and lay it out.
+            window = body[match.start():match.start() + 1200]
+            self.assertIn("_filter_row(", window,
+                          "the %s at offset %d is not laid out with a clear "
+                          "button" % (name, match.start()))
+            self.assertIn("self.%s" % name, window)
+
+    def test_the_button_is_beside_the_field_and_always_there(self):
+        """A QToolButton in a row with the box, rather than Qt's in-field
+        cross alone: that one is invisible until the box has text."""
+        body = self.source()
+        start = body.index("def _filter_row(")
+        block = body[start:body.index("\ndef ", start + 10)]
+        self.assertIn("QToolButton()", block)
+        self.assertIn("QHBoxLayout()", block)
+        self.assertIn("setClearButtonEnabled(True)", block,
+                      "the in-field cross is worth keeping as well")
+        self.assertIn("clicked.connect(clear)", block)
+
+    def test_the_filters_are_the_ones_expected(self):
+        self.assertEqual(set(self.boxes(self.source())),
+                         {"filter_edit", "selected_filter"})
+
+    def test_emptying_one_is_answered_at_once(self):
+        """Not after the idle timer: the clear button has just said "all of
+        them", and there is no next keystroke to wait for."""
+        body = self.source()
+        handlers = re.findall(r"def (_on\w*filter\w*typed)\(", body)
+        self.assertTrue(handlers)
+        for handler in set(handlers):
+            for match in re.finditer(r"def " + handler + r"\(", body):
+                start = match.start()
+                block = body[start:body.index("\n    def ", start + 10)]
+                self.assertIn("if not text.strip():", block, handler)
+                self.assertIn("_timer.stop()", block, handler)
+
+
+class TestTheFormulaCompleter(unittest.TestCase):
+    """Completing a channel name inside an expression.
+
+    A formula is not a name, so completing the whole field -- which is what
+    QCompleter does if you attach it and leave it to it -- is never right
+    here. What is completed is the word under the cursor, and these two
+    functions are the whole of that: which characters belong to it, and what
+    replaces them.
+    """
+
+    def token(self, text, cursor=None):
+        cursor = len(text) if cursor is None else cursor
+        return panels._name_token(text, cursor)[2]
+
+    def test_a_bare_name_is_the_token(self):
+        self.assertEqual(self.token("NZ"), "NZ")
+
+    def test_a_name_after_an_operator_is_the_token(self):
+        self.assertEqual(self.token("NZ * AL"), "AL")
+        self.assertEqual(self.token("NZ*AL"), "AL")
+        self.assertEqual(self.token("NZ+AL"), "AL")
+        self.assertEqual(self.token("(NZ)/AL"), "AL")
+
+    def test_a_name_inside_a_call_is_the_token(self):
+        self.assertEqual(self.token("deriv(THET"), "THET")
+        self.assertEqual(self.token("max(NZ), AL"), "AL")
+
+    def test_underscores_and_digits_belong_to_a_name(self):
+        self.assertEqual(self.token("LOAD_FACT"), "LOAD_FACT")
+        self.assertEqual(self.token("CH2"), "CH2")
+
+    def test_the_token_is_the_word_the_cursor_is_in(self):
+        """Not the last word: the cursor may be back in the middle."""
+        self.assertEqual(self.token("ALPHA + NZ", cursor=3), "ALPHA")
+        self.assertEqual(self.token("ALPHA + NZ", cursor=5), "ALPHA")
+
+    def test_there_is_no_token_after_an_operator(self):
+        self.assertEqual(self.token("NZ * "), "")
+        self.assertEqual(self.token("NZ *"), "")
+
+    def test_an_empty_expression_has_no_token(self):
+        self.assertEqual(self.token(""), "")
+
+    def test_a_non_string_is_not_a_crash(self):
+        self.assertEqual(panels._name_token(None, 3), (0, 0, ""))
+
+    def test_a_cursor_past_the_end_is_clamped(self):
+        self.assertEqual(self.token("NZ", cursor=99), "NZ")
+
+    # ------------------------------------------------------- replacement
+
+    def test_choosing_a_name_replaces_the_word_being_typed(self):
+        text, cursor = panels._with_name("NZ * AL", 7, "ALTITUDE")
+        self.assertEqual(text, "NZ * ALTITUDE")
+        self.assertEqual(cursor, len(text))
+
+    def test_the_rest_of_the_expression_is_kept(self):
+        text, cursor = panels._with_name("deriv(THET, TIME)", 10, "THETA")
+        self.assertEqual(text, "deriv(THETA, TIME)")
+        self.assertEqual(cursor, len("deriv(THETA"))
+
+    def test_choosing_a_name_with_nothing_typed_inserts_it(self):
+        text, _cursor = panels._with_name("NZ * ", 5, "ALT")
+        self.assertEqual(text, "NZ * ALT")
+
+    def test_a_name_in_the_middle_is_replaced_whole(self):
+        text, _cursor = panels._with_name("ALP + NZ", 3, "ALPHA")
+        self.assertEqual(text, "ALPHA + NZ")
+
+
+class TestBringingAPanelForwardShowsCurrentData(unittest.TestCase):
+    """A panel that is not on screen is deliberately left stale.
+
+    That is what makes changing page quick: only the visible panel is
+    refreshed and the rest catch up when selected. So a panel brought forward
+    by something other than a click on its tab has to be refreshed as part of
+    being brought forward -- and _show_panel did not. Double-clicking a tile
+    from any other tab opened PARAMS on the channels of the tile that was
+    active *before*, which is worse than not opening it.
+    """
+
+    def test_it_goes_through_the_path_that_refreshes(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(here, os.pardir, "python", "visimu",
+                            "ui", "main_window.py")
+        body = io.open(path, encoding="utf-8").read()
+        start = body.index("def _show_panel")
+        block = body[start:body.index("\n    def ", start + 10)]
+        self.assertIn("self.select_panel(index)", block)
+        self.assertNotIn("panel_stack.setCurrentIndex", block,
+                         "the stack is set without a refresh")
+
+    def test_the_tab_handler_refreshes_the_panel_it_shows(self):
+        """Which is what makes going through it enough."""
+        here = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(here, os.pardir, "python", "visimu",
+                            "ui", "main_window.py")
+        body = io.open(path, encoding="utf-8").read()
+        start = body.index("def _on_tab_selected")
+        block = body[start:body.index("\n    def ", start + 10)]
+        self.assertIn("self._refresh_now(widget)", block)
+        self.assertIn("_stale_panels.discard(widget)", block)
+
+    def test_a_double_click_asks_for_the_tile_it_was_on(self):
+        """The index travels with the request, so the panel that comes
+        forward is describing the tile just clicked."""
+        here = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(here, os.pardir, "python", "visimu",
+                            "ui", "main_window.py")
+        body = io.open(path, encoding="utf-8").read()
+        start = body.index("def _on_tile_params_requested")
+        block = body[start:body.index("\n    def ", start + 10)]
+        # Activation first, then the panel: PARAMS shows the active tile.
+        self.assertLess(block.index("_on_tile_activated"),
+                        block.index("_show_panel"))
 
 
 class TestDoubleClickingATile(unittest.TestCase):
@@ -4404,7 +4980,23 @@ class TestDoubleClickingATile(unittest.TestCase):
     The order is the part worth testing. PARAMS describes the *active* tile, so
     a double-click that opened the panel before activating would show the
     previous tile's parameters -- worse than not opening it.
+
+    The fit happens on the release, not on the double click itself. Qt reports
+    the second press of two quick clicks as a double click whether or not a
+    drag follows, so two rectangle zooms dragged in quick succession near the
+    same spot both arrived here and the fit threw the first one's zoom away.
     """
+
+    def double_click(self, button=None, release_at=(10.0, 10.0)):
+        """The whole gesture: the double click, then the release."""
+        from PySide6.QtCore import Qt
+
+        button = Qt.MouseButton.LeftButton if button is None else button
+        press = _ClickEvent(button=button)
+        self.tile.mouseDoubleClickEvent(press)
+        release = _ClickEvent(button=button, at=release_at)
+        self.tile.mouseReleaseEvent(release)
+        return press, release
 
     def setUp(self):
         self.tile = make_drawable_tile()
@@ -4421,19 +5013,48 @@ class TestDoubleClickingATile(unittest.TestCase):
             lambda i: self.events.append(("params", i)))
 
     def test_it_activates_the_tile_then_asks_for_params(self):
-        self.tile.mouseDoubleClickEvent(_ClickEvent())
+        self.double_click()
         self.assertEqual(self.events,
                          [("activated", 0), ("params", 0)])
 
+    def test_the_tile_is_activated_on_the_double_click_itself(self):
+        """Before the fit, and without waiting for the release: PARAMS shows
+        the active tile."""
+        self.tile.mouseDoubleClickEvent(_ClickEvent())
+        self.assertEqual(self.events, [("activated", 0)])
+
     def test_it_still_fits_the_view(self):
         before = len(self.tile.getPlotItem().range_writes)
-        self.tile.mouseDoubleClickEvent(_ClickEvent())
+        self.double_click()
         self.assertGreater(len(self.tile.getPlotItem().range_writes), before)
 
-    def test_it_consumes_the_event(self):
-        event = _ClickEvent()
-        self.tile.mouseDoubleClickEvent(event)
-        self.assertTrue(event.accepted)
+    def test_it_consumes_the_double_click_but_not_the_release(self):
+        """The release has to reach pyqtgraph.
+
+        It drives its rubber-band zoom from the scene's press, move and
+        release events; a release that stops in our handler leaves the scene
+        believing a drag is still in progress, and from then on the band never
+        appears again. That was "the zoom stops working after a few zooms".
+        """
+        press, release = self.double_click()
+        self.assertTrue(press.accepted)
+        self.assertFalse(release.accepted,
+                         "the release was eaten instead of handed on")
+        passed_on = [kind for kind, _event in self.tile.events_passed_on]
+        self.assertIn("release", passed_on,
+                      "pyqtgraph never saw the release")
+
+    def test_a_drag_after_a_double_click_still_reaches_pyqtgraph(self):
+        """The exact sequence that broke it: zoom, zoom again quickly."""
+        self.double_click(release_at=(260.0, 180.0))
+        passed_on = [kind for kind, _event in self.tile.events_passed_on]
+        self.assertIn("release", passed_on)
+
+    def test_a_press_clears_a_gesture_that_never_finished(self):
+        self.tile.mouseDoubleClickEvent(_ClickEvent())
+        self.assertIsNotNone(self.tile._double_click)
+        self.tile.mousePressEvent(_ClickEvent())
+        self.assertIsNone(self.tile._double_click)
 
     def test_a_locked_axis_is_still_respected(self):
         # Fitting on double-click must not undo a limit the user typed, which
@@ -4441,9 +5062,60 @@ class TestDoubleClickingATile(unittest.TestCase):
         tile = self.tile._state.tile
         tile.lock_x = True
         tile.x_min, tile.x_max = 3.0, 4.0
-        self.tile.mouseDoubleClickEvent(_ClickEvent())
+        self.double_click()
         writes = [w for w in self.tile.getPlotItem().range_writes if w[0] == "x"]
         self.assertEqual(writes[-1], ("x", 3.0, 4.0))
+
+    # ----------------------------------------- the zoom it used to throw away
+
+    def test_a_double_click_that_turns_into_a_drag_fits_nothing(self):
+        """The reported bug. The drag itself is lost either way -- Qt has
+        already spent that press on a double click -- but the view the user
+        had is not."""
+        before = list(self.tile.getPlotItem().range_writes)
+        self.double_click(release_at=(260.0, 180.0))
+        self.assertEqual(self.tile.getPlotItem().range_writes, before)
+        self.assertEqual(self.events, [("activated", 0)],
+                         "PARAMS was opened by a drag")
+
+    def test_a_small_wobble_is_still_a_double_click(self):
+        """The hand is not perfectly still. A couple of pixels must not cost
+        the user the gesture they asked for."""
+        before = len(self.tile.getPlotItem().range_writes)
+        self.double_click(release_at=(12.0, 11.0))
+        self.assertGreater(len(self.tile.getPlotItem().range_writes), before)
+
+    def test_nothing_is_armed_after_the_release(self):
+        """A later plain release must not fit the tile all over again."""
+        self.double_click()
+        self.events.clear()
+        before = list(self.tile.getPlotItem().range_writes)
+        self.tile.mouseReleaseEvent(_ClickEvent())
+        self.assertEqual(self.tile.getPlotItem().range_writes, before)
+        self.assertEqual(self.events, [])
+
+    # --------------------------------------------------- the right button
+
+    def test_a_double_right_click_asks_for_every_tile(self):
+        from PySide6.QtCore import Qt
+
+        asked = []
+        self.tile.fit_all_requested.connect(lambda: asked.append(1))
+        self.double_click(button=Qt.MouseButton.RightButton)
+        self.assertEqual(asked, [1])
+
+    def test_a_double_right_click_does_not_open_params(self):
+        """It is about every tile, so it is not about this tile's parameters."""
+        from PySide6.QtCore import Qt
+
+        self.double_click(button=Qt.MouseButton.RightButton)
+        self.assertEqual(self.events, [("activated", 0)])
+
+    def test_a_double_left_click_asks_for_this_tile_alone(self):
+        asked = []
+        self.tile.fit_all_requested.connect(lambda: asked.append(1))
+        self.double_click()
+        self.assertEqual(asked, [])
 
 
 class TestDuplicatingAPage(unittest.TestCase):
@@ -5085,7 +5757,7 @@ class TestPaletteOrder(unittest.TestCase):
 
     def test_the_inspect_dot_is_not_a_palette_colour(self):
         """It marks a sample; it must not read as one more curve."""
-        from aoeviewer.ui import plot_tile
+        from visimu.ui import plot_tile
         self.assertNotIn(plot_tile.INSPECT_DOT_COLOUR.lower(),
                          [c.lower() for c in model.PALETTE])
 
@@ -5210,7 +5882,11 @@ class TestSaveAsAndTheCurrentFile(unittest.TestCase):
         window = _WindowStub(path=os.path.join("study", "sweep.aoews"))
         window.call("_update_window_title")
         self.assertIn("sweep.aoews", window.title)
-        self.assertIn("aoeViewer", window.title)
+        self.assertIn("visimu", window.title)
+        # The old name, spelled in two halves so that this file is not itself
+        # an occurrence of it -- see TestTheOldNameIsGone.
+        self.assertNotIn("aoe" + "viewer", window.title.lower(),
+                         "the old name is still on the window")
         self.assertFalse(window.title.startswith("*"))
 
     def test_an_unsaved_session_says_untitled(self):
@@ -5270,7 +5946,7 @@ class TestSaveAsAndTheCurrentFile(unittest.TestCase):
 
     def test_renamed_files_and_runs_survive_a_workspace(self):
         import tempfile
-        from aoeviewer.model import load_workspace
+        from visimu.model import load_workspace
 
         session = _FakeSession(files=[
             _NamedFile("/data/flight.aoe", "Nominal climb", [
@@ -5477,11 +6153,11 @@ class TestFormulaHelpLogarithms(unittest.TestCase):
 
 class TestSaveAsIcon(unittest.TestCase):
     def test_the_painter_is_registered(self):
-        from aoeviewer.ui import icons
+        from visimu.ui import icons
         self.assertIn("save-as", icons._PAINTERS)
 
     def test_it_is_distinct_from_save(self):
-        from aoeviewer.ui import icons
+        from visimu.ui import icons
         self.assertIsNot(icons._PAINTERS["save-as"], icons._PAINTERS["save"])
 
 
@@ -5995,7 +6671,7 @@ class TestRoomForTheTickNumbers(unittest.TestCase):
 
     def test_the_bottom_axis_is_given_a_measured_height(self):
         from PySide6.QtGui import QFontMetricsF
-        from aoeviewer.scales import tick_row_height
+        from visimu.scales import tick_row_height
 
         self.tile.apply_theme(self.tile._theme)
         heights = self.plot.getAxis("bottom").heights
@@ -6013,20 +6689,20 @@ class TestRoomForTheTickNumbers(unittest.TestCase):
     def test_the_height_leaves_room_below_the_text(self):
         # The point of the pad: a descender on the longest label otherwise
         # sits exactly on the tile's edge.
-        from aoeviewer.scales import tick_row_height
+        from visimu.scales import tick_row_height
 
         self.assertGreater(tick_row_height(14.0, offset=0.0), 14.0)
 
     def test_ticks_drawn_inside_the_plot_cost_no_height(self):
         # pyqtgraph's default tick length is negative, meaning the ticks are
         # drawn inside the view; a naive sum would subtract from the row.
-        from aoeviewer.scales import tick_row_height
+        from visimu.scales import tick_row_height
 
         self.assertEqual(tick_row_height(14.0, tick_length=-5.0),
                          tick_row_height(14.0, tick_length=0.0))
 
     def test_a_larger_interface_gets_a_taller_row(self):
-        from aoeviewer.scales import tick_row_height
+        from visimu.scales import tick_row_height
 
         small = tick_row_height(14.0, scale=0.7)
         large = tick_row_height(22.0, scale=1.6)
@@ -6060,7 +6736,7 @@ class TestTheDragDecidesWhichAxesZoom(unittest.TestCase):
     """
 
     def setUp(self):
-        from aoeviewer.ui import zoombox
+        from visimu.ui import zoombox
 
         self.zoom = zoombox
 
@@ -6130,7 +6806,7 @@ class TestTheZoomRectangleIsWidened(unittest.TestCase):
 
     def setUp(self):
         from PySide6.QtCore import QPointF, QRectF
-        from aoeviewer.ui import zoombox
+        from visimu.ui import zoombox
 
         self.zoom = zoombox
         self.point = QPointF
@@ -6219,7 +6895,7 @@ class _ChildGroup:
 def _directional_box(mode=None):
     """A DirectionalViewBox wired up enough to drive a drag through it."""
     import pyqtgraph as pg
-    from aoeviewer.ui.zoombox import DirectionalViewBox
+    from visimu.ui.zoombox import DirectionalViewBox
 
     box = DirectionalViewBox()
     box.state = {"mouseMode": pg.ViewBox.RectMode if mode is None else mode}
@@ -6423,6 +7099,55 @@ class TestTheViewBoxActsOnTheDrag(unittest.TestCase):
         event = self.drag(box, (100, 150), (300, 154))
         self.assertTrue(event.accepted)
 
+    # ------------------------------------------------- the gesture survives
+
+    def test_a_live_drag_that_is_still_small_is_claimed(self):
+        """The fix for a zoom that worked only sometimes.
+
+        pyqtgraph's scene offers the *first* drag event of a gesture to the
+        items near the pointer, and whichever accepts becomes its `dragItem`
+        and gets every later event. Nobody accepting means no dragItem, and
+        because the search happens on that first event only, no further drag
+        event is ever delivered -- the gesture is dead however far the mouse
+        then travels.
+
+        The scene's own threshold is about five pixels and this floor is six,
+        scaled, so refusing a first step that was merely small made the zoom
+        depend on where in that window the first delivered move landed: a
+        quick flick cleared it, a careful drag did not.
+        """
+        box = _directional_box()
+        event = self.drag(box, (100, 100), (105, 101), finish=False)
+        self.assertTrue(event.accepted,
+                        "the scene will hand this gesture to nobody")
+        self.assertEqual(box.zoomed, [], "nothing should be zoomed yet")
+        self.assertEqual(box.banded, [], "nor banded")
+
+    def test_a_drag_that_starts_small_and_grows_still_zooms(self):
+        """The failing gesture from the log, played back: a first step of five
+        pixels, then a real drag."""
+        box = _directional_box()
+        first = self.drag(box, (100, 100), (105, 101), finish=False)
+        self.assertTrue(first.accepted)
+        self.drag(box, (100, 100), (160, 160), finish=False)
+        self.assertEqual(len(box.banded), 1, "the band never appeared")
+        self.drag(box, (100, 100), (300, 250), finish=True)
+        self.assertEqual(len(box.zoomed), 1, "the zoom never happened")
+
+    def test_a_drag_that_ends_small_leaves_the_view_alone(self):
+        """The floor keeps its purpose: a twitch while clicking is not a
+        zoom."""
+        box = _directional_box()
+        self.drag(box, (100, 100), (104, 102), finish=True)
+        self.assertEqual(box.zoomed, [])
+        self.assertEqual(box.banded, [])
+
+    def test_the_band_is_taken_down_when_a_small_drag_ends(self):
+        box = _directional_box()
+        self.drag(box, (100, 100), (160, 160), finish=False)
+        self.drag(box, (100, 100), (103, 101), finish=True)
+        self.assertGreaterEqual(box.rbScaleBox.hidden, 1)
+
 
 class _FakeGrid:
     """Just enough grid to watch what the window asks of its tiles."""
@@ -6619,7 +7344,7 @@ class TestATileDrawsTheDifferenceBetweenTwoRuns(unittest.TestCase):
                                  (1, 0, "TIME"), (1, 0, "ALT")]))
 
     def test_the_title_says_what_it_is(self):
-        from aoeviewer.model import tile_title
+        from visimu.model import tile_title
 
         state = AppState()
         state.tile.x_param = "TIME"
@@ -6636,6 +7361,56 @@ class TestATileDrawsTheDifferenceBetweenTwoRuns(unittest.TestCase):
         self.assertTrue(tile.tile_state.view_initialised)
         state = tile.tile_state
         self.assertLess(state.y_min, 0.0)
+
+
+class FakeFormLayout:
+    """A form layout that really adds and removes rows.
+
+    Real because the group-colour list is rebuilt from scratch every refresh,
+    and "the rows of the configuration that was just unloaded are gone" is the
+    assertion worth being able to make. The stub's own placeholder answers
+    every call with something truthy, which is how a `while count()` loop over
+    it ran forever.
+    """
+
+    def __init__(self, *args, **kwargs):
+        self.rows = []
+
+    def setContentsMargins(self, *args):
+        pass
+
+    def addRow(self, label, field=None):
+        self.rows.append((label, field))
+
+    def removeRow(self, index):
+        if 0 <= index < len(self.rows):
+            self.rows.pop(index)
+
+    def count(self):
+        return len(self.rows)
+
+
+def fit_file_diff_widgets(panel):
+    """Give a hand-built DiffPanel the widgets of its whole-file half.
+
+    The panel has two independent halves and the fixtures build it by hand, so
+    whichever half a test is about, both have to be there -- refresh() brings
+    the other one along, as it does in the window.
+    """
+    panel.file_a_combo = qt_stubs.QComboBox()
+    panel.file_b_combo = qt_stubs.QComboBox()
+    panel.config_label = qt_stubs.QLabel()
+    panel.group_box = qt_stubs.QWidget()
+    panel.group_layout = FakeFormLayout()
+    panel._group_swatches = {}
+    panel.run_diff_button = qt_stubs.QPushButton()
+    panel.report_button = qt_stubs.QPushButton()
+    panel.file_state_label = qt_stubs.QLabel()
+    panel.pages_combo = qt_stubs.QComboBox()
+    panel.pages_row = qt_stubs.QWidget()
+    panel.run_file_diff = qt_stubs.Signal().__get__(panel)
+    panel.show_report = qt_stubs.Signal().__get__(panel)
+    return panel
 
 
 class TestTheDiffPanelChoices(unittest.TestCase):
@@ -6660,6 +7435,7 @@ class TestTheDiffPanelChoices(unittest.TestCase):
         panel.tile_label = qt_stubs.QLabel()
         panel.state_label = qt_stubs.QLabel()
         panel.tile_changed = qt_stubs.Signal().__get__(panel)
+        fit_file_diff_widgets(panel)
         panel.refresh()
         return panel
 
@@ -6775,7 +7551,7 @@ class TestTheDiffSurvivesAWorkspaceRoundTrip(unittest.TestCase):
         state.tile.diff_param = "ALT"
         state.tile.diff_a, state.tile.diff_b = (0, 1), (1, 0)
 
-        from aoeviewer.model import TileState
+        from visimu.model import TileState
 
         copy = TileState.from_dict(state.tile.to_dict())
         self.assertEqual(copy.diff_param, "ALT")
@@ -6785,14 +7561,14 @@ class TestTheDiffSurvivesAWorkspaceRoundTrip(unittest.TestCase):
 
     def test_a_workspace_without_one_opens_as_no_difference(self):
         """Every workspace written before 2.3.0."""
-        from aoeviewer.model import TileState
+        from visimu.model import TileState
 
         tile = TileState.from_dict({"x_param": "TIME", "y_params": ["ALT"]})
         self.assertFalse(tile.is_diff())
         self.assertEqual(tile.diff_a, (-1, -1))
 
     def test_a_malformed_run_reads_as_no_difference(self):
-        from aoeviewer.model import TileState
+        from visimu.model import TileState
 
         tile = TileState.from_dict({"x_param": "TIME", "diff_param": "ALT",
                                     "diff_a": "nonsense", "diff_b": [1]})
@@ -6928,7 +7704,7 @@ class TestUnlockingEveryScale(unittest.TestCase):
     """
 
     def window(self):
-        from aoeviewer.ui import main_window as mw
+        from visimu.ui import main_window as mw
 
         window = object.__new__(mw.MainWindow)
         window.state = AppState()

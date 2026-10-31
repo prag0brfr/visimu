@@ -1,8 +1,8 @@
-# aoeViewer
+# visimu
 
-A fast viewer for AOE simulation result files.
+A fast viewer for simulation result files.
 
-**Version 2.3.0.** What it does:
+**Version 2.4.0.** What it does:
 
 - **Opens a study, not a file.** Add any number of result files, tick the runs
   you want, and compare them across a grid of plot tiles arranged in pages.
@@ -25,10 +25,15 @@ A fast viewer for AOE simulation result files.
   Where two runs are too alike to tell apart by eye, a tile can draw the
   **difference** between them instead — including runs from two different
   files, recorded at different instants.
+- **Checks two whole files against written-down thresholds.** Every run of one
+  file against the run of the same name in another, every channel a YAML
+  threshold table names, and a report of what moved further than it was
+  allowed to. Flagged runs are plotted on request, 16 tiles a page, both files
+  overlaid with the crossings shaded in the colour of the group they broke.
 - **Derived channels** from an expression over the ones in the file, evaluated
   in the core.
 
-The full manual is `doc/aoeViewer-2.3.0-User-and-Reference-Guide.pdf`, built
+The full manual is `doc/visimu-2.4.0-User-and-Reference-Guide.pdf`, built
 from the LaTeX source beside it.
 
 The heavy work — parsing, computed parameters, plot decimation — happens in a
@@ -86,6 +91,7 @@ seconds, and megabytes apiece.
   - [Pages and tiles](#pages-and-tiles)
   - [Workspaces](#workspaces)
 - [Differencing two runs](#differencing-two-runs)
+- [Comparing two files](#comparing-two-files)
 - [Computed parameters](#computed-parameters)
 - [HDF5 files](#hdf5-files)
   - [Files that declare their own structure](#files-that-declare-their-own-structure)
@@ -104,23 +110,31 @@ seconds, and megabytes apiece.
 ## Quick start
 
 ```bash
-# 1. Build the core
+# Build the core and the standalone executable
 ./build.sh                # Linux/macOS
 build.bat                 # Windows
 
-# 2. Check it works
+# Check it works
 ./build.sh test           # or: build.bat test
 
-# 3. Run
-PYTHONPATH=python python -m aoeviewer            # Linux/macOS
-set PYTHONPATH=python && python -m aoeviewer     # Windows
+# Run from source, without packaging
+PYTHONPATH=python python -m visimu            # Linux/macOS
+set PYTHONPATH=python && python -m visimu     # Windows
 ```
 
-To try it without real data:
+With no argument both scripts do the whole job — compile the core, then
+package the executable into `dist/`. The pieces are still available on their
+own: `core` compiles the library and stops, `exe` packages without
+recompiling, `exe-folder` packages as a directory instead of one file, `test`
+compiles the core and runs the C++ checks. Anything starting with a dash is
+passed through to `packaging/build_exe.py`.
+
+Building also fills `sample/`, which includes a pair of files built for the
+file comparison. To make a file by hand instead:
 
 ```bash
 python tools/gen_sample.py sample.aoe --sims 6 --rows 40000
-PYTHONPATH=python python -m aoeviewer sample.aoe
+PYTHONPATH=python python -m visimu sample.aoe
 ```
 
 ---
@@ -314,23 +328,23 @@ From a source checkout, `python/` must be on the import path:
 
 ```bash
 # Linux/macOS
-PYTHONPATH=python python -m aoeviewer [files...]
+PYTHONPATH=python python -m visimu [files...]
 
 # Windows
 set PYTHONPATH=python
-python -m aoeviewer [files...]
+python -m visimu [files...]
 ```
 
 Check the installation without opening a window:
 
 ```bash
-PYTHONPATH=python python -m aoeviewer --version
+PYTHONPATH=python python -m visimu --version
 ```
 
 which prints the package version, the core version, the path of the library it
 loaded, and the worker-thread count.
 
-To use a core library from elsewhere, set `AOEVIEWER_CORE` to its directory or
+To use a core library from elsewhere, set `VISIMU_CORE` to its directory or
 its full path.
 
 ### Command-line options
@@ -349,7 +363,7 @@ on. It is also useful on its own, to warm a directory of results overnight so
 that nobody waits for a first open:
 
 ```bash
-PYTHONPATH=python python -m aoeviewer --build-cache study/*.aoe study/*.hdf5
+PYTHONPATH=python python -m visimu --build-cache study/*.aoe study/*.hdf5
 ```
 
 It opens each file read-only, writes nothing but the sidecar, takes no lock that
@@ -389,7 +403,7 @@ Quick/QML, Multimedia, 3D, SQL), which takes the bundle from roughly 150 MB to
 roughly 70 MB. UPX compression is deliberately off, since packed binaries are a
 common false-positive trigger.
 
-The window icon comes from `packaging/aoeviewer.ico`, which is **generated**
+The window icon comes from `packaging/visimu.ico`, which is **generated**
 rather than committed as a binary:
 
 ```bash
@@ -442,8 +456,8 @@ the user's desk behind a dialog box that truncates it.
 You can run it by hand at any time:
 
 ```bash
-dist/aoeviewer/aoeviewer --selftest      # folder build
-dist/aoeviewer --selftest                # --onefile build
+dist/visimu/visimu --selftest      # folder build
+dist/visimu --selftest                # --onefile build
 ```
 
 Pass `--no-selftest` to skip it.
@@ -461,7 +475,7 @@ builds with a console window attached, so the startup traceback is readable
 rather than being cut short by a message box.
 
 ```bash
-python packaging/build_exe.py --onefile --runtime-tmpdir "%LOCALAPPDATA%\aoeviewer"
+python packaging/build_exe.py --onefile --runtime-tmpdir "%LOCALAPPDATA%\visimu"
 ```
 
 changes where a single-file build unpacks itself. By default that is `%TEMP%`,
@@ -503,8 +517,13 @@ it, and bring PARAMS forward.
 
 ### The panels
 
-Thirteen panels, selected from the rail. Seven act on the active tile only
-(PARAMS, DIFF, STYLE, SCALE, SYNC, 3D, TEXT); the rest apply to everything.
+Thirteen panels, selected from the rail. Six act on the active tile only
+(PARAMS, STYLE, SCALE, SYNC, 3D, TEXT) and the rest apply to everything; DIFF
+is both — its difference half acts on the active tile, its file comparison on
+the files as a whole.
+
+Every filter box in the program has a button beside it that empties it and
+refilters at once.
 
 **DATA** — add and remove files, and tick which runs to plot. Every run of the
 first file is ticked automatically, so something is on screen straight away.
@@ -531,21 +550,35 @@ The filter is a view and nothing more: a hidden run keeps its tick and keeps
 plotting. While one is typed, *Plot all* and *Plot none* say *(shown)* and act
 only on the rows on screen.
 
-**PARAMS** — pick the x parameter and tick y parameters for the active tile.
-Channels already on the tile are listed first, in the order they were ticked;
-the rest keep the file order, and unticking one puts it straight back among
-them. The filter box accepts wildcards: `AL*` matches `ALPHA` and `ALT`.
-Filtering only hides rows — a selected name that does not match stays selected
-and reappears as soon as the filter lets it through. **Right-click a parameter**
-to make it the x axis or copy its name.
+**PARAMS** — pick the x parameter and the y parameters of the active tile. Two
+lists, stacked: *Available* above, *Plotted on this tile* below, with three
+buttons between them — ▼ plots everything selected above, ▲ stops plotting
+everything selected below, ✖ empties the tile. Double-clicking a name moves it
+the same way, and both lists take a multiple selection, so a dozen channels
+move in one gesture.
+
+*Available* stays in the file's own order. *Plotted* is in drawing order, which
+is the order names were added, and that order is what the title names first,
+what the legend rows follow and what the CSV columns use; to move a channel
+later in it, take it off and add it again.
+
+Each list has its own filter, each accepting wildcards (`AL*` matches `ALPHA`
+and `ALT`) and each with its own clear button. Filtering only hides rows: a
+plotted channel the filter is not showing is still plotted. **Right-click a
+parameter** to make it the x axis or copy its name.
 
 **COMPUTE** — define derived channels from the ones in the file. See
 [Computed parameters](#computed-parameters). This is also where a channel gets
 a readable name: `Load factor = NZ` shows the new name everywhere and leaves
-the file untouched.
+the file untouched. The expression field completes channel names from the
+second letter of a word, replacing the word under the cursor rather than the
+whole line.
 
-**DIFF** — draw the difference between one channel's values in **two runs**,
-which may come from different files. See [Differencing two runs](#differencing-two-runs).
+**DIFF** — two halves. *Difference* draws one channel's values in **two runs**,
+which may come from different files; see
+[Differencing two runs](#differencing-two-runs). *Whole files* compares two
+entire files against a threshold table; see
+[Comparing two files](#comparing-two-files).
 
 **ISO** — filter runs by parameters that are constant within a run (Mach
 number, mass, altitude). **Several filters can be active at once and they
@@ -847,8 +880,10 @@ panel forward.
 
 ### Fitting
 
-**Double-click any plot to fit it**; `Ctrl+0` fits every tile, and so does
-**Fit** on the bar above the grid.
+**Double-click any plot to fit it**; **double right-click** fits every tile on
+the page, and so do `Ctrl+0` and **Fit** on the bar above the grid. Both
+double-click gestures are carried out on the release and only if the pointer
+stayed put, so a second zoom dragged near the first is never mistaken for one.
 
 **The open padlock beside Fit** takes every X and Y scale constraint off
 *every tile on every page*, releases every **variable-wide** constraint as
@@ -893,9 +928,9 @@ Page and tile management sits on a bar directly above the grid:
   click to set the layout. Cells beyond 25 tiles are greyed out.
 - **Tile** — arrow buttons swap the active tile with its neighbour, and four
   symbol buttons move a tile's whole configuration: copy (two sheets), cut
-  (scissors), paste (clipboard) and clear (a crossed-out frame). They were
-  words until 2.3.0, which cost about 210 px of a bar that also holds the page
-  controls and the grid picker; hover one for what it does.
+  (scissors), paste (clipboard) and clear (a crossed-out frame). Symbols rather
+  than words, because the bar also holds the page controls and the grid picker;
+  hover one for what it does.
 
 Each tile is titled with what it is plotting, as `ALPHA, NZ = f(TIME)`. Every
 selected y is named, and a long list wraps onto a second line. The axes
@@ -907,16 +942,23 @@ status bar.
 
 ### Workspaces
 
-`Ctrl+S` and `Ctrl+L` save and load a workspace: file paths, pages and their
-names, tiles, selections, computed parameters, aliases, *Colour by* / *Style
-by*, each tile's difference, the order of the tab rail, the names you gave
-files and runs, the interface size, the theme, and every colour and line style,
-as JSON (schema version 3, plus `app_version`).
+Four actions, at the left of the toolbar: **New** (`Ctrl+N`), **Load**
+(`Ctrl+L`), **Save** (`Ctrl+S`) and **Save as** (`Ctrl+Shift+S`). New, Load and
+closing the window all offer to save the open workspace first when it has
+unsaved changes — *Save*, *Discard* or *Cancel* — and cancelling the file
+dialog that *Save* opens cancels the whole action rather than carrying on
+without it.
 
-A workspace written by an older version opens unchanged: with no rail order it
-uses the built-in one, with no difference on a tile it draws the parameters as
-before, and a rail order naming a panel this version does not have — `ALIAS`,
-removed in 2.3.0 — ignores that name and keeps the rest.
+A workspace is JSON (schema version 3, plus `app_version`) and carries: file
+paths, pages and their names, tiles, run selections, computed parameters,
+*Colour by* / *Style by*, each tile's difference, the file comparison with its
+thresholds, group colours and report, the order of the tab rail, the names you
+gave files and runs, the interface size, the theme, and every colour and line
+style.
+
+The loader sets only what it recognises and ignores the rest, so a
+hand-edited workspace, or one written by another build, opens as far as it can
+be understood.
 
 Display names are keyed by identity rather than by position — a file by its
 path, a run by the core's `<file>::<id>::<ordinal>` key — because a workspace is
@@ -930,14 +972,9 @@ that opening the next one does not throw away the work set up for it; but a
 formula over columns that are not loaded evaluates to nothing, so it is not a
 candidate for an axis while nothing is open.
 
-*Aliases* above are a 2.2.x feature kept for compatibility: the core still
-resolves them and a workspace that carries them still loads, but nothing in the
-interface creates one any more — COMPUTE does the same job with
-`Load factor = NZ`, and does it in one place.
-
-Workspaces written by earlier versions open unchanged: anything they do not
-mention takes its default, and a workspace that names an interface size keeps
-the size it was saved at.
+A channel is given a readable name in COMPUTE — `Load factor = NZ` — which is
+also where every other derived channel is defined, so there is one place to
+look for both.
 
 ### Lists built for the size these files come in
 
@@ -962,7 +999,8 @@ in the middle, and the eye cannot find where. The **DIFF** panel puts that
 difference where it belongs — on the y axis, at the x it happened.
 
 Pick a parameter and two runs; the tile draws `A - B` against the tile's own x
-axis, chosen in PARAMS as usual.
+axis, which is chosen here as well — the same setting PARAMS shows, writable
+from either, so this one question needs no other tab.
 
 **One parameter and two runs, and no more.** A tile holding four differences of
 three channels answers nothing; a second difference is a second tile.
@@ -990,8 +1028,10 @@ tile* gives the tile back to them. Colour, dash and width come from STYLE as
 usual, keyed on the channel — so a difference of `ALPHA` is drawn in the
 colour `ALPHA` has.
 
-The tile is titled `ΔALT between two runs = f(TIME)`, and the legend row names
-both runs, with their files when the two differ.
+The tile is titled `ΔALT between two runs = f(TIME)`. The legend row takes two
+lines — the channel, then the two runs, with their files when the two differ —
+because on a tile a quarter of a page wide all of that on one line runs past
+the plot it is labelling.
 
 It reads four channels and no more — x and the parameter, from each of the two
 runs — and they go into the same batched preload as everything else on the
@@ -1002,6 +1042,134 @@ Nothing is drawn when the two runs share no x at all, when one of them does not
 carry the channel, or when A and B are the same run; the panel says which of
 those it is, because a difference that cannot be drawn looks exactly like one
 that is drawn and happens to be zero.
+
+---
+
+## Comparing two files
+
+Non-regression testing: given yesterday's build and today's, has anything moved
+further than it was allowed to, and where? The lower half of the **DIFF** tab
+answers that for two whole files at once.
+
+```
+File A, File B      two of the files open in DATA; A is the reference
+Thresholds...       the YAML table of groups and thresholds
+Group colours       one swatch per group, pre-filled grey, red, orange, green
+Run diff            do it
+Show report         reopen the last report at any time
+```
+
+**Runs are paired by identifier, never by position.** Run 3 of one build is
+often run 7 of the next, because solvers finish in the order they finish.
+Before anything is compared, three things are checked — same number of runs,
+run identifiers matching one to one, same channels — and if any fails, a
+warning says which and nothing runs. A check that half-ran and reported what it
+managed is worse than one that did not run.
+
+Pressing *Run diff* also ticks every run and admits every ISO value first. A
+generated page is read through the same filters as every other page, and a run
+left unticked three tabs ago would come out as a blank tile on a page you asked
+for *because* that run was flagged.
+
+### The threshold table
+
+A list of groups, each with a list of `algoconfs`:
+
+```yaml
+ - group_name: "BLACK"
+   algoconfs:
+     - variables: "ALFA"
+       x: "TIME"
+       threshold: 25
+     - variables: "Q1;TETA;BETA"
+       threshold: 10
+
+ - group_name: "AMBER"
+   algoconfs:
+     - variables: "ALFA"
+       threshold: 10
+     - variables: "Q1;TETA;BETA"
+       threshold: 5
+```
+
+`variables` is split on semicolons and each name becomes a rule with the same
+threshold. `x` is the channel the comparison runs along and defaults to `TIME`.
+**Keys this program does not know are ignored, at any level**, which is what
+makes a real file — full of fields about other things — readable as it stands.
+A repeated group and channel takes the last definition. The extension is not
+checked: a `.txt` file of the right shape is accepted.
+
+Group names are identifiers, not colours. Nothing reads them; a group called
+BLACK is drawn in whatever colour you pick for it.
+
+No PyYAML. The shape above is narrow enough to read directly, and a feature
+that needed a new wheel on these machines would be a feature nobody could
+install. A structural problem is reported with its line number.
+
+### What counts, and what gets shaded
+
+A sample is a violation where `|A - B| > threshold`, strictly. A run, channel
+and group is **flagged** when at least one sample violates it. Where the two
+files are sampled differently, B is read at A's x values by interpolation, over
+the stretch they have in common; nothing outside it is compared, because
+extrapolating would report a difference nobody recorded.
+
+**Priority is the threshold value** — higher is worse — and nothing else: not
+the order of the groups, not their names. A deviation over a high threshold is
+over every lower one too, so a channel is usually flagged for several groups;
+the report lists them all, worst first, but at each sample only the
+highest-priority group is shaded, so bands never stack. If RED (4) is violated
+on [2,4] and BLACK (6) on [3,5], the shading reads RED on [2,3) and BLACK on
+[3,5].
+
+Two groups sharing a threshold are tied and which one gets shaded is
+undefined. The program warns, naming the channel and the groups, rather than
+choosing silently.
+
+### The report, and the pages
+
+The report opens by itself in a window of its own, one line per flagged run,
+each group name in its colour:
+
+```
+RUN_001: ALFA(BLACK), ALFA(AMBER), BETA(AMBER), Q1(BLACK), Q1(AMBER)
+RUN_004: ALFA(AMBER)
+```
+
+Runs with nothing to say are not listed, and whatever could not be compared is
+named beneath. **Nothing is plotted until you press *Plot* on a line** (or
+double-click it): forty flagged runs at sixteen tiles a page is not something
+to do on anybody's behalf, and the window can be closed without generating
+anything.
+
+Plotting a line builds pages named `DIFF (1)`, `DIFF (2)`, … each a 4×4 grid,
+one tile per flagged channel in report order — worst first, so the first tile
+is the worst news. Sixteen fill a page and the seventeenth starts another;
+plotting a second run continues the numbering. Each tile overlays the channel
+as both files recorded it, in two fixed colours, with the violated regions
+shaded in their group's colour and the legend naming both series on their own
+lines:
+
+```
+regression_a.aoe - RUN_001 - BETA
+regression_b.aoe - RUN_001 - BETA
+```
+
+A generated tile names its run *identifier* and its two files and carries its
+own bands, so a workspace reopened a month later shows the verdict it was saved
+with — no file to re-read, no table to re-parse — and the tiles draw whatever
+is ticked in DATA. Running a second comparison removes the previous one's
+pages.
+
+### Trying it
+
+`sample/` holds a pair built for this, written by the build:
+`regression_a.aoe`, `regression_b.aoe` and `regression_thresholds.yaml`.
+Twenty channels; four runs under the same identifiers in a *different order* in
+each file; the second file sampled more coarsely than the first, so the
+interpolation is exercised; and deviations engineered in known places — one run
+identical in both files, one flagged on eighteen channels (more than a page
+holds), one on five, one on a single channel.
 
 ---
 
@@ -1307,7 +1475,7 @@ The core is usable from Python on its own, with only `numpy` installed — no Qt
 import sys
 sys.path.insert(0, "python")
 
-from aoeviewer import Session
+from visimu import Session
 
 with Session() as session:
     f = session.add_file("results/run_042.aoe")
@@ -1420,7 +1588,7 @@ The decimation cache behind the second of those is keyed on the view as well as
 the samples, and getting that key wrong is easy: quantising only the endpoints
 hid every zoom whose lower edge scaled with its width, so zooming in around the
 origin kept whatever resolution the curve already had. The key and its
-arithmetic live in `aoeviewer/scales.py`, which imports no Qt, and are tested in
+arithmetic live in `visimu/scales.py`, which imports no Qt, and are tested in
 `tests/test_redraw.py`.
 
 **Colouring by ISO does not load the ISO column.** `iso_values()` reads the
@@ -1525,6 +1693,14 @@ AILERON, RUDDER, THROTTLE` and the three inertial position components, plus five
 per-run constants (`INITIAL_MASS`, `CG_REF`, `CL_ALPHA`, `THRUST_RATING`,
 `CONFIGURATION`) for the ISO tab to key on.
 
+The regression pair is a different kind of data for a different purpose, and is
+written by `tools/gen_diff_samples.py`. Those files are not meant to look like
+a flight: they are meant to be *wrong in known places*, so that what the file
+comparison reports can be checked against what was put there. Two runs differ
+on nothing at all, one differs on eighteen channels, and each deviation is a
+flat step — a step crosses its threshold at an instant that can be written
+down, which is what makes a shaded region checkable by hand.
+
 ---
 
 ## The `.aoec` sidecar
@@ -1578,7 +1754,7 @@ It can also be run on its own, to warm a directory of results before anyone
 opens them:
 
 ```
-aoeviewer --build-cache run_001.aoe run_002.hdf5
+visimu --build-cache run_001.aoe run_002.hdf5
 ```
 
 Either way it opens the source read-only, writes nothing but the sidecar, holds
@@ -1623,9 +1799,9 @@ share, so a per-user directory is tried second:
 
 | | |
 |---|---|
-| Windows | `%LOCALAPPDATA%\aoeViewer\cache\` |
-| macOS | `~/Library/Caches/aoeviewer/` |
-| Linux | `$XDG_CACHE_HOME/aoeviewer/`, else `~/.cache/aoeviewer/` |
+| Windows | `%LOCALAPPDATA%\visimu\cache\` |
+| macOS | `~/Library/Caches/visimu/` |
+| Linux | `$XDG_CACHE_HOME/visimu/`, else `~/.cache/visimu/` |
 
 The source's full path is hashed into the name there, so two files called
 `results.aoe` in different directories do not share one.
@@ -1643,7 +1819,7 @@ asked for; the file has already opened and works.
 From a script:
 
 ```python
-from aoeviewer import Session
+from visimu import Session
 
 session = Session()
 session.add_file("results/run_042.aoe")
@@ -1681,7 +1857,7 @@ the fingerprint, which is capped, while the parse it replaces is not.
 
 ```bash
 make test                                  # 1687 C++ checks
-python -m unittest discover -s tests -v    # 415 Python tests
+python -m unittest discover -s tests -v    # 1293 Python tests
 make bench                                 # parser microbenchmark
 python tools/bench_app.py FILE...          # end-to-end, on real files
 ```
@@ -1720,15 +1896,15 @@ than importing it, which is how the wiring is checked on a machine with no Qt at
 all.
 
 Arithmetic that a mistake could hide in lives in its own Qt-free module, so it
-can be tested directly: `aoeviewer/scales.py` for the draw budget and the
-log-axis conversion, `aoeviewer/isogroups.py` for editing ISO intervals. The
+can be tested directly: `visimu/scales.py` for the draw budget and the
+log-axis conversion, `visimu/isogroups.py` for editing ISO intervals. The
 second is checked twice over — case by case in `test_redraw.py`, and by a few
 thousand random boundary edits in `test_monkey.py` asserting that the intervals
 come out ordered and touching whatever was typed into them.
 
 ### Sizes
 
-Every size in the interface is in `aoeviewer/theme.py`, because they only work
+Every size in the interface is in `visimu/theme.py`, because they only work
 as a set: shrinking the panels but not the tiles, or the text but not the
 padding around it, gives you a smaller-looking application that is no less
 crowded. Widget text is sized in pixels (`FONT_PX`, `FONT_SMALL_PX`) and the
@@ -1760,12 +1936,12 @@ Indicative benchmark figures (4-core container, 3 worker threads):
 ## Architecture
 
 ```
-python/aoeviewer/ui/      Qt widgets       PySide6 + pyqtgraph
-python/aoeviewer/ui/icons.py  toolbar icons, drawn not loaded
-python/aoeviewer/model.py application state, no Qt, no core
-python/aoeviewer/projection.py  3D projection maths, no Qt
-python/aoeviewer/session.py  Pythonic API
-python/aoeviewer/_core.py    ctypes bindings
+python/visimu/ui/      Qt widgets       PySide6 + pyqtgraph
+python/visimu/ui/icons.py  toolbar icons, drawn not loaded
+python/visimu/model.py application state, no Qt, no core
+python/visimu/projection.py  3D projection maths, no Qt
+python/visimu/session.py  Pythonic API
+python/visimu/_core.py    ctypes bindings
           |
           |  C ABI  (core/include/aoe/aoe_c_api.h)
           v
@@ -1815,20 +1991,20 @@ following were bugs rather than ports:
 
 ## When something goes wrong
 
-Every failure is written to **`aoeviewer.log`**, beside the application (or in
-`~/.aoeviewer` if that directory is read-only, which a frozen build's often is).
+Every failure is written to **`visimu.log`**, beside the application (or in
+`~/.visimu` if that directory is read-only, which a frozen build's often is).
 It captures unhandled exceptions on any thread, failures inside background
 tasks, and Qt's own warnings, and records the version, platform and library
-paths at startup. `python -m aoeviewer --version` prints where it is being
+paths at startup. `python -m visimu --version` prints where it is being
 written. Send that file with any bug report; it is usually the whole story.
 
 ---
 
 ## Troubleshooting
 
-**`could not find the aoeViewer core library`** — the core has not been built,
+**`could not find the visimu core library`** — the core has not been built,
 or it is somewhere unexpected. Run `make` or `build.bat`; the error lists every
-directory that was searched. `AOEVIEWER_CORE` overrides the search.
+directory that was searched. `VISIMU_CORE` overrides the search.
 
 **`Could not find module ...aoecore.dll (or one of its dependencies)`** — the
 DLL is present but something it links against is not. Windows never says which,
@@ -1848,7 +2024,7 @@ as well.
 
 **`Importing the numpy C-extensions failed`, from the frozen build only** — the
 bundle is missing something NumPy links against, or is forbidden from loading
-it. Run `aoeviewer --selftest` (or rebuild, which runs it for you) to get the
+it. Run `visimu --selftest` (or rebuild, which runs it for you) to get the
 real error rather than the truncated dialog, then:
 
 - If it says `DLL load failed while importing _multiarray_umath`, the support
@@ -1857,11 +2033,11 @@ real error rather than the truncated dialog, then:
   `build/pyinstaller` cache from before that change.
 - If the self-test passes but a double-click still fails, the machine is
   blocking execution from the unpack directory. Use the folder build, or
-  `--onefile --runtime-tmpdir "%LOCALAPPDATA%\aoeviewer"`.
+  `--onefile --runtime-tmpdir "%LOCALAPPDATA%\visimu"`.
 - If NumPy 2.x is installed, an old PyInstaller may still be looking for
   `numpy.core` rather than `numpy._core`. `pip install -U PyInstaller`.
 
-**`ModuleNotFoundError: No module named 'aoeviewer'`** — `python/` is not on the
+**`ModuleNotFoundError: No module named 'visimu'`** — `python/` is not on the
 import path. Set `PYTHONPATH=python`.
 
 **`ModuleNotFoundError: No module named 'colorama'`** — a consequence of

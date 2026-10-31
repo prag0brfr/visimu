@@ -116,16 +116,16 @@ def emit(name, tier):
 def load_aoe(path):
     """Read every run and channel out of an .aoe file via the app's session.
 
-    This deliberately goes through ``aoeviewer.Session`` rather than parsing
+    This deliberately goes through ``visimu.Session`` rather than parsing
     the file here: the point of the comparison is agreement with what the
     application will actually show, not with a second implementation of it.
     """
     try:
-        from aoeviewer.session import Session
+        from visimu.session import Session
     except ImportError as exc:                          # pragma: no cover
         raise SystemExit(
-            "Could not import aoeviewer (%s).\n"
-            "Run this from a checkout where ../python/aoeviewer exists and "
+            "Could not import visimu (%s).\n"
+            "Run this from a checkout where ../python/visimu exists and "
             "the core library has been built, or set PYTHONPATH." % exc)
 
     runs = {}

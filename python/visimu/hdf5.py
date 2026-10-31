@@ -490,13 +490,13 @@ def _layout_cache_path(source: str) -> Optional[str]:
     elif os.name == "nt":
         fallback = os.path.join(
             os.environ.get("LOCALAPPDATA")
-            or os.path.expanduser("~\\AppData\\Local"), "aoeviewer")
+            or os.path.expanduser("~\\AppData\\Local"), "visimu")
     elif sys.platform == "darwin":
-        fallback = os.path.expanduser("~/Library/Caches/aoeviewer")
+        fallback = os.path.expanduser("~/Library/Caches/visimu")
     else:
         fallback = os.path.join(
             os.environ.get("XDG_CACHE_HOME")
-            or os.path.expanduser("~/.cache"), "aoeviewer")
+            or os.path.expanduser("~/.cache"), "visimu")
 
     try:
         if not os.path.isdir(fallback):

@@ -1,4 +1,4 @@
-# Optional CMake build for the aoeViewer core.
+# Optional CMake build for the visimu core.
 #
 # CMake is NOT required. The Makefile (Linux/macOS) and build.bat (Windows) are
 # the supported paths and need nothing but a compiler, which is what the target

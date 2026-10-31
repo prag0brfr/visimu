@@ -115,7 +115,7 @@ def main(path):
         print("cannot stat it: %s" % exc)
         return 1
 
-    from aoeviewer import hdf5
+    from visimu import hdf5
 
     print("\nphases")
     # Cold: no layout written down, so this is the real cost of working it out.
@@ -142,7 +142,7 @@ def main(path):
     _cached, cached_s = step("inspect, from the layout cache",
                              lambda: hdf5.inspect(path))
 
-    from aoeviewer import Session
+    from visimu import Session
 
     session = Session()
     handle, add_s = step("add_file (inspect + push)",

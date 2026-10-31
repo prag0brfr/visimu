@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 import numpy as np
 
-from aoeviewer import CoreError, Session
+from visimu import CoreError, Session
 from gen_sample import generate
 
 
@@ -104,7 +104,7 @@ class TestLoading(SampleFileMixin, unittest.TestCase):
 
     def test_swapping_studies_keeps_the_x_axis(self):
         """The reported sequence, end to end."""
-        from aoeviewer.model import AppState
+        from visimu.model import AppState
 
         self.session.set_alias("Angle of attack", "ALPHA")
         state = AppState()
@@ -328,6 +328,85 @@ class TestDecimation(SampleFileMixin, unittest.TestCase):
         self.assertIsNone(Session.bounds(np.array([np.nan], dtype=np.float32)))
 
 
+class TestAnIsoFilterOnAComputedChannel(SampleFileMixin, unittest.TestCase):
+    """A computed channel is not in any file's headers, and never will be.
+
+    The pushed path -- HDF5, where the ISO value is read out of the file
+    rather than through the core's index -- answered NaN for any name it could
+    not find among the stored headers. NaN means "this run has no value", so
+    an ISO filter on a computed channel admitted no run at all, while the ISO
+    tab listed the values quite correctly because those come from the core. A
+    filter that offers 1 and then hides everything holding 1.
+    """
+
+    def computed(self):
+        self.session.set_computed("CONST1", "max(ALT) / max(ALT)")
+        return "CONST1"
+
+    def as_pushed(self):
+        """Make file 0 look like an HDF5 file that stores only two channels."""
+        class _Layout:
+            run_keys = ["R{0}".format(i) for i in range(self.sims)]
+
+        self.session._pushed_plans[0] = ("/nowhere.h5", _Layout(),
+                                         ["TIME", "ALT"])
+
+    def test_the_core_answers_for_a_file_it_parsed_itself(self):
+        """The case that always worked, and the definition of the right
+        answer: element zero of the computed channel, per run."""
+        name = self.computed()
+        values = self.session.iso_values(0, name)
+        self.assertEqual(len(values), self.sims)
+        self.assertTrue(all(v == 1.0 for v in values), list(values))
+
+    def test_a_pushed_file_answers_the_same(self):
+        name = self.computed()
+        self.as_pushed()
+        values = self.session.iso_values(0, name)
+        self.assertEqual(len(values), self.sims)
+        self.assertTrue(all(v == 1.0 for v in values), list(values))
+
+    def test_a_name_nothing_knows_is_still_nothing(self):
+        """The NaN answer is right for a name that is neither stored nor
+        computed: the filter then has nothing to say about this file."""
+        self.as_pushed()
+        values = self.session.iso_values(0, "NOSUCHCHANNEL")
+        self.assertEqual(len(values), self.sims)
+        self.assertTrue(all(v != v for v in values), list(values))
+
+    def test_the_runs_are_admitted_by_the_filter(self):
+        """End to end, which is what the user sees: tick the one value the
+        channel holds and every run stays on the plot."""
+        from visimu.model import AppState, IsoState
+
+        name = self.computed()
+        self.as_pushed()
+
+        state = AppState()
+        for index in range(self.sims):
+            state.set_selected(0, index, True)
+        iso = IsoState(param=name, active=True)
+        iso.value_enabled[float(self.session.iso_distinct(name)[0])] = True
+        state.iso_states[name] = iso
+
+        state.resolve_iso_filters([(0, self.sims)], self.session.iso_values)
+
+        self.assertEqual(sorted(state.plotted_sims()),
+                         [(0, index) for index in range(self.sims)])
+        self.assertEqual(state.iso_inapplicable_params(), set())
+
+    def test_a_redefinition_is_not_served_from_the_cache(self):
+        """The values are computed from the formula, so the same name given a
+        different formula means different values."""
+        name = self.computed()
+        self.as_pushed()
+        self.assertTrue(all(v == 1.0 for v in self.session.iso_values(0, name)))
+
+        self.session.set_computed(name, "max(ALT) / max(ALT) + 1")
+        self.assertTrue(all(v == 2.0 for v in self.session.iso_values(0, name)),
+                        list(self.session.iso_values(0, name)))
+
+
 class TestIso(SampleFileMixin, unittest.TestCase):
     def test_distinct_values(self):
         values = self.session.iso_distinct("MACH")
@@ -380,7 +459,7 @@ class TestModel(unittest.TestCase):
     """The state model, which has no dependency on Qt or the core."""
 
     def test_workspace_round_trip(self):
-        from aoeviewer.model import AppState, load_workspace, save_workspace
+        from visimu.model import AppState, load_workspace, save_workspace
 
         state = AppState()
         state.page.rows, state.page.cols = 2, 2
@@ -409,7 +488,7 @@ class TestModel(unittest.TestCase):
             os.remove(path)
 
     def test_drop_file_remaps_selection(self):
-        from aoeviewer.model import AppState
+        from visimu.model import AppState
 
         state = AppState()
         state.set_selected(0, 1, True)
@@ -422,7 +501,7 @@ class TestModel(unittest.TestCase):
         self.assertEqual(state.selected_sims, {(0, 1), (1, 3)})
 
     def test_styles_are_sticky(self):
-        from aoeviewer.model import StyleRegistry
+        from visimu.model import StyleRegistry
 
         styles = StyleRegistry()
         first = styles.color_for("sim::a")
@@ -440,24 +519,24 @@ class TestTileTitle(unittest.TestCase):
     """The 'PARAM = f(X)' heading each tile shows."""
 
     def _tile(self, x="", ys=()):
-        from aoeviewer.model import TileState
+        from visimu.model import TileState
         t = TileState()
         t.x_param = x
         t.y_params = list(ys)
         return t
 
     def test_single_parameter(self):
-        from aoeviewer.model import tile_title
+        from visimu.model import tile_title
         self.assertEqual(tile_title(self._tile("TIME", ["ALPHA"])), "ALPHA = f(TIME)")
 
     def test_several_parameters(self):
-        from aoeviewer.model import tile_title
+        from visimu.model import tile_title
         self.assertEqual(
             tile_title(self._tile("TIME", ["ALPHA", "NZ"])), "ALPHA, NZ = f(TIME)"
         )
 
     def test_long_lists_wrap_instead_of_truncating(self):
-        from aoeviewer.model import tile_title
+        from visimu.model import tile_title
         title = tile_title(self._tile("TIME", ["A", "B", "C", "D", "E", "F"]))
         self.assertIn("\n", title)
         self.assertIn("A", title)
@@ -466,7 +545,7 @@ class TestTileTitle(unittest.TestCase):
         self.assertNotIn("more", title)
 
     def test_nothing_plotted_reads_sensibly(self):
-        from aoeviewer.model import tile_title
+        from visimu.model import tile_title
         # Never "= f()", which looks like a bug rather than an empty tile.
         self.assertEqual(tile_title(self._tile()), "empty tile")
         self.assertNotIn("= f()", tile_title(self._tile("TIME", [])))
@@ -474,7 +553,7 @@ class TestTileTitle(unittest.TestCase):
         self.assertIn("no x axis", tile_title(self._tile("", ["ALPHA"])))
 
     def test_y_axis_label(self):
-        from aoeviewer.model import y_axis_label
+        from visimu.model import y_axis_label
         self.assertEqual(y_axis_label(self._tile("TIME", [])), "")
         self.assertEqual(y_axis_label(self._tile("TIME", ["A", "B"])), "A, B")
         self.assertTrue(y_axis_label(self._tile("TIME", ["A", "B", "C", "D"])).endswith("..."))
@@ -484,7 +563,7 @@ class TestTileArrangement(unittest.TestCase):
     """Moving, copying and clearing tiles."""
 
     def _state(self, rows=2, cols=3):
-        from aoeviewer.model import AppState
+        from visimu.model import AppState
         state = AppState()
         state.page.rows, state.page.cols = rows, cols
         for i in range(state.page.tile_count):
@@ -553,7 +632,7 @@ class TestTileArrangement(unittest.TestCase):
 
 class TestPages(unittest.TestCase):
     def test_rename(self):
-        from aoeviewer.model import AppState
+        from visimu.model import AppState
         state = AppState()
         state.rename_page(0, "  Speed Plots  ")
         self.assertEqual(state.pages[0].name, "Speed Plots")
@@ -562,7 +641,7 @@ class TestPages(unittest.TestCase):
         self.assertEqual(state.pages[0].name, "Speed Plots")
 
     def test_reorder(self):
-        from aoeviewer.model import AppState
+        from visimu.model import AppState
         state = AppState()
         state.rename_page(0, "First")
         state.add_page()
@@ -577,7 +656,7 @@ class TestPages(unittest.TestCase):
         self.assertEqual(state.move_page(1, 5), 1)
 
     def test_name_survives_a_workspace_round_trip(self):
-        from aoeviewer.model import AppState, load_workspace, save_workspace
+        from visimu.model import AppState, load_workspace, save_workspace
         state = AppState()
         state.rename_page(0, "Engine parameters")
         state.tile.legend_position = "bottom-right"
@@ -596,7 +675,7 @@ class TestPages(unittest.TestCase):
 
 class TestStyleRegistry(unittest.TestCase):
     def test_keys_are_namespaced_per_mode(self):
-        from aoeviewer.model import StyleRegistry
+        from visimu.model import StyleRegistry
         styles = StyleRegistry()
         # A simulation and a parameter of the same name must not share a colour.
         a = styles.color_for("sim::run1")
@@ -604,7 +683,7 @@ class TestStyleRegistry(unittest.TestCase):
         self.assertNotEqual(a, b)
 
     def test_dash_symbol_and_width(self):
-        from aoeviewer.model import StyleRegistry
+        from visimu.model import StyleRegistry
         styles = StyleRegistry()
         styles.set_dash("sim::a", "dash")
         styles.set_symbol("sim::a", "o")
@@ -624,7 +703,7 @@ class TestStyleRegistry(unittest.TestCase):
         self.assertEqual(styles.width_for("sim::a"), 2.5)
 
     def test_styles_survive_round_trip(self):
-        from aoeviewer.model import StyleRegistry
+        from visimu.model import StyleRegistry
         styles = StyleRegistry()
         styles.set_color("iso::MACH::0.75", "#123456")
         styles.set_symbol("iso::MACH::0.75", "s")
@@ -638,7 +717,7 @@ class TestAnnotations(unittest.TestCase):
     """Shaded areas and vertical lines are global, keyed by x parameter."""
 
     def test_round_trip(self):
-        from aoeviewer.model import AppState, AreaBand, Marker, load_workspace, save_workspace
+        from visimu.model import AppState, AreaBand, Marker, load_workspace, save_workspace
 
         state = AppState()
         state.areas.append(AreaBand(x_param="TIME", x_min=2.0, x_max=5.0,
@@ -672,7 +751,7 @@ class TestScaleLocking(unittest.TestCase):
     """Axis locking, and applying a range across tiles sharing a variable."""
 
     def _state(self):
-        from aoeviewer.model import AppState
+        from visimu.model import AppState
         state = AppState()
         state.page.rows, state.page.cols = 2, 2
         for index, (x, ys) in enumerate(
@@ -683,7 +762,7 @@ class TestScaleLocking(unittest.TestCase):
         return state
 
     def test_lock_values_round_trip(self):
-        from aoeviewer.model import AppState, load_workspace, save_workspace
+        from visimu.model import AppState, load_workspace, save_workspace
         state = AppState()
         tile = state.tile
         tile.lock_x = True
@@ -937,7 +1016,7 @@ class TestRenaming(SampleFileMixin, unittest.TestCase):
 
 class TestMouseModeState(unittest.TestCase):
     def test_round_trip(self):
-        from aoeviewer.model import AppState, MouseMode, load_workspace, save_workspace
+        from visimu.model import AppState, MouseMode, load_workspace, save_workspace
 
         state = AppState()
         self.assertEqual(state.mouse_mode, MouseMode.SELECT)
@@ -956,7 +1035,7 @@ class TestMouseModeState(unittest.TestCase):
 
 class TestMultiIsoState(unittest.TestCase):
     def test_active_filters_are_listed_in_order(self):
-        from aoeviewer.model import AppState
+        from visimu.model import AppState
 
         state = AppState()
         state.iso_state("MACH").active = True
@@ -967,7 +1046,7 @@ class TestMultiIsoState(unittest.TestCase):
         self.assertEqual(names, ["ALT", "MACH"])
 
     def test_iso_state_creates_on_demand(self):
-        from aoeviewer.model import AppState
+        from visimu.model import AppState
 
         state = AppState()
         iso = state.iso_state("MACH")
@@ -982,14 +1061,14 @@ class TestMarkerModel(unittest.TestCase):
         # behind it, and editing one rebuilt the tile and deleted the item being
         # edited. Text notes do captions properly. What is left is the condition
         # the marker states, which is what the list needs to show.
-        from aoeviewer.model import Marker
+        from visimu.model import Marker
 
         marker = Marker(x_param="TIME", position=5.0)
         self.assertEqual(marker.describe(), "TIME = 5")
         self.assertFalse(hasattr(marker, "label"))
 
     def test_round_trip_keeps_the_dot_size(self):
-        from aoeviewer.model import AppState, Marker, load_workspace, save_workspace
+        from visimu.model import AppState, Marker, load_workspace, save_workspace
 
         state = AppState()
         state.markers.append(Marker(x_param="TIME", position=5.0, dot_size=12.0))
@@ -1176,7 +1255,7 @@ class TestStridedArrays(unittest.TestCase):
 
     def test_a_contiguous_array_is_not_copied(self):
         """The zero-copy path must stay zero-copy: this is the hot loop."""
-        from aoeviewer.session import _c_floats
+        from visimu.session import _c_floats
 
         contiguous = np.ascontiguousarray(self.values)
         self.assertIs(_c_floats(contiguous), contiguous)
@@ -1238,7 +1317,7 @@ class TestPinnedViews(unittest.TestCase):
         self.assertTrue(np.array_equal(first, second))
 
     def test_a_view_carries_its_summary(self):
-        from aoeviewer._core import pin_of
+        from visimu._core import pin_of
 
         time = self.session.channel(0, 0, "TIME")
         pin = pin_of(time)
@@ -1310,7 +1389,7 @@ class TestNonMonotonicX(unittest.TestCase):
                                places=5)
 
     def test_a_sorted_channel_still_takes_the_fast_path(self):
-        from aoeviewer._core import pin_of
+        from visimu._core import pin_of
 
         time = self.session.channel(0, 0, "TIME")
         altitude = self.session.channel(0, 0, "ALTITUDE")
@@ -1395,7 +1474,7 @@ class TestLogScaleConversion(unittest.TestCase):
     """AOE-13: the view is in log units, the tile's range is in data units."""
 
     def test_a_round_trip_returns_the_original(self):
-        from aoeviewer import scales
+        from visimu import scales
 
         for value in (1.0, 10.0, 1000.0, 0.001, 7.25):
             view = scales.to_view(value, True)
@@ -1403,27 +1482,27 @@ class TestLogScaleConversion(unittest.TestCase):
             self.assertAlmostEqual(scales.from_view(view, True), value, places=4)
 
     def test_a_thousandfold_span_is_three_decades(self):
-        from aoeviewer import scales
+        from visimu import scales
 
         low, high = scales.range_to_view(1.0, 1000.0, True)
         self.assertAlmostEqual(low, 0.0)
         self.assertAlmostEqual(high, 3.0)
 
     def test_linear_mode_is_the_identity(self):
-        from aoeviewer import scales
+        from visimu import scales
 
         self.assertEqual(scales.to_view(-5.0, False), -5.0)
         self.assertEqual(scales.from_view(-5.0, False), -5.0)
         self.assertEqual(scales.range_to_view(-5.0, 5.0, False), (-5.0, 5.0))
 
     def test_non_positive_values_have_no_log(self):
-        from aoeviewer import scales
+        from visimu import scales
 
         self.assertIsNone(scales.to_view(0.0, True))
         self.assertIsNone(scales.to_view(-1.0, True))
 
     def test_a_channel_crossing_zero_is_framed_on_what_can_be_drawn(self):
-        from aoeviewer import scales
+        from visimu import scales
 
         framed = scales.range_to_view(-10.0, 100.0, True)
         self.assertIsNotNone(framed)
@@ -1432,12 +1511,12 @@ class TestLogScaleConversion(unittest.TestCase):
         self.assertLess(low, high)
 
     def test_an_entirely_negative_channel_cannot_be_framed(self):
-        from aoeviewer import scales
+        from visimu import scales
 
         self.assertIsNone(scales.range_to_view(-100.0, -1.0, True))
 
     def test_the_exponent_is_clamped(self):
-        from aoeviewer import scales
+        from visimu import scales
 
         self.assertTrue(math.isfinite(scales.from_view(1e9, True)))
 
@@ -1521,12 +1600,12 @@ class TestViewPersistence(unittest.TestCase):
     """A redraw must not throw away the user's zoom."""
 
     def test_a_new_tile_is_not_yet_framed(self):
-        from aoeviewer.model import TileState
+        from visimu.model import TileState
 
         self.assertFalse(TileState().view_initialised)
 
     def test_the_flag_survives_a_workspace_round_trip(self):
-        from aoeviewer.model import TileState
+        from visimu.model import TileState
 
         tile = TileState()
         tile.view_initialised = True
@@ -1536,7 +1615,7 @@ class TestViewPersistence(unittest.TestCase):
         self.assertEqual((restored.x_min, restored.x_max), (12.0, 34.0))
 
     def test_an_old_workspace_loads_without_the_flag(self):
-        from aoeviewer.model import TileState
+        from visimu.model import TileState
 
         data = TileState().to_dict()
         data.pop("view_initialised")
@@ -1550,7 +1629,7 @@ class TestLegendDefaults(unittest.TestCase):
     """A legend row per run, times fifty runs, is not a legend."""
 
     def test_only_the_parameter_is_shown_by_default(self):
-        from aoeviewer.model import TileState
+        from visimu.model import TileState
 
         tile = TileState()
         self.assertTrue(tile.legend_show_param)
@@ -1559,7 +1638,7 @@ class TestLegendDefaults(unittest.TestCase):
         self.assertFalse(tile.legend_show_iso)
 
     def test_an_old_workspace_keeps_what_it_asked_for(self):
-        from aoeviewer.model import TileState
+        from visimu.model import TileState
 
         restored = TileState.from_dict({"legend_show_file": True,
                                         "legend_show_sim": True})
@@ -1567,7 +1646,7 @@ class TestLegendDefaults(unittest.TestCase):
         self.assertTrue(restored.legend_show_sim)
 
     def test_the_withdrawn_style_option_still_loads(self):
-        from aoeviewer.model import TileState
+        from visimu.model import TileState
 
         restored = TileState.from_dict({"legend_show_style": True})
         self.assertTrue(restored.legend_show_style)
@@ -1577,7 +1656,7 @@ class TestParameterResolution(unittest.TestCase):
     """AOE-14: missing channels are settled once, not by a panel refresh."""
 
     def _state(self):
-        from aoeviewer.model import AppState
+        from visimu.model import AppState
 
         state = AppState()
         tile = state.tile
@@ -1633,7 +1712,7 @@ class TestParameterResolution(unittest.TestCase):
         self.assertFalse(state.dirty)
 
     def test_a_valid_tile_is_untouched(self):
-        from aoeviewer.model import AppState
+        from visimu.model import AppState
 
         state = AppState()
         state.tile.x_param = "TIME"
@@ -1652,7 +1731,7 @@ class TestTileDefaults(unittest.TestCase):
     """
 
     def _state(self):
-        from aoeviewer.model import AppState
+        from visimu.model import AppState
 
         return AppState()
 
@@ -1716,7 +1795,7 @@ class TestTileDefaults(unittest.TestCase):
             self.assertEqual(page.tiles[0].x_param, "TIME")
 
     def test_colour_by_iso_gets_a_parameter(self):
-        from aoeviewer.model import ColorMode
+        from visimu.model import ColorMode
 
         state = self._state()
         state.tile.y_params = ["ALPHA"]
@@ -1727,7 +1806,7 @@ class TestTileDefaults(unittest.TestCase):
         self.assertTrue(state.tile.color_iso_param)
 
     def test_a_configured_iso_parameter_is_preferred(self):
-        from aoeviewer.model import ColorMode
+        from visimu.model import ColorMode
 
         state = self._state()
         state.tile.y_params = ["ALPHA"]
@@ -1737,7 +1816,7 @@ class TestTileDefaults(unittest.TestCase):
         self.assertEqual(state.tile.color_iso_param, "MASS")
 
     def test_the_title_names_the_axis_once_the_default_is_applied(self):
-        from aoeviewer.model import tile_title
+        from visimu.model import tile_title
 
         state = self._state()
         state.tile.y_params = ["ALPHA"]
@@ -1763,7 +1842,7 @@ class TestThreeDGrid(unittest.TestCase):
     """
 
     def test_ticks_are_round_numbers(self):
-        from aoeviewer import projection
+        from visimu import projection
 
         self.assertEqual(projection.nice_ticks(0.0, 100.0, 5),
                          [0.0, 20.0, 40.0, 60.0, 80.0, 100.0])
@@ -1771,7 +1850,7 @@ class TestThreeDGrid(unittest.TestCase):
                          [0.0, 0.25, 0.5, 0.75, 1.0])
 
     def test_ticks_stay_inside_the_range(self):
-        from aoeviewer import projection
+        from visimu import projection
 
         for low, high in ((0.13, 0.87), (-45.0, 17.5), (1e4, 3.2e4),
                           (-1e-3, 4e-3), (999.4, 1000.6)):
@@ -1784,7 +1863,7 @@ class TestThreeDGrid(unittest.TestCase):
             self.assertLessEqual(len(steps), 1)
 
     def test_a_degenerate_axis_gets_no_scale(self):
-        from aoeviewer import projection
+        from visimu import projection
 
         # A constant channel. Inventing ticks for it would be a lie.
         self.assertEqual(projection.nice_ticks(5.0, 5.0), [])
@@ -1792,7 +1871,7 @@ class TestThreeDGrid(unittest.TestCase):
         self.assertEqual(projection.nice_ticks(float("nan"), 1.0), [])
 
     def test_labels_carry_the_precision_the_step_needs(self):
-        from aoeviewer import projection
+        from visimu import projection
 
         self.assertEqual(projection.format_tick(0.25, 0.25), "0.25")
         self.assertEqual(projection.format_tick(1500.0, 500.0), "1500")
@@ -1802,7 +1881,7 @@ class TestThreeDGrid(unittest.TestCase):
         self.assertIn("e", projection.format_tick(2.5e8, 1e8))
 
     def test_the_walls_are_always_behind_the_data(self):
-        from aoeviewer import projection
+        from visimu import projection
 
         # The wall must sit at lower depth than the opposite face, at every
         # rotation -- that is precisely what "behind" means for this
@@ -1828,7 +1907,7 @@ class TestThreeDGrid(unittest.TestCase):
                             azimuth, elevation, axis))
 
     def test_the_floor_is_below_when_looking_down(self):
-        from aoeviewer import projection
+        from visimu import projection
 
         _x, _y, z = projection.back_walls(45.0, 30.0)
         self.assertEqual(z, -0.5)
@@ -1837,7 +1916,7 @@ class TestThreeDGrid(unittest.TestCase):
         self.assertEqual(z, 0.5)
 
     def test_the_walls_swap_as_the_view_turns(self):
-        from aoeviewer import projection
+        from visimu import projection
 
         front = projection.back_walls(45.0, 25.0)
         behind = projection.back_walls(225.0, 25.0)
@@ -1845,7 +1924,7 @@ class TestThreeDGrid(unittest.TestCase):
         self.assertEqual(front[1], -behind[1])
 
     def test_every_segment_lies_on_a_wall(self):
-        from aoeviewer import projection
+        from visimu import projection
 
         fractions = [-0.5, -0.25, 0.0, 0.25, 0.5]
         walls = projection.back_walls(35.0, 20.0)
@@ -1868,7 +1947,7 @@ class TestThreeDGrid(unittest.TestCase):
             self.assertTrue(on_a_wall, (start, end))
 
     def test_the_grid_has_lines_in_both_directions_on_each_wall(self):
-        from aoeviewer import projection
+        from visimu import projection
 
         fractions = [-0.5, 0.0, 0.5]
         segments = projection.wall_grid_segments(
@@ -1877,7 +1956,7 @@ class TestThreeDGrid(unittest.TestCase):
         self.assertEqual(len(segments), 3 * 2 * 3)
 
     def test_tick_labels_sit_just_outside_the_box(self):
-        from aoeviewer import projection
+        from visimu import projection
 
         fractions = [-0.5, 0.0, 0.5]
         anchors = projection.tick_anchors(45.0, 25.0, fractions, fractions,
@@ -1892,7 +1971,7 @@ class TestThreeDGrid(unittest.TestCase):
                 self.assertEqual(outside, 2, (axis, point))
 
     def test_a_value_maps_to_the_same_fraction_as_the_array_form(self):
-        from aoeviewer import projection
+        from visimu import projection
 
         bounds = (100.0, 900.0)
         for value in (100.0, 300.0, 900.0):
@@ -1902,13 +1981,13 @@ class TestThreeDGrid(unittest.TestCase):
                 places=12)
 
     def test_a_degenerate_axis_maps_to_the_middle(self):
-        from aoeviewer import projection
+        from visimu import projection
 
         self.assertEqual(projection.to_fraction(5.0, (5.0, 5.0)), 0.0)
         self.assertEqual(projection.to_fraction(5.0, None), 0.0)
 
     def test_the_option_survives_a_workspace_round_trip(self):
-        from aoeviewer.model import TileState
+        from visimu.model import TileState
 
         tile = TileState()
         self.assertTrue(tile.show_3d_grid)   # on by default
@@ -1916,7 +1995,7 @@ class TestThreeDGrid(unittest.TestCase):
         self.assertFalse(TileState.from_dict(tile.to_dict()).show_3d_grid)
 
     def test_an_older_workspace_gets_the_grid(self):
-        from aoeviewer.model import TileState
+        from visimu.model import TileState
 
         data = TileState().to_dict()
         data.pop("show_3d_grid")
@@ -1991,7 +2070,7 @@ class TestManyRunsScaling(unittest.TestCase):
 
     def _grouped(self, color_mode):
         """Curves grouped by pen, the way the tile draws them."""
-        from aoeviewer.model import AppState
+        from visimu.model import AppState
 
         state = AppState()
         state.tile.color_mode = color_mode
@@ -2007,7 +2086,7 @@ class TestManyRunsScaling(unittest.TestCase):
         return groups
 
     def test_curves_collapse_to_a_handful_of_pens(self):
-        from aoeviewer.model import ColorMode, PALETTE
+        from visimu.model import ColorMode, PALETTE
 
         by_sim = self._grouped(ColorMode.SIMULATION)
         drawn = self.runs * 2
@@ -2016,7 +2095,7 @@ class TestManyRunsScaling(unittest.TestCase):
         self.assertLess(len(by_sim), drawn // 4)
 
     def test_colouring_by_parameter_gives_one_pen_per_parameter(self):
-        from aoeviewer.model import ColorMode
+        from visimu.model import ColorMode
 
         by_param = self._grouped(ColorMode.PARAMETER)
         self.assertEqual(len(by_param), 2)
@@ -2216,7 +2295,7 @@ class TestUiScale(unittest.TestCase):
     """
 
     def setUp(self):
-        from aoeviewer import theme
+        from visimu import theme
 
         self.theme = theme
         # Restored to the default rather than to 1.0: this is a module global,
@@ -2240,7 +2319,7 @@ class TestUiScale(unittest.TestCase):
         another -- and the first Save would write a size that was never on
         screen.
         """
-        from aoeviewer.model import AppState
+        from visimu.model import AppState
 
         self.assertEqual(self.theme.UI_SCALE_DEFAULT, 0.90)
         self.assertEqual(AppState().ui_scale, self.theme.UI_SCALE_DEFAULT)
@@ -2274,14 +2353,14 @@ class TestUiScale(unittest.TestCase):
         """
         import subprocess
 
-        code = ("import sys; import aoeviewer.model; "
+        code = ("import sys; import visimu.model; "
                 "sys.exit(1 if 'PySide6' in sys.modules else 0)")
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         environment = dict(os.environ)
         environment["PYTHONPATH"] = (os.path.join(root, "python") + os.pathsep
                                      + environment.get("PYTHONPATH", ""))
         result = subprocess.call([sys.executable, "-c", code], env=environment)
-        self.assertEqual(result, 0, "importing aoeviewer.model pulled in Qt")
+        self.assertEqual(result, 0, "importing visimu.model pulled in Qt")
 
     def test_it_scales_pixels_and_points(self):
         self.theme.set_ui_scale(1.4)
@@ -2331,7 +2410,7 @@ class TestUiScale(unittest.TestCase):
         self.assertAlmostEqual(self.theme.pt(self.theme.RAIL_FONT_PT), 7.8)
 
     def test_the_scale_is_saved_in_the_workspace(self):
-        from aoeviewer.model import AppState, load_workspace, save_workspace
+        from visimu.model import AppState, load_workspace, save_workspace
 
         state = AppState()
         state.ui_scale = 1.3
@@ -2348,7 +2427,7 @@ class TestUiScale(unittest.TestCase):
             os.remove(path)
 
     def test_a_workspace_without_it_opens_at_one(self):
-        from aoeviewer.model import AppState
+        from visimu.model import AppState
 
         state = AppState()
         state.load_dict({"dark_mode": True})

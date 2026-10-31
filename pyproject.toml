@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "aoeviewer"
+name = "visimu"
 version = "2.2.3"
 description = "Fast viewer for AOE simulation result files"
 readme = "README.md"
@@ -21,8 +21,8 @@ gui = ["PySide6-Essentials", "shiboken6", "pyqtgraph"]
 build = ["PyInstaller"]
 
 [project.scripts]
-aoeviewer = "aoeviewer.__main__:main"
+visimu = "visimu.__main__:main"
 
 [tool.setuptools]
 package-dir = { "" = "python" }
-packages = ["aoeviewer", "aoeviewer.ui"]
+packages = ["visimu", "visimu.ui"]

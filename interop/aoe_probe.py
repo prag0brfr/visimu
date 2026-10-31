@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Structural profiler for unknown result-file formats.
 
-The problem this solves: aoeViewer needs to read a proprietary format, but no
+The problem this solves: visimu needs to read a proprietary format, but no
 sample of that format may leave the site where it lives.  This script reads
 such a file locally and writes a report that describes its *structure* without
 ever reproducing its *content*.  The report is what travels.

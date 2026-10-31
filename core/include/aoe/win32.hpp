@@ -78,7 +78,7 @@
 // only if someone deliberately lowered the value, since the default above is
 // well clear of it.
 #if _WIN32_WINNT < 0x0600
-#error "aoeViewer needs _WIN32_WINNT >= 0x0600 (Vista): platform_thread.hpp uses SRWLOCK and SleepConditionVariableSRW."
+#error "visimu needs _WIN32_WINNT >= 0x0600 (Vista): platform_thread.hpp uses SRWLOCK and SleepConditionVariableSRW."
 #endif
 
 #endif  // _WIN32

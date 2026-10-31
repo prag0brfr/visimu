@@ -1,4 +1,4 @@
-# aoeViewer core - portable Makefile
+# visimu core - portable Makefile
 #
 # Deliberately does not require cmake: the target machine has only a compiler.
 # Works with GNU make on Linux/macOS and with mingw32-make.exe on Windows.

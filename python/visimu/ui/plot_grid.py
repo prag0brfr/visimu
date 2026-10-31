@@ -30,6 +30,7 @@ class PlotGrid(QWidget):
     legend_moved = Signal()
     text_moved = Signal()
     x_zoom_shared = Signal(float, float)
+    fit_all_requested = Signal()
 
     def __init__(self, session: Session, state: AppState, theme: Theme, parent=None):
         super().__init__(parent)
@@ -92,6 +93,7 @@ class PlotGrid(QWidget):
                 tile.legend_moved.connect(self.legend_moved.emit)
                 tile.text_moved.connect(self.text_moved.emit)
                 tile.x_zoom_shared.connect(self.x_zoom_shared.emit)
+                tile.fit_all_requested.connect(self.fit_all_requested.emit)
                 tile.apply_theme(self._theme)
                 self._layout.addWidget(tile, row, col)
                 self._tiles.append(tile)

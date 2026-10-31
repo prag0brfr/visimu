@@ -1,0 +1,29 @@
+# Line endings, decided by the repository rather than by each machine's git.
+#
+# Without this file the answer depends on whoever committed: a checkout made
+# on Windows holds CRLF, and a commit made from a shell with core.autocrlf
+# unset stores those CRLF bytes -- so the next diff reports every line of
+# every file as changed, and the real change is buried in it. That happened
+# once, which is why this file exists.
+#
+# text=auto: the repository always stores LF, whatever the working tree holds.
+# The working tree keeps the platform's own convention, so Windows checkouts
+# are CRLF as before and nothing on anybody's disk has to change.
+* text=auto
+
+# The two files whose line endings are not a convention but a requirement.
+# build.sh is read by /bin/sh, which fails on the first compound statement if
+# the lines end in CR -- reporting a syntax error in code that is correct.
+# A .bat is read by cmd.exe, which wants CRLF.
+*.sh text eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Never touched: a converted byte in any of these corrupts the file.
+*.png binary
+*.ico binary
+*.pdf binary
+*.aoe binary
+*.aoec binary
+*.hdf5 binary
+*.h5 binary

@@ -1,6 +1,6 @@
 # Third-party notices
 
-aoeViewer was written by Paulo R. A. Gilz and is not released under any
+visimu was written by Paulo R. A. Gilz and is not released under any
 licence. This file is about the *other* people's code it depends on, which is a
 separate question with separate obligations.
 
@@ -17,7 +17,7 @@ by *distribution* — handing the built application to someone else.
 
 **Distributing the frozen executable is different.** PyInstaller does not link
 against these libraries so much as pack them inside the file it produces, so
-sending someone `aoeviewer.exe` sends them a copy of Qt, NumPy and pyqtgraph as
+sending someone `visimu.exe` sends them a copy of Qt, NumPy and pyqtgraph as
 well. Their licences travel with them.
 
 The one that matters is Qt.
@@ -57,7 +57,7 @@ executable you distribute is **LGPL v3**, and LGPL v3 asks three things of you:
 On point 3, the two build modes are not equivalent:
 
 - **The folder build** (`python packaging/build_exe.py`, the default) puts the
-  Qt DLLs in `dist/aoeviewer/` as ordinary files. A recipient can replace them
+  Qt DLLs in `dist/visimu/` as ordinary files. A recipient can replace them
   in place. This is the straightforward option, and it is the default for
   reasons of startup time as well.
 - **The single-file build** (`--onefile`) packs everything into one executable

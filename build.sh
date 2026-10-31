@@ -1,20 +1,32 @@
 #!/bin/sh
 # Author: Paulo R. A. Gilz
 #
-# Build the aoeViewer core on Linux and macOS. The counterpart of build.bat.
+# Build the visimu core on Linux and macOS. The counterpart of build.bat.
 #
 # Neither CMake nor make is required -- only a C++17 compiler. There is a
 # Makefile too, and it is the better choice for repeated builds because it
 # tracks header dependencies and recompiles only what changed. This script
 # exists for the first build on a machine that has a compiler and not much
 # else, and so that a clone has an obvious thing to run on either platform.
-# Application 2.3.0; these commands are unchanged.
+# Application 2.4.0; these commands are unchanged.
 #
-#   ./build.sh            build the core shared library into build/
-#   ./build.sh test       build and run the C++ self-tests
-#   ./build.sh bench      build and run the parser benchmark
-#   ./build.sh pytest     run the Python tests
-#   ./build.sh clean      delete build output
+#   ./build.sh            build the core AND the standalone single-file binary
+#   ./build.sh exe-folder  the same, as a folder instead of one file
+#   ./build.sh core        build only the core shared library into build/
+#   ./build.sh test        build and run the C++ self-tests
+#   ./build.sh bench       build and run the parser benchmark
+#   ./build.sh pytest      run the Python tests
+#   ./build.sh clean       delete build output
+#
+# With no argument this does the whole job, because that is the job: the
+# executable embeds the Python front end but loads the core library, so the
+# core has to be built first and building one without the other ships
+# yesterday's core inside today's bundle. `core` is there for the times you
+# only want the library -- to run the C++ tests against, say -- since
+# packaging takes a minute against a couple of seconds for the core.
+#
+# Anything after the command is passed to packaging/build_exe.py, so
+# `./build.sh exe --clean` works.
 #
 # The compiler is found on PATH. One that is not can be named with AOE_CXX:
 #
@@ -95,6 +107,12 @@ SOURCES="core/src/mapped_file.cpp \
 
 PYTHON="${PYTHON:-python3}"
 
+# Whether this run packages the executable, and how. On by default -- see the
+# commands below -- and anything left in "$@" after the command is handed to
+# build_exe.py.
+BUILD_EXE=1
+EXE_ARGS="--onefile"
+
 mkdir -p "$BUILD"
 
 # ------------------------------------------------------------------ tasks
@@ -129,9 +147,32 @@ case "${1:-all}" in
         # a missing library rather than a missing build.
         if [ ! -f "$BUILD/$LIBNAME" ]; then
             echo "The core is not built yet; building it first."
-            "$0"
+            # `core`, not a bare run: the tests need the library, not a
+            # packaged executable, and packaging one would take a minute.
+            "$0" core
         fi
         exec "$PYTHON" -m unittest discover -s tests -v
+        ;;
+
+    exe|onefile|--onefile)
+        # The default, named explicitly.
+        shift || true
+        ;;
+
+    exe-folder|exedir|folder)
+        EXE_ARGS=""
+        shift || true
+        ;;
+
+    core|lib|dll|so)
+        BUILD_EXE=0
+        shift || true
+        ;;
+
+    -*)
+        # A flag and no command word, now that the default is the whole job:
+        # "./build.sh --clean" means build everything and hand --clean to the
+        # packaging step. Not shifted, so it travels in "$@" below.
         ;;
 
     all|"")
@@ -139,7 +180,10 @@ case "${1:-all}" in
 
     *)
         echo "[ERROR] Unknown command '$1'." >&2
-        echo "        Use: build.sh [ test | bench | pytest | clean ]" >&2
+        echo "        Use: build.sh [ exe-folder | core | test | bench |" >&2
+        echo "                       pytest | clean ]" >&2
+        echo "        With no argument it builds the core and the" >&2
+        echo "        single-file executable." >&2
         exit 1
         ;;
 esac
@@ -160,14 +204,34 @@ echo "Building $LIBNAME with $CXX ..."
 
 echo
 echo "Build successful: $BUILD/$LIBNAME"
+
+# ------------------------------------------------------------- packaging
+#
+# Only when asked, because this is the slow half: PyInstaller analyses every
+# import and writes tens of megabytes, which is a minute or more against a
+# couple of seconds for the core. Someone building the core to run the tests
+# should not pay for it.
+#
+# No `exec`: the core build above has to have happened first, and its exit
+# status is already checked by `set -e`.
+if [ "$BUILD_EXE" -eq 1 ]; then
+    echo
+    echo "Packaging the executable with $PYTHON ..."
+    # shellcheck disable=SC2086
+    "$PYTHON" packaging/build_exe.py $EXE_ARGS "$@"
+    echo
+    echo "Core and executable both built."
+    exit 0
+fi
+
+# Only the core-only path reaches here; the packaging one exits above.
 echo
-echo "Next:"
-echo "  PYTHONPATH=python $PYTHON -m aoeviewer    run from source"
+echo "The core only, as asked. Next:"
+echo "  PYTHONPATH=python $PYTHON -m visimu    run from source"
 echo "  ./build.sh test                           run the self-tests"
-echo "  $PYTHON packaging/build_exe.py            build the standalone binary (one folder)"
+echo "  ./build.sh                                core + the standalone binary"
+echo "  ./build.sh exe-folder                     the same, as a folder"
 echo
-echo "  Add --onefile for a single binary instead of a folder:"
-echo "    $PYTHON packaging/build_exe.py --onefile"
-echo "  It is one file to copy, but every launch unpacks ~60 MB to a temp"
-echo "  directory first, so it starts in seconds rather than instantly."
-echo "  Unless you specifically need one file, take the folder."
+echo "  One file is one thing to copy, but every launch unpacks ~60 MB to a"
+echo "  temp directory first, so it starts in seconds rather than instantly."
+echo "  Where that matters, take the folder."

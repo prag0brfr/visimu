@@ -1,5 +1,5 @@
 # Author: Paulo R. A. Gilz
-"""ctypes bindings for the aoeViewer C++ core.
+"""ctypes bindings for the visimu C++ core.
 
 The core is a plain C shared library, so this module needs nothing beyond the
 standard library plus NumPy. That is deliberate: on a locked-down machine you
@@ -54,12 +54,12 @@ def _candidate_dirs() -> List[str]:
     """Directories to search, most specific first.
 
     Order matters. A PyInstaller bundle puts the library in ``sys._MEIPASS``;
-    a source checkout has it in ``build/``. An explicit AOEVIEWER_CORE wins over
+    a source checkout has it in ``build/``. An explicit VISIMU_CORE wins over
     both so a developer can point at a debug build without reinstalling.
     """
     dirs: List[str] = []
 
-    override = os.environ.get("AOEVIEWER_CORE")
+    override = os.environ.get("VISIMU_CORE")
     if override:
         dirs.append(override if os.path.isdir(override) else os.path.dirname(override))
 
@@ -67,7 +67,7 @@ def _candidate_dirs() -> List[str]:
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
         dirs.append(meipass)
-        dirs.append(os.path.join(meipass, "aoeviewer"))
+        dirs.append(os.path.join(meipass, "visimu"))
     if getattr(sys, "frozen", False):
         dirs.append(os.path.dirname(sys.executable))
 
@@ -88,7 +88,7 @@ def _candidate_dirs() -> List[str]:
 
 def library_path() -> str:
     """Absolute path of the core library, or raise with somewhere to look."""
-    override = os.environ.get("AOEVIEWER_CORE")
+    override = os.environ.get("VISIMU_CORE")
     if override and os.path.isfile(override):
         return override
 
@@ -100,11 +100,11 @@ def library_path() -> str:
 
     searched = "\n  ".join(_candidate_dirs())
     raise CoreError(
-        "could not find the aoeViewer core library ({0}).\n"
+        "could not find the visimu core library ({0}).\n"
         "Build it first:\n"
         "    make            (Linux/macOS)\n"
         "    build.bat       (Windows)\n"
-        "or set AOEVIEWER_CORE to its location.\n"
+        "or set VISIMU_CORE to its location.\n"
         "Searched:\n  {1}".format(name, searched)
     )
 

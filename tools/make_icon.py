@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Author: Paulo R. A. Gilz
-"""Draw the application icon and write packaging/aoeviewer.ico.
+"""Draw the application icon and write packaging/visimu.ico.
 
     python tools/make_icon.py
 
@@ -221,9 +221,9 @@ def main(argv=None) -> int:
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ico", default=os.path.join(here, "packaging",
-                                                      "aoeviewer.ico"))
+                                                      "visimu.ico"))
     parser.add_argument("--png", default=os.path.join(here, "packaging",
-                                                      "aoeviewer.png"))
+                                                      "visimu.png"))
     args = parser.parse_args(argv)
 
     os.makedirs(os.path.dirname(args.ico), exist_ok=True)

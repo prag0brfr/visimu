@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.join(ROOT, "tools"))
 import numpy as np
 
 import h5py_stub
-from aoeviewer import cachebuild
+from visimu import cachebuild
 # The project's own sample writer, rather than a hand-rolled one: the .aoe
 # dialect has more to it than it looks (two *PARAMETRES spellings, optional
 # *ENTITY text, wrapped tables), and a test file the core cannot read would be
@@ -79,7 +79,7 @@ class BuildingOne(_Scratch):
     """The .aoe route, which the core reads itself."""
 
     def test_a_sidecar_is_written_and_used(self):
-        from aoeviewer import Session
+        from visimu import Session
 
         path = self.write_aoe()
         self.assertTrue(cachebuild.build_one(path))
@@ -91,7 +91,7 @@ class BuildingOne(_Scratch):
         self.assertTrue(session.cache_active(handle.index))
 
     def test_the_values_survive_the_round_trip(self):
-        from aoeviewer import Session
+        from visimu import Session
 
         path = self.write_aoe()
         plain = Session()
@@ -196,7 +196,7 @@ class BuildingAPushedFile(_Scratch):
         return path
 
     def test_every_column_is_fetched_and_the_sidecar_written(self):
-        from aoeviewer import Session
+        from visimu import Session
 
         path = self.write_hdf5()
         self.assertTrue(cachebuild.build_one(path))
@@ -253,7 +253,7 @@ class HowTheSubprocessIsStarted(unittest.TestCase):
 
     def test_a_checkout_runs_the_module(self):
         command = cachebuild.command_for(["/data/one.aoe"])
-        self.assertEqual(command[1:], ["-m", "aoeviewer",
+        self.assertEqual(command[1:], ["-m", "visimu",
                                        cachebuild.FLAG, "/data/one.aoe"])
 
     def test_a_frozen_build_re_executes_itself(self):
@@ -272,7 +272,7 @@ class HowTheSubprocessIsStarted(unittest.TestCase):
                                    "/data/one.aoe"])
 
     def test_the_flag_is_one_the_entry_point_accepts(self):
-        with open(os.path.join(ROOT, "python/aoeviewer/__main__.py")) as handle:
+        with open(os.path.join(ROOT, "python/visimu/__main__.py")) as handle:
             source = handle.read()
         self.assertIn(cachebuild.FLAG, source,
                       "the subprocess would be started with a flag "
@@ -311,7 +311,7 @@ class HowTheSubprocessIsStarted(unittest.TestCase):
         _process, seen = self._spawn_capturing(["/data/a.aoe"])
         package_parent = seen["kwargs"]["env"]["PYTHONPATH"].split(os.pathsep)[0]
         self.assertTrue(
-            os.path.isdir(os.path.join(package_parent, "aoeviewer")),
+            os.path.isdir(os.path.join(package_parent, "visimu")),
             "PYTHONPATH does not lead to the package: " + package_parent)
 
     def test_hdf5_locking_is_off_for_the_child(self):
@@ -358,7 +358,7 @@ class HowTheSubprocessIsStarted(unittest.TestCase):
         _process, seen = self._spawn_capturing(["/data/a.aoe"])
         self.assertIn("cwd", seen["kwargs"])
         self.assertTrue(os.path.isdir(os.path.join(seen["kwargs"]["cwd"],
-                                                   "aoeviewer")))
+                                                   "visimu")))
 
     def test_nothing_is_started_for_nothing(self):
         process, seen = self._spawn_capturing([])

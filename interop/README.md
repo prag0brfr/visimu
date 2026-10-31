@@ -1,11 +1,11 @@
 # interop — describing a format nobody may send you
 
-This folder is a self-contained toolkit for the situation where aoeViewer has
+This folder is a self-contained toolkit for the situation where visimu has
 to read a proprietary result format, but no sample of that format may leave the
 site where it lives.
 
 Nothing here is part of the application. One script imports
-`../python/aoeviewer` read-only, for one purpose (reading an `.aoe` file the way
+`../python/visimu` read-only, for one purpose (reading an `.aoe` file the way
 the app reads it). No application file, build script or test refers to this
 folder, and deleting it changes nothing about the app.
 
@@ -257,7 +257,7 @@ A reader is one function. It takes a path and returns
 {run_name: {channel_name: array_of_floats}}
 ```
 
-The `.aoe` side is read through `aoeviewer.Session`, not through a second
+The `.aoe` side is read through `visimu.Session`, not through a second
 parser, so what is being graded is agreement with what the application will
 actually display.
 

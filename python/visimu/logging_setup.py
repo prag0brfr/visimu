@@ -27,7 +27,7 @@ import threading
 import traceback
 from typing import Optional
 
-LOGGER_NAME = "aoeviewer"
+LOGGER_NAME = "visimu"
 _log_path: Optional[str] = None
 
 
@@ -39,7 +39,7 @@ def log_path() -> Optional[str]:
 def _choose_directory() -> str:
     candidates = []
 
-    override = os.environ.get("AOEVIEWER_LOG_DIR")
+    override = os.environ.get("VISIMU_LOG_DIR")
     if override:
         candidates.append(override)
 
@@ -49,7 +49,7 @@ def _choose_directory() -> str:
         here = os.path.dirname(os.path.abspath(__file__))
         candidates.append(os.path.abspath(os.path.join(here, "..", "..")))
 
-    candidates.append(os.path.join(os.path.expanduser("~"), ".aoeviewer"))
+    candidates.append(os.path.join(os.path.expanduser("~"), ".visimu"))
 
     for directory in candidates:
         try:
@@ -78,7 +78,7 @@ def setup(level: int = logging.INFO) -> Optional[str]:
     logger.setLevel(logging.DEBUG)
 
     directory = _choose_directory()
-    path = os.path.join(directory, "aoeviewer.log")
+    path = os.path.join(directory, "visimu.log")
 
     try:
         # Rotating, so a long-running session or a repeating error cannot fill
@@ -115,7 +115,7 @@ def _log_environment(logger: logging.Logger) -> None:
     from . import __version__
 
     logger.info("=" * 68)
-    logger.info("aoeViewer %s starting", __version__)
+    logger.info("visimu %s starting", __version__)
     logger.info("python   %s", sys.version.replace("\n", " "))
     logger.info("platform %s %s", platform.platform(), platform.machine())
 

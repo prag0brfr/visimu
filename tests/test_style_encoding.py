@@ -11,8 +11,8 @@ import unittest
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "python"))
 
-import aoeviewer
-from aoeviewer.model import (
+import visimu
+from visimu.model import (
     COLOR_MODE_LABELS,
     AppState,
     ColorMode,
@@ -134,7 +134,7 @@ class TestWorkspaceStyleFields(unittest.TestCase):
             # The schema is what a reader has to understand; app_version only
             # says which build wrote the file, so it tracks __version__ rather
             # than being pinned here.
-            self.assertEqual(data["app_version"], aoeviewer.__version__)
+            self.assertEqual(data["app_version"], visimu.__version__)
             restored = AppState()
             restored.load_dict(data)
             self.assertEqual(restored.tile.color_mode, ColorMode.PARAMETER)

@@ -36,6 +36,8 @@ from ..model import (
     load_workspace,
     save_workspace,
 )
+from ..diffconfig import Rule, ties
+from ..filediff import DiffError, Report, check_compatible, compare_files
 from ..session import CoreError, Session
 from ..theme import (
     UI_SCALE_MAX,
@@ -64,6 +66,8 @@ from .panels import (
     SyncPanel,
     TextPanel,
 )
+from .diff_report import DiffReportDialog
+from .help_dialog import HelpDialog
 from .plot_grid import PlotGrid
 from .plot_toolbar import PlotToolbar
 from .sidebar import TabKeyFilter, TabRail
@@ -189,6 +193,8 @@ class MainWindow(QMainWindow):
 
         # No "Open" action: Add Files in the Data tab and Load Workspace here
         # already cover it, and a third door onto the same thing is clutter.
+        add("New workspace", self.new_workspace, "new", "Ctrl+N",
+            "Start again with no pages, no tiles and no files")
         add("Load workspace", self.load_workspace_dialog, "open", "Ctrl+L",
             "Open a saved workspace, replacing what is loaded now")
         # Save and Save As are two buttons rather than one with a modifier,
@@ -202,6 +208,12 @@ class MainWindow(QMainWindow):
 
         self.toolbar.addSeparator()
 
+        export_caption = QLabel(" Export ")
+        export_caption.setObjectName("Hint")
+        export_caption.setToolTip(
+            "A picture of the page as it looks, or the numbers behind the "
+            "active tile at full resolution")
+        self.toolbar.addWidget(export_caption)
         add("Image", self.export_image, "image",
             tip="Save the active page as a PNG")
         add("CSV", self.export_csv, "table",
@@ -220,41 +232,9 @@ class MainWindow(QMainWindow):
         self.fit_action.triggered.connect(self.autoscale_all)
         self.addAction(self.fit_action)
 
-        # Interface. Its own group behind its own rule, and labelled, because
-        # these are the ones here that change nothing about the data or the
-        # view: what is left of the rule acts on the workspace or exports it,
-        # and these act on the window itself.
         self.toolbar.addSeparator()
-        size_caption = QLabel(" Interface ")
-        size_caption.setObjectName("Hint")
-        size_caption.setToolTip(
-            "The size of the text and the spacing around it, everywhere:\n"
-            "the tab rail, the panels, this bar, and the titles, axes and\n"
-            "legends on the plots")
-        self.toolbar.addWidget(size_caption)
-        self.shrink_action = add(
-            "Smaller", lambda: self.step_ui_scale(-1), "text-smaller",
-            "Ctrl+-", "Smaller text and tighter spacing everywhere")
-        self.grow_action = add(
-            "Larger", lambda: self.step_ui_scale(+1), "text-larger",
-            "Ctrl+=", "Larger text and roomier spacing everywhere")
-        self._update_scale_actions()
 
-        # The theme belongs with these rather than at the foot of the tab
-        # rail, where it used to be: it selects no panel, and the rail's
-        # height is the one thing a short screen is short of. Its icon shows
-        # what a press *gives* -- a sun while the dark theme is on -- which is
-        # the convention everywhere else this control appears.
-        self.theme_action = add("Theme", self.toggle_theme, tip="")
-        self._update_theme_action()
-
-        # Everything after this is pushed to the right edge, so the mouse modes
-        # read as their own group instead of trailing the file actions.
-        stretch = QWidget()
-        stretch.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self.toolbar.addWidget(stretch)
-
-        mode_caption = QLabel("Mouse ")
+        mode_caption = QLabel(" Mouse ")
         mode_caption.setObjectName("Hint")
         self.toolbar.addWidget(mode_caption)
 
@@ -285,7 +265,225 @@ class MainWindow(QMainWindow):
             self.mode_actions[mode] = action
         self.mode_actions[MouseMode.SELECT].setChecked(True)
 
+        # Everything after this is pushed to the right edge. The interface
+        # group goes there because it is the one group that changes nothing
+        # about the data or the view -- the others act on the workspace, export
+        # it, or decide what the mouse does -- and because the two size buttons
+        # are the ones reached for by eye rather than by habit: against the
+        # edge they are a fixed target instead of one that moves whenever a
+        # group to their left gains a button.
+        stretch = QWidget()
+        stretch.setSizePolicy(QSizePolicy.Policy.Expanding,
+                              QSizePolicy.Policy.Preferred)
+        self.toolbar.addWidget(stretch)
+
+        # Left of the interface group and behind its own rule, because it
+        # belongs to no group: it is about the window as a whole, and it is
+        # the only button on this bar that changes nothing at all. Against
+        # the right edge it is also where a hand goes looking for it.
+        self.help_action = add(
+            "Help", self.show_help, shortcut="F1",
+            tip="Every shortcut, and what each tab is for")
+
+        self.toolbar.addSeparator()
+        size_caption = QLabel(" Interface ")
+        size_caption.setObjectName("Hint")
+        size_caption.setToolTip(
+            "The theme, and the size of the text and the spacing around it\n"
+            "everywhere: the tab rail, the panels, this bar, and the titles,\n"
+            "axes and legends on the plots")
+        self.toolbar.addWidget(size_caption)
+
+        # The theme belongs with these rather than at the foot of the tab
+        # rail, where it used to be: it selects no panel, and the rail's
+        # height is the one thing a short screen is short of. Its icon shows
+        # what a press *gives* -- a sun while the dark theme is on -- which is
+        # the convention everywhere else this control appears.
+        self.theme_action = add("Theme", self.toggle_theme, tip="")
+        self._update_theme_action()
+
+        self.shrink_action = add(
+            "Smaller", lambda: self.step_ui_scale(-1), "text-smaller",
+            "Ctrl+-", "Smaller text and tighter spacing everywhere")
+        self.grow_action = add(
+            "Larger", lambda: self.step_ui_scale(+1), "text-larger",
+            "Ctrl+=", "Larger text and roomier spacing everywhere")
+        self._update_scale_actions()
+
         self._apply_toolbar_icons()
+
+    # ------------------------------------------ the file-to-file comparison
+
+    def run_file_diff(self) -> None:
+        """Compare two whole files against the thresholds, and report.
+
+        The order here is the order the specification asks for and each step
+        is a reason to stop: two files, a configuration, structural
+        compatibility, and only then the arithmetic. Every refusal is a
+        warning and a return -- a non-regression check that half-ran and
+        reported what it managed is worse than one that did not run.
+        """
+        state = self.state
+        file_a, file_b = state.diff_file_a, state.diff_file_b
+        if file_a < 0 or file_b < 0:
+            QMessageBox.warning(self, "Compare files",
+                                "Choose two files to compare.")
+            return
+        if file_a == file_b:
+            QMessageBox.warning(
+                self, "Compare files",
+                "File A and File B are the same file; there is nothing to "
+                "compare.")
+            return
+        handle_a = self.session.file(file_a)
+        handle_b = self.session.file(file_b)
+        if handle_a is None or handle_b is None:
+            QMessageBox.warning(self, "Compare files",
+                                "One of the two files is no longer loaded.")
+            return
+        if not state.diff_rules:
+            QMessageBox.warning(
+                self, "Compare files",
+                "Choose a threshold configuration first.")
+            return
+
+        rules = [Rule.from_dict(entry) for entry in state.diff_rules]
+        clashes = ties(rules)
+
+        runs_a = [(sim.index, sim.sim_id) for sim in handle_a.simulations]
+        runs_b = [(sim.index, sim.sim_id) for sim in handle_b.simulations]
+        try:
+            check_compatible([name for _index, name in runs_a],
+                             [name for _index, name in runs_b],
+                             handle_a.headers, handle_b.headers)
+        except DiffError as error:
+            QMessageBox.warning(self, "Compare files", str(error))
+            return
+
+        # Before the arithmetic, and deliberately: the pages this generates
+        # are read through the same DATA and ISO filters as every other page,
+        # and a run left unticked three tabs ago would come out blank. A
+        # comparison is about every run in the two files, so every run is
+        # ticked and every ISO value admitted first.
+        self._admit_everything()
+
+        self.setCursor(Qt.CursorShape.WaitCursor)
+        try:
+            report = compare_files(self.session.channel, file_a, file_b,
+                                   runs_a, runs_b, rules,
+                                   handle_a.name, handle_b.name)
+        except DiffError as error:
+            QMessageBox.warning(self, "Compare files", str(error))
+            return
+        finally:
+            self.unsetCursor()
+
+        if clashes:
+            report.warnings.extend(
+                "{0}: {1} share a threshold, so which has priority is "
+                "undefined".format(param, " and ".join(groups))
+                for param, groups in clashes[:12])
+
+        state.diff_report = report.to_dict()
+        state.dirty = True
+        # The previous comparison's pages are not left behind to be read as
+        # this one's.
+        state.clear_diff_pages()
+        self.refresh_all()
+        # After refresh_all, which does not touch the grid: removing pages can
+        # have moved the active one, and a page of another shape needs the
+        # grid laid out again.
+        self._on_pages_changed()
+        self.show_diff_report()
+
+    def _admit_everything(self) -> None:
+        """Tick every run and admit every ISO value.
+
+        What the specification asks for before a comparison, and the reason is
+        the filters are global: they are how someone narrows a page down to
+        the three runs they were looking at, and a generated DIFF page
+        inherits them like any other.
+        """
+        state = self.state
+        for index in range(self.session.file_count):
+            handle = self.session.file(index)
+            if handle is None:
+                continue
+            for sim in handle.simulations:
+                state.set_selected(index, sim.index, True)
+        for iso in state.iso_states.values():
+            for value in list(iso.value_enabled):
+                iso.value_enabled[value] = True
+            iso.groups = [(name, low, high, True)
+                          for name, low, high, _active in iso.groups]
+        self._resolve_iso_filters()
+
+    def show_diff_report(self) -> None:
+        """The report of the last comparison, in its own window.
+
+        One window, reused: two reports of the same two files side by side
+        would be two answers to one question. It is raised rather than rebuilt
+        when it is already open.
+        """
+        data = self.state.diff_report
+        if not data:
+            QMessageBox.information(
+                self, "Comparison report",
+                "No comparison has been run yet.")
+            return
+        report = Report.from_dict(data)
+        total = 0
+        handle = self.session.file(report.file_a)
+        if handle is not None:
+            total = handle.simulation_count
+
+        existing = getattr(self, "_diff_report_window", None)
+        if existing is not None:
+            existing.set_report(report, self.state.diff_group_colors, total)
+        else:
+            existing = DiffReportDialog(report, self.state.diff_group_colors,
+                                        total, self)
+            existing.plot_requested.connect(self.plot_diff_run)
+            self._diff_report_window = existing
+        existing.show()
+        existing.raise_()
+        existing.activateWindow()
+
+    def plot_diff_run(self, run_id: str) -> None:
+        """Generate the pages for one flagged run, on request.
+
+        Only ever from a line of the report: sixteen tiles a page over forty
+        flagged runs is not something to do on anybody's behalf.
+        """
+        data = self.state.diff_report
+        if not data:
+            return
+        report = Report.from_dict(data)
+        flags = [flag for flag in report.flags if flag.run_id == run_id]
+        if not flags:
+            return
+        pages = self.state.build_diff_pages(run_id, flags, report.file_a,
+                                            report.file_b)
+        if not pages:
+            return
+        self.refresh_all()
+        # The generated pages are 4x4 and whatever was on screen probably was
+        # not, and refresh_all() does not lay the grid out again -- so without
+        # this the sixteen tiles are drawn into the old shape and all but the
+        # first few are invisible.
+        self._on_pages_changed()
+        self.status_label.setText(
+            "{0}: {1} channel(s) on {2} page(s)".format(
+                run_id, len(flags), len(pages)))
+
+    def show_help(self) -> None:
+        """The shortcut and panel reference.
+
+        Modal, like the formula reference in COMPUTE: it is read and
+        dismissed, and a reference left open over the plots is in the way of
+        the thing it is describing.
+        """
+        HelpDialog(self).exec()
 
     def step_ui_scale(self, direction: int) -> None:
         """One step larger or smaller, and repaint everything that measures.
@@ -467,6 +665,8 @@ class MainWindow(QMainWindow):
         self.plot3d_panel.tile_changed.connect(self._on_tile_content_changed)
         self.compute_panel.parameters_changed.connect(self.refresh_all)
         self.diff_panel.tile_changed.connect(self._on_tile_content_changed)
+        self.diff_panel.run_file_diff.connect(self.run_file_diff)
+        self.diff_panel.show_report.connect(self.show_diff_report)
         self.iso_panel.filter_changed.connect(self._on_iso_filter)
         self.style_panel.style_changed.connect(self.refresh_plots)
         self.style_panel.legend_applied.connect(self._on_legend_applied)
@@ -491,6 +691,9 @@ class MainWindow(QMainWindow):
         self.grid.view_changed.connect(self.scale_panel.follow_view)
         self.grid.view_changed.connect(self._on_view_changed)
         self.grid.x_zoom_shared.connect(self._on_x_zoom_shared)
+        # A double right-click on any plot: fit them all. The same thing Fit
+        # and Ctrl+0 do, reached from where the eye already is.
+        self.grid.fit_all_requested.connect(self.autoscale_all)
         self.grid.point_inspected.connect(self._on_point_inspected)
         self.grid.slope_measured.connect(self._on_slope_measured)
         self.grid.annotation_moved.connect(self._on_annotation_moved)
@@ -1291,11 +1494,18 @@ class MainWindow(QMainWindow):
         self._show_panel(self.param_panel)
 
     def _show_panel(self, panel) -> None:
-        """Bring one panel to the front of the rail."""
+        """Bring one panel to the front of the rail, showing current data.
+
+        Through select_panel, which refreshes it. A panel that is not on
+        screen is left stale on purpose -- that is what makes changing page
+        quick -- so bringing one forward without refreshing it shows whatever
+        was true when it was last visible. Double-clicking a tile from any
+        other tab therefore opened PARAMS on the *previously* active tile's
+        channels, which is worse than not opening it at all.
+        """
         for index, (_name, widget) in enumerate(self._panels):
             if widget is panel:
-                self.rail.set_current(index)
-                self.panel_stack.setCurrentIndex(index)
+                self.select_panel(index)
                 return
 
     def _on_point_inspected(self, file_index: int, sim_index: int, x_value: float) -> None:
@@ -1550,10 +1760,10 @@ class MainWindow(QMainWindow):
         name = self._workspace_label()
         marker = "*" if self.state.dirty else ""
         if name:
-            self.setWindowTitle("{0}{1} — aoeViewer {2}".format(
+            self.setWindowTitle("{0}{1} — visimu {2}".format(
                 marker, name, __version__))
         else:
-            self.setWindowTitle("{0}Untitled workspace — aoeViewer {1}".format(
+            self.setWindowTitle("{0}Untitled workspace — visimu {1}".format(
                 marker, __version__))
 
     def _update_workspace_actions(self) -> None:
@@ -1586,7 +1796,7 @@ class MainWindow(QMainWindow):
         suggestion = self.state.workspace_path or ""
         path, _ = QFileDialog.getSaveFileName(
             self, title, suggestion,
-            "aoeViewer workspace (*.aoews);;All files (*)"
+            "visimu workspace (*.aoews);;All files (*)"
         )
         if not path:
             return ""
@@ -1712,6 +1922,72 @@ class MainWindow(QMainWindow):
             "Workspace saved to {0}{1}".format(path, detail))
         return True
 
+    def _may_discard_workspace(self, what: str) -> bool:
+        """Offer to save unsaved work. False means the user cancelled.
+
+        `dirty` alone, not `dirty and workspace_path`. Requiring a path meant
+        the prompt appeared only for work that had *already* been saved once
+        -- so an afternoon of pages, tiles and styles built from scratch, the
+        case with the most to lose, was the one case that went without asking.
+        save_workspace() falls back to a Save As when there is no path, so
+        answering Yes always leads somewhere.
+
+        Cancel means Cancel: the thing the user was doing does not happen.
+        That is why this returns a verdict rather than just saving -- New and
+        Load both have to be able to stop.
+        """
+        if not self.state.dirty:
+            return True
+        answer = QMessageBox.question(
+            self,
+            "Unsaved changes",
+            "Save the workspace before {0}?".format(what),
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No
+            | QMessageBox.StandardButton.Cancel,
+        )
+        if answer == QMessageBox.StandardButton.Cancel:
+            return False
+        if answer == QMessageBox.StandardButton.Yes:
+            self.save_workspace()
+            # A Save As that was itself cancelled leaves the work unsaved, and
+            # carrying on would throw away exactly what the user just tried to
+            # keep.
+            if self.state.dirty:
+                return False
+        return True
+
+    def new_workspace(self) -> None:
+        """Start again: no pages, no tiles, no files.
+
+        The files go too. A workspace names the files it was built over, so a
+        blank one names none -- and leaving a study open under an empty layout
+        is a half-state where DATA lists runs that no tile can be plotting.
+
+        What survives is what survives closing a study by hand: the computed
+        parameters and aliases defined in this session. They are the work set
+        up *around* the data rather than part of it, and throwing them away
+        because the layout was cleared would be the surprise.
+        """
+        if not self._may_discard_workspace("starting a new one"):
+            return
+
+        # A preload may be reading datasets that session.clear() is about to
+        # drop out from under it.
+        self.tasks.wait_for_idle()
+        self.session.clear()
+
+        self.state = AppState()
+        set_ui_scale(self.state.ui_scale)
+        self._update_scale_actions()
+        self.rail.set_order(self.state.panel_order)
+        self._rebind_state()
+        self._resolve_iso_filters()
+        self.refresh_all()
+        self._update_window_title()
+        self._update_workspace_actions()
+        self.status_label.setText("New workspace.")
+
     def save_workspace(self) -> None:
         """Save to the current workspace file, asking for one if there is none."""
         path = self.state.workspace_path or self._ask_workspace_path("Save workspace")
@@ -1731,8 +2007,12 @@ class MainWindow(QMainWindow):
         self._write_workspace(path)
 
     def load_workspace_dialog(self) -> None:
+        # Loading replaces everything, so it asks first for the same reason
+        # New and Close do.
+        if not self._may_discard_workspace("loading another"):
+            return
         path, _ = QFileDialog.getOpenFileName(
-            self, "Load workspace", "", "aoeViewer workspace (*.aoews);;All files (*)"
+            self, "Load workspace", "", "visimu workspace (*.aoews);;All files (*)"
         )
         if not path:
             return
@@ -1973,26 +2253,9 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------- close
 
     def closeEvent(self, event) -> None:
-        # `dirty` alone, not `dirty and workspace_path`. Requiring a path meant
-        # the prompt appeared only for work that had *already* been saved once
-        # -- so an afternoon of pages, tiles and styles built from scratch, the
-        # case with the most to lose, was the one case that closed without
-        # asking. save_workspace() falls back to a Save As when there is no
-        # path, so answering Yes still works from here.
-        if self.state.dirty:
-            answer = QMessageBox.question(
-                self,
-                "Unsaved changes",
-                "Save the workspace before closing?",
-                QMessageBox.StandardButton.Yes
-                | QMessageBox.StandardButton.No
-                | QMessageBox.StandardButton.Cancel,
-            )
-            if answer == QMessageBox.StandardButton.Cancel:
-                event.ignore()
-                return
-            if answer == QMessageBox.StandardButton.Yes:
-                self.save_workspace()
+        if not self._may_discard_workspace("closing"):
+            event.ignore()
+            return
 
         # A worker thread inside the core must finish before the session is
         # destroyed, or it writes into freed memory.

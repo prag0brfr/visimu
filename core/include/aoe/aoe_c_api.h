@@ -1,6 +1,6 @@
 /* Author: Paulo R. A. Gilz
  *
- * Stable C ABI for the aoeViewer core.
+ * Stable C ABI for the visimu core.
  *
  * Everything the Python front end needs crosses this boundary. It is plain C on
  * purpose: one shared library works with any CPython 3.x through ctypes, with no

@@ -320,6 +320,23 @@ def _draw_moon(painter: QPainter, color: QColor) -> None:
 # words.
 
 
+def _draw_new(painter: QPainter, color: QColor) -> None:
+    """A blank sheet with its corner turned: a new document, everywhere."""
+    painter.setPen(_pen(color, 8.0))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    sheet = QPainterPath()
+    sheet.moveTo(24, 10)
+    sheet.lineTo(58, 10)
+    sheet.lineTo(78, 30)
+    sheet.lineTo(78, 90)
+    sheet.lineTo(24, 90)
+    sheet.closeSubpath()
+    painter.drawPath(sheet)
+    # The fold, which is what stops it reading as a plain rectangle.
+    painter.drawLine(QPointF(58, 10), QPointF(58, 30))
+    painter.drawLine(QPointF(58, 30), QPointF(78, 30))
+
+
 def _draw_copy(painter: QPainter, color: QColor) -> None:
     """Two offset sheets, the back one peeking out behind the front."""
     painter.setPen(_pen(color, 8.0))
@@ -390,6 +407,7 @@ _PAINTERS: Dict[str, Callable[[QPainter, QColor], None]] = {
     "save-as": _draw_save_as,
     "image": _draw_image,
     "table": _draw_table,
+    "new": _draw_new,
     "fit": _draw_fit,
     "copy": _draw_copy,
     "cut": _draw_cut,

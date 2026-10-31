@@ -13,7 +13,7 @@ was asked of them and do nothing else. That is enough for the questions worth
 asking here, which are all of the form "given this state, does the code decide
 to do the expensive thing?" -- how Qt would then draw it is not in question.
 
-Import this module before ``aoeviewer.ui.plot_tile``; it installs itself into
+Import this module before ``visimu.ui.plot_tile``; it installs itself into
 sys.modules on import.
 """
 
@@ -112,6 +112,12 @@ class QWidget:
 
     def isEnabled(self):
         return self._enabled
+
+    def setVisible(self, visible):
+        self._visible = bool(visible)
+
+    def isVisible(self):
+        return bool(getattr(self, "_visible", True))
 
     def setFocusPolicy(self, policy):
         # Recorded: which widget may take the focus decides whether a key
@@ -568,9 +574,28 @@ class PlotWidget(QWidget):
     def __init__(self, *args, **kwargs):
         super().__init__()
         self._plot_item = PlotItem()
+        # Mouse events the tile hands back to Qt. Real methods rather than
+        # invented attributes, because super() looks through the class
+        # dictionaries and does not go through __getattr__ -- so a tile
+        # passing a press or a release on raised where the real widget does
+        # the work. Recorded, so a test can tell "handed back" from
+        # "swallowed".
+        self.events_passed_on = []
 
     def getPlotItem(self):
         return self._plot_item
+
+    def mousePressEvent(self, event):
+        self.events_passed_on.append(("press", event))
+
+    def mouseReleaseEvent(self, event):
+        self.events_passed_on.append(("release", event))
+
+    def mouseDoubleClickEvent(self, event):
+        self.events_passed_on.append(("double", event))
+
+    def wheelEvent(self, event):
+        self.events_passed_on.append(("wheel", event))
 
 
 class QComboBox:
@@ -615,6 +640,12 @@ class QComboBox:
 
     def count(self):
         return len(self._items)
+
+    def itemText(self, index):
+        return self._items[index][0] if 0 <= index < len(self._items) else ""
+
+    def itemData(self, index):
+        return self._items[index][1] if 0 <= index < len(self._items) else None
 
     # What a QVariant will and will not hand back intact. Anything else --
     # a tuple, a list, an object -- goes into item data and does not come out
@@ -854,10 +885,19 @@ class QFont:
 class QListWidgetItem:
     """A row of text with a check state, some data and a tooltip.
 
+    Unhashable, deliberately, because the real one is: Qt gives
+    QListWidgetItem comparison operators and no __hash__, so PySide6's wrapper
+    cannot go in a set or a dict. A stub that allowed it reported a panel as
+    working while set(widget.selectedItems()) raised TypeError on the user's
+    machine -- which is how the PARAMS move buttons shipped doing nothing.
+
     setText raises itemChanged in Qt exactly as a click on the checkbox does,
     which is the trap the ISO panel's badges have to avoid; the stub emits it
     for the same reason.
     """
+
+    # See the class docstring: not hashable, like the real one.
+    __hash__ = None
 
     def __init__(self, text=""):
         self._text = text
@@ -914,6 +954,30 @@ class QListWidgetItem:
         return self._data.get(role)
 
 
+class _Index:
+    """A QModelIndex, as far as anything here reads one."""
+
+    def __init__(self, row):
+        self._row = row
+
+    def row(self):
+        return self._row
+
+
+class _SelectionModel:
+    """What a view's selectionModel() answers: the selection, in rows.
+
+    Rows rather than items, which is the honest shape: Qt's selection lives
+    in the model and an item is only a convenience wrapper over a row.
+    """
+
+    def __init__(self, widget):
+        self._widget = widget
+
+    def selectedIndexes(self):
+        return [_Index(row) for row in self._widget.selected_rows()]
+
+
 class QListWidget:
     def __init__(self, *args, **kwargs):
         self._items = []
@@ -922,6 +986,30 @@ class QListWidget:
         self.updates_enabled = True
         self.itemChanged = _BoundSignal()
         self.currentRowChanged = _BoundSignal()
+
+    def row(self, item):
+        """Where an item sits, or -1. The real one resolves this in C++, so
+        it works whichever Python wrapper it is handed."""
+        for index, candidate in enumerate(self._items):
+            if candidate is item:
+                return index
+        return -1
+
+    def selected_rows(self):
+        """The rows selectedItems() names. Tests select by replacing
+        selectedItems; this keeps the two answers consistent."""
+        rows = []
+        for item in (self.selectedItems() or []):
+            row = self.row(item)
+            if row >= 0:
+                rows.append(row)
+        return rows
+
+    def selectionModel(self):
+        return _SelectionModel(self)
+
+    def selectedItems(self):
+        return []
 
     def addItem(self, item):
         if not isinstance(item, QListWidgetItem):
@@ -1102,12 +1190,20 @@ class QTreeWidgetItem:
 
 
 class QTreeWidget:
+    # Qt's own, named because the report sets its rows selectable whole.
+    class SelectionBehavior:
+        SelectItems = 0
+        SelectRows = 1
+
     def __init__(self, *args, **kwargs):
         self._items = []
         self._current = None
+        self._widgets = {}
         self.itemChanged = _BoundSignal()
         self.itemExpanded = _BoundSignal()
         self.itemCollapsed = _BoundSignal()
+        self.itemDoubleClicked = _BoundSignal()
+        self.itemClicked = _BoundSignal()
         self.customContextMenuRequested = _BoundSignal()
         self.updates_enabled = True
         self.signals_blocked = False
@@ -1130,6 +1226,22 @@ class QTreeWidget:
             item.tree = None
         self._items = []
         self._current = None
+        self._widgets = {}
+
+    # A real cell widget, because what a report row *reads* as lives in the
+    # widget and not in the item's text: a coloured group name is a label, and
+    # a per-line action is a button. An assertion against the item's text
+    # would pass while the window showed nothing.
+    def setItemWidget(self, item, column, widget):
+        self._widgets[(id(item), column)] = widget
+
+    def itemWidget(self, item, column):
+        return self._widgets.get((id(item), column))
+
+    def double_click(self, item, column=0):
+        """What Qt does when a row is double-clicked."""
+        self._current = item
+        self.itemDoubleClicked.emit(item, column)
 
     def setCurrentItem(self, item):
         self._current = item
@@ -1159,14 +1271,31 @@ class QLineEdit:
 
     def __init__(self, text="", *args, **kwargs):
         self._text = text
+        # Whether Qt's own clear button is on. Recorded, because "every text
+        # filter has one" is the behaviour being asked for and an invented
+        # answer would be truthy whether or not anyone had asked for it.
+        self.clear_button = False
         self.textChanged = _BoundSignal()
+        self.textEdited = _BoundSignal()
+
+    def setClearButtonEnabled(self, enabled):
+        self.clear_button = bool(enabled)
 
     def setText(self, text):
         self._text = text
         self.textChanged.emit(text)
 
+    def typed(self, text):
+        """What a keystroke does: both signals, textEdited first."""
+        self._text = text
+        self.textEdited.emit(text)
+        self.textChanged.emit(text)
+
     def text(self):
         return self._text
+
+    def cursorPosition(self):
+        return len(self._text)
 
     def __getattr__(self, name):
         if name.startswith("__"):
@@ -1205,6 +1334,21 @@ class QPushButton:
     def toolTip(self):
         return self._tip
 
+    # Real, because "the button is dead until there is something to press it
+    # for" is a thing the panels decide and a thing worth asserting. The
+    # placeholder answered every isEnabled() with something truthy.
+    def setEnabled(self, enabled):
+        self._enabled = bool(enabled)
+
+    def isEnabled(self):
+        return getattr(self, "_enabled", True)
+
+    def setVisible(self, visible):
+        self._visible = bool(visible)
+
+    def isVisible(self):
+        return getattr(self, "_visible", True)
+
     def __getattr__(self, name):
         if name.startswith("__"):
             raise AttributeError(name)
@@ -1216,12 +1360,25 @@ class QLabel:
 
     def __init__(self, text="", *args, **kwargs):
         self._text = text
+        self._visible = True
+        self.word_wrap = False
 
     def setText(self, text):
         self._text = text
 
     def text(self):
         return self._text
+
+    def setWordWrap(self, wrap):
+        self.word_wrap = bool(wrap)
+
+    # A hidden label is how a panel says "there is nothing to report here",
+    # and an assertion on its text cannot tell the difference.
+    def setVisible(self, visible):
+        self._visible = bool(visible)
+
+    def isVisible(self):
+        return bool(self._visible)
 
     def __getattr__(self, name):
         if name.startswith("__"):
@@ -1302,6 +1459,7 @@ def _make_qt():
     qt.FocusPolicy = _Enum(NoFocus=0, TabFocus=1, ClickFocus=2,
                            StrongFocus=11, WheelFocus=15)
     qt.ItemDataRole = _Enum(DisplayRole=0, UserRole=256, ToolTipRole=3)
+    qt.TextFormat = _Enum(PlainText=0, RichText=1, AutoText=2)
     # The modifier bits are Qt's own, because the tab shortcuts combine them
     # with `|` at class-definition time and test a key event against the mask.
     qt.KeyboardModifier = _Enum(NoModifier=0,
@@ -1607,8 +1765,85 @@ def install() -> None:
     class QSizePolicy(_Any):
         Policy = _Policy
 
+    # Scoped enums on the class, which the auto-module's placeholder cannot
+    # answer: the panels name them while building their lists.
+    class _AbstractItemView(_Any):
+        class SelectionMode:
+            NoSelection = 0
+            SingleSelection = 1
+            ExtendedSelection = 3
+
+        class SelectionBehavior:
+            SelectItems = 0
+            SelectRows = 1
+
+        class EditTrigger:
+            NoEditTriggers = 0
+
+    class QDialog(QWidget):
+        """Enough of a dialog to drive one: a title, and the two ways out.
+
+        Shown and closed rather than run: every dialog in this program is
+        non-modal, and a stub that blocked in exec() would hang the suite.
+        """
+
+        def __init__(self, parent=None, *args, **kwargs):
+            QWidget.__init__(self, parent)
+            self.accepted = _BoundSignal()
+            self.rejected = _BoundSignal()
+            self.finished = _BoundSignal()
+            self.result_code = None
+            self.title = ""
+            self.modal = False
+            self.shown = False
+
+        def setWindowTitle(self, title):
+            self.title = title
+
+        def windowTitle(self):
+            return self.title
+
+        def setModal(self, modal):
+            self.modal = bool(modal)
+
+        def isModal(self):
+            return self.modal
+
+        def show(self):
+            self.shown = True
+
+        def raise_(self):
+            pass
+
+        def activateWindow(self):
+            pass
+
+        def accept(self):
+            self.result_code = 1
+            self.shown = False
+            self.accepted.emit()
+            self.finished.emit(1)
+
+        def reject(self):
+            self.result_code = 0
+            self.shown = False
+            self.rejected.emit()
+            self.finished.emit(0)
+
+    widgets.QDialog = QDialog
+    # A scoped enum on the class, which the auto-module's placeholder cannot
+    # answer: the report names it to give its run column the window's width.
+    class QHeaderView(_Any):
+        class ResizeMode:
+            Interactive = 0
+            Stretch = 1
+            Fixed = 2
+            ResizeToContents = 3
+
+    widgets.QHeaderView = QHeaderView
     widgets.QSizePolicy = QSizePolicy
     widgets.QApplication = QApplication
+    widgets.QAbstractItemView = _AbstractItemView
     widgets.QAbstractButton = QAbstractButton
     widgets.QBoxLayout = QBoxLayout
     widgets.QVBoxLayout = QBoxLayout
@@ -1645,8 +1880,50 @@ def install() -> None:
     pg.ViewBox = ViewBox
     pg.GraphicsObject = type("GraphicsObject", (_Any,), {})
     pg.TextItem = type("TextItem", (_Any,), {})
-    pg.InfiniteLine = type("InfiniteLine", (_Any,), {})
-    pg.LinearRegionItem = type("LinearRegionItem", (_Any,), {})
+    # Draggable for real, because whether a drag reaches the model is the
+    # difference between an annotation that moves on every tile and one that
+    # moves only under the cursor. The signals are recorders, so a test can
+    # do what pyqtgraph does: move the item, then announce it.
+
+    class InfiniteLine(_Any):
+        sigPositionChangeFinished = Signal(object)
+
+        def __init__(self, *args, **kwargs):
+            _Any.__init__(self, *args, **kwargs)
+            self.movable = bool(kwargs.get("movable", False))
+            self._value = float(kwargs.get("pos", 0.0) or 0.0)
+
+        def setMovable(self, movable):
+            self.movable = bool(movable)
+
+        def value(self):
+            return self._value
+
+        def drag_to(self, value):
+            """What pyqtgraph does when the user lets go of the line."""
+            self._value = float(value)
+            self.sigPositionChangeFinished.emit(self)
+
+    class LinearRegionItem(_Any):
+        sigRegionChangeFinished = Signal(object)
+
+        def __init__(self, *args, **kwargs):
+            _Any.__init__(self, *args, **kwargs)
+            self.movable = bool(kwargs.get("movable", False))
+            self._region = tuple(kwargs.get("values", (0.0, 1.0)))
+
+        def setMovable(self, movable):
+            self.movable = bool(movable)
+
+        def getRegion(self):
+            return self._region
+
+        def drag_to(self, low, high):
+            self._region = (float(low), float(high))
+            self.sigRegionChangeFinished.emit(self)
+
+    pg.InfiniteLine = InfiniteLine
+    pg.LinearRegionItem = LinearRegionItem
     pg.ScatterPlotItem = type("ScatterPlotItem", (_Any,), {})
     pg.mkPen = lambda *a, **k: _Any()
     pg.mkBrush = lambda *a, **k: _Any()

@@ -1,11 +1,11 @@
-% aoeViewer -- User and Reference Guide
+% visimu -- User and Reference Guide
 % Author: Paulo R. A. Gilz
 %
 % A single reference for the current version. Nothing here describes an
 % earlier one: where behaviour has changed, the text was rewritten rather than
 % appended to.
 %
-% Build:  pdflatex aoeViewer-2.3.0-User-and-Reference-Guide.tex   (three times,
+% Build:  pdflatex visimu-2.4.0-User-and-Reference-Guide.tex   (three times,
 %         so the table of contents and the cross-references settle)
 
 \documentclass[11pt,a4paper,oneside]{report}
@@ -30,7 +30,7 @@
 \usepackage[most]{tcolorbox}
 \usepackage{amsmath}
 \usepackage{fancyvrb}
-% Identifiers in this guide are long -- AOEVIEWER_CORE, sys._MEIPASS/aoeviewer,
+% Identifiers in this guide are long -- VISIMU_CORE, sys._MEIPASS/visimu,
 % aoe_channel_pinned -- and typewriter text does not hyphenate by default, so a
 % paragraph carrying two of them runs into the margin. htt lets them break.
 \usepackage[htt]{hyphenat}
@@ -42,17 +42,17 @@
 \definecolor{aoeshade}{HTML}{F4F6F8}
 
 \hypersetup{
-  pdftitle={aoeViewer 2.3.0 -- User and Reference Guide},
+  pdftitle={visimu 2.4.0 -- User and Reference Guide},
   pdfauthor={Paulo R. A. Gilz},
   pdfsubject={The interface, the algorithms, the file format, the C ABI and the scripting API},
   colorlinks=false,
 }
 
-\newcommand{\appver}{2.3.0}
+\newcommand{\appver}{2.4.0}
 
 \pagestyle{fancy}
 \fancyhf{}
-\fancyhead[L]{\footnotesize aoeViewer \appver{} --- User and Reference Guide}
+\fancyhead[L]{\footnotesize visimu \appver{} --- User and Reference Guide}
 \fancyhead[R]{\footnotesize\thepage}
 \renewcommand{\headrulewidth}{0.4pt}
 \renewcommand{\footrulewidth}{0pt}
@@ -99,7 +99,7 @@
 \vspace*{3cm}
 {\small\scshape\color{aoeaccent} A fast viewer for AOE simulation result files\par}
 \vspace{2.2cm}
-{\Huge\bfseries aoeViewer\par}
+{\Huge\bfseries visimu\par}
 \vspace{0.5cm}
 {\Large Version \appver\par}
 \vspace{2.4cm}
@@ -132,9 +132,9 @@ confusion. \textbf{The application is at \appver; the core library is at
 prints as the core version. The C ABI has not changed since then --- every
 change has been above the seam --- so the core has not needed a new number.
 
-\chapter{What aoeViewer is}
+\chapter{What visimu is}
 
-aoeViewer reads AOE simulation result files --- plain-text tables of many runs
+visimu reads AOE simulation result files --- plain-text tables of many runs
 against many channels, routinely hundreds of megabytes --- and plots them
 interactively. It is built as a C++17 core under a Python and Qt interface, and
 the seam between them is a plain C ABI, so the core is one shared library that
@@ -159,22 +159,22 @@ with a C foreign-function interface can drive equally well.
   The seam: an opaque-handle C ABI with a thread-local error string. Everything
   above this line is written without a C++ compiler. \\
 \addlinespace
-\code{python/aoeviewer/\_core.py} &
+\code{python/visimu/\_core.py} &
   Discovers and loads the shared library through \code{ctypes}, and wraps
   returned pointers in zero-copy NumPy views whose lifetime is pinned to the
   underlying block. \\
 \addlinespace
-\code{python/aoeviewer/session.py} &
+\code{python/visimu/session.py} &
   A Pythonic fa\c{c}ade --- \code{Session}, \code{FileHandle},
   \code{SimulationHandle}, \code{IsoGroup} --- which is also the public
   scripting API. \\
 \addlinespace
-\code{python/aoeviewer/model.py} &
+\code{python/visimu/model.py} &
   \code{AppState}: everything the core does not own. Pages, tiles, selections,
   ISO filter definitions, styles, annotations, scale constraints, and the
   workspace file format. Contains no Qt. \\
 \addlinespace
-\code{python/aoeviewer/ui/} &
+\code{python/visimu/ui/} &
   The Qt layer: the main window, the thirteen side panels, the plot grid and the
   plot tiles. \\
 \bottomrule
@@ -189,7 +189,7 @@ orthographic projection can all be tested headlessly, and are.
 
 \section{What the program does}
 
-Five ideas account for most of the interface.
+Six ideas account for most of the interface.
 
 \textbf{A page of tiles.} The plotting area is a grid of up to twenty-five
 independent tiles, arranged from $1 \times 1$ to $5 \times 5$, and there may be
@@ -223,6 +223,14 @@ which may come from different files and need not have been recorded at the same
 instants: the second is read at the first's instants by interpolation, over the
 stretch they have in common. See Section~\ref{sec:diff}.
 
+\textbf{Two whole files, checked against written-down thresholds.} The same
+question asked of everything at once: every run of one file against the run of
+the same name in another, every channel somebody wrote a threshold for, and a
+report of what moved further than it was allowed to. The thresholds live in a
+file of your own, the report lists one line per run, and the tiles it generates
+on request overlay both files with the crossings shaded. See
+Chapter~\ref{ch:compare}.
+
 \textbf{Drawing what the screen can show, exporting what the data says.} A tile
 with twenty-five runs of five hundred thousand samples does not hand two and a
 half million points to Qt. It asks the core for a min/max decimation of exactly
@@ -247,17 +255,26 @@ executable adds \code{PyInstaller}.
 \section{Building and running}
 
 \begin{aoecode}
-# 1. Build the core
+# Build the core and the single-file executable
 ./build.sh                  # Linux and macOS
 build.bat                   # Windows (MinGW)
 
-# 2. Check that it works
+# Check that it works
 ./build.sh test             # or: build.bat test
 
-# 3. Run
-PYTHONPATH=python python -m aoeviewer                # Linux and macOS
-set PYTHONPATH=python && python -m aoeviewer         # Windows
+# Run from source, without packaging
+PYTHONPATH=python python -m visimu                # Linux and macOS
+set PYTHONPATH=python && python -m visimu         # Windows
 \end{aoecode}
+
+With no argument both scripts do the whole job: they compile the core and then
+package the executable, because that is what ``build'' means and it used to be
+two commands. The pieces are still available on their own ---
+\code{core} compiles the library and stops, \code{exe} packages without
+recompiling, \code{exe-folder} packages as a directory rather than one file,
+and \code{test} compiles the core and runs the C++ checks. Anything beginning
+with a dash is passed straight through to \code{packaging/build\_exe.py}, so
+\code{./build.sh -{}-no-samples} works as written.
 
 The build produces \code{build/libaoecore.so} on Linux,
 \code{build/libaoecore.dylib} on macOS and \code{build/aoecore.dll} on
@@ -269,15 +286,27 @@ To try the program without real data, generate a sample:
 
 \begin{aoecode}
 python tools/gen_sample.py sample.aoe --sims 6 --rows 40000
-PYTHONPATH=python python -m aoeviewer sample.aoe
+PYTHONPATH=python python -m visimu sample.aoe
 \end{aoecode}
 
 \subsection{Sample data}
 \label{sec:samples}
 
 Building the executable also writes \code{sample/}, beside \code{build/} and
-\code{dist/}: two flight files of about 250\,MB with twenty-five runs each, and
-one of 12\,MB for a quick look.
+\code{dist/}. Two kinds of file go in there, for two different purposes.
+
+\emph{Flight data}, to look at: two files of about 250\,MB with twenty-five
+runs each, and one of 12\,MB for a quick look.
+
+\emph{A regression pair}, to compare: \code{regression\_a.aoe} and
+\code{regression\_b.aoe}, about a megabyte each, twenty channels and four
+runs held under the same identifiers in a different order in each file --- plus
+\code{regression\_thresholds.yaml}, the configuration that goes with them.
+They are built wrong on purpose and in known places: one run is identical in
+both files and must come out clean, one is flagged on eighteen channels, which
+is more than one page of tiles holds, one on five and one on a single channel.
+Chapter~\ref{ch:compare} is what they are for, and they are generated by
+\code{tools/gen\_diff\_samples.py}.
 
 The sizes are the point. A few megabytes exercises none of what this program is
 built around: the \code{.aoec} sidecar is not written below 8\,MB, decimation
@@ -306,8 +335,8 @@ preserve and no per-run constants for ISO to key on.
 \subsection{Where the library is looked for}
 
 \code{\_core.library\_path()} searches in a fixed order, most specific first:
-the environment variable \code{AOEVIEWER\_CORE} (which may name either a file or
-a directory); \code{sys.\_MEIPASS} and \code{sys.\_MEIPASS/aoeviewer}, which is
+the environment variable \code{VISIMU\_CORE} (which may name either a file or
+a directory); \code{sys.\_MEIPASS} and \code{sys.\_MEIPASS/visimu}, which is
 where a PyInstaller bundle unpacks; the directory of the executable when frozen;
 the package directory; \code{<project>/build}; and finally the working
 directory. If none of them yields a loadable library, the raised
@@ -348,11 +377,11 @@ before you need them.
 
 \section{Logging, and what to do when it will not start}
 
-The logger is named \code{aoeviewer} and writes \code{aoeviewer.log} through a
+The logger is named \code{visimu} and writes \code{visimu.log} through a
 rotating handler of 2\,MB with three backups. The directory is chosen in order:
-the environment variable \code{AOEVIEWER\_LOG\_DIR}; the directory of the
+the environment variable \code{VISIMU\_LOG\_DIR}; the directory of the
 executable when frozen, or the project root when running from source;
-\code{\textasciitilde/.aoeviewer}; and the working directory. On startup the log
+\code{\textasciitilde/.visimu}; and the working directory. On startup the log
 records the application and core versions, the core library path, the Python and
 platform versions, the worker count and the PySide6, pyqtgraph and NumPy
 versions --- which between them identify almost every environment problem.
@@ -361,7 +390,7 @@ The application installs \code{sys.excepthook},
 \code{threading.excepthook} and a Qt message handler, so an unhandled exception
 anywhere, including inside a Qt callback, reaches the log rather than the void.
 If construction of the main window fails, the traceback is logged and printed,
-and a dialog titled \emph{aoeViewer could not start} appears with the log path as
+and a dialog titled \emph{visimu could not start} appears with the log path as
 its informative text and the traceback as its detail.
 
 \section{The first plot}
@@ -447,10 +476,10 @@ rail --- the panel stack, the window's tab handler, the workspace --- refers to
 a panel by the index it was built with, so dragging the rail about cannot make
 the window show the wrong panel.
 
-A workspace records the order as a list of \emph{names}. A name this version
-does not have is ignored, and one it has that the workspace does not mention
-keeps its place at the end --- so a workspace written by 2.2.x, whose rail
-included \tab{alias}, still arranges the twelve tabs the two versions share.
+A workspace records the order as a list of \emph{names} rather than positions.
+A name this build does not have is ignored, and one it has that the workspace
+does not mention keeps its place at the end --- so the rail is arranged as far
+as the file says and no tab is ever lost from it.
 \end{aoenote}
 
 The
@@ -473,10 +502,13 @@ would repaint twenty-five plots.
 
 \section{The main toolbar}
 
-Ten buttons in three groups: the workspace, the two exports, and the interface
---- then, pushed to the right edge, the four mouse modes. Every one of them is a
-labelled icon, and every icon is painted at request time rather than loaded from
-a file.
+Fifteen buttons, left to right in five groups. The workspace comes first and
+carries no caption, because a new, a load and two saves need none. Then
+\emph{Export}, the two ways work leaves the program. Then \emph{Mouse}, the
+four modes. Then, after a stretch that pushes the rest to the right edge,
+\emph{Help} on its own, and \emph{Interface} last: the theme and the two size
+steps. Every button is a labelled icon, and every icon is painted at request
+time rather than loaded from a file.
 
 \begin{center}
 \small
@@ -484,14 +516,16 @@ a file.
 \toprule
 \textbf{Button} & \textbf{Shortcut} & \textbf{What it does} \\
 \midrule
-Load workspace & \key{Ctrl+L} & Opens a saved \code{.aoews} workspace, replacing everything currently loaded. \\
+New workspace & \key{Ctrl+N} & Starts again from nothing: no files, no pages but one, no filters. Offers to save the open workspace first. \\
+Load workspace & \key{Ctrl+L} & Opens a saved \code{.aoews} workspace, replacing everything currently loaded. Offers to save the open one first. \\
 Save workspace & \key{Ctrl+S} & Overwrites the current workspace, asking for a path only if there is not one yet. The tooltip names the file it would write. \\
 Save workspace as\ldots & \key{Ctrl+Shift+S} & Always asks for a path, then continues in the new file and leaves the old one as it was. \\
 Image & --- & Saves the active page as a PNG, exactly as displayed. \\
 CSV & --- & Writes the active tile's curves to a CSV file at full resolution. \\
+Help & --- & Opens the shortcut and panel reference: every key the window listens for, and a line on what each tab is for. \\
+Light / Dark & --- & Switches the theme. Its label and icon name the theme a press would \emph{give} --- a sun while the dark theme is on --- rather than the one already on screen. \\
 Smaller & \key{Ctrl+-} & Interface size: smaller text, tighter spacing, everywhere. \\
 Larger & \key{Ctrl+=} & Interface size: larger text, roomier spacing, everywhere. \\
-Light / Dark & --- & Switches the theme. Its label and icon name the theme a press would \emph{give} --- a sun while the dark theme is on --- rather than the one already on screen. \\
 Select & \key{Ctrl+1} & Mouse mode: click to activate a tile; drag annotations. \\
 Inspect & \key{Ctrl+2} & Mouse mode: click a curve to read every channel; drag to measure a slope. \\
 Pan & \key{Ctrl+3} & Mouse mode: drag to move the view. \\
@@ -503,11 +537,21 @@ Zoom & \key{Ctrl+4} & Mouse mode: the wheel zooms; a drag zooms the area, the x 
 There is deliberately no \emph{Open} action: \emph{Add files} in the \tab{data}
 tab and \emph{Load workspace} here already cover it.
 
-The interface group sits behind its own rule and under its own caption ---
-\emph{Smaller}, \emph{Larger} and the theme --- because those three are the
-ones here that change nothing about the data or the view: everything to their
-left acts on the workspace or on the plots, and these act on the window
-itself.
+The interface group is last and hard against the right edge, behind its own
+rule and under its own caption, because the theme and the two size steps are
+the only buttons here that change nothing about the data or the view ---
+everything to their left acts on the workspace, the exports or the plots, and
+these three act on the window itself. \emph{Help} sits just before them,
+separated from both: it is not a view setting and not something that acts on
+the work.
+
+\emph{New}, \emph{Load} and closing the window all go through the same
+question. If the open workspace has unsaved changes they offer to save it
+first --- \emph{Save}, \emph{Discard} or \emph{Cancel} --- and choosing
+\emph{Save} on a workspace that has never been written opens the file dialog.
+Cancelling that dialog cancels the whole action rather than continuing and
+losing the work, which is the one case where ``save'' quietly turning into
+``discard'' would be unforgivable.
 
 The toolbar is permanent by construction. Its context menu is suppressed, its
 \code{toggleViewAction} is disabled and hidden, and
@@ -524,6 +568,19 @@ The four modes are exclusive, and the inactive ones are genuinely off rather
 than merely ignored --- in Select and Inspect the view box has mouse interaction
 disabled on both axes, and the wheel event is swallowed. Switching mode writes a
 one-line hint into the status bar.
+
+Two gestures work in every mode, because neither competes with what the mode
+already means. \textbf{Double-click} a tile to make it active, fit it and
+bring \tab{params} forward --- three things from the gesture that means ``this
+tile, now''. \textbf{Double right-click} anywhere on the grid to fit every
+tile on the page, which is \key{Ctrl+0} without reaching for the keyboard.
+
+Both are armed on the second press and carried out on the release, and only if
+the pointer stayed put. Qt reports the second press of two quick clicks as a
+double click whether a drag follows it or not, so in Zoom mode --- where
+dragging \emph{is} the gesture --- a second rectangle dragged near the first
+would otherwise arrive here and the fit would throw the zoom away. A double
+click that turns out to begin a drag now does nothing at all.
 
 Switching into Inspect brings the \tab{inspect} panel to the front, and clicking
 a curve brings it forward again every time, because that is where the answer
@@ -791,9 +848,10 @@ fit on any screen; this makes it \emph{comfortable} on one.
 The tab rail selects one of thirteen panels. Selecting a tab refreshes that panel
 immediately and marks the others stale, so they are refreshed lazily when next
 shown --- which is why no panel is allowed to write application state while
-refreshing. Seven of the panels act on the active tile only (\tab{params},
-\tab{diff}, \tab{style}, \tab{scale}, \tab{sync}, \tab{3d}, \tab{text}); the
-rest are global.
+refreshing. Six act on the active tile only (\tab{params}, \tab{style},
+\tab{scale}, \tab{sync}, \tab{3d}, \tab{text}) and the rest are global.
+\tab{diff} is both: its difference half acts on the active tile, and its file
+comparison is about the files as a whole.
 
 Each panel sits in a scroll area, and the reason is the window's minimum size
 rather than the panel's own.
@@ -877,6 +935,12 @@ instead, so \code{2.*.3} means first field 2, last field 3. Matching ignores
 case, and a file whose own name matches keeps all of its runs --- having asked
 for that file, hiding most of it would be perverse.
 
+Every filter box in the program --- here, in \tab{params} and in
+\tab{inspect} --- has a button beside it that empties it and refilters at
+once. Qt's own clear icon appears inside the field as well, but only once the
+field has text in it, which is no use to someone looking for the way back
+before they have typed.
+
 It is a view and nothing else: a hidden run keeps its tick and goes on being
 plotted, and clearing the box brings it back exactly as it was. While a filter
 is typed, \emph{Plot all} and \emph{Plot none} read \emph{(shown)} and act only
@@ -887,39 +951,63 @@ have a filter at all.
 \label{sec:params}
 
 \tab{params} sets the x channel and the y channels of the active tile, and
-nothing else; the legend, grid, log scale and marker settings that once lived
-here moved to \tab{style}. The x combo and the y list both display the channel's
-label --- the name with its unit appended, as in \code{ALTITUDE [ft]}, when the
-file's dialect carries one --- but both carry the bare name as their data, so a
-unit can never be mistaken for part of a name.
+nothing else: the legend, grid, log scale and marker settings live in
+\tab{style}. Every control here displays the channel's label --- the name with
+its unit appended, as in \code{ALTITUDE [ft]}, when the file's dialect carries
+one --- and carries the bare name as its data, so a unit can never be mistaken
+for part of a name.
 
-The filter box matches against the channel name, uppercased. If the text
-contains \code{*} or \code{?} it is treated as a wildcard pattern; otherwise it
-is a substring test. Non-matching rows are hidden rather than removed, so the
-ticks of channels you have filtered out of sight are still in force.
+The x channel is a combo at the top. Under \emph{Y axis} are two lists,
+stacked: \emph{Available}, holding every channel the open files offer, and
+\emph{Plotted on this tile} beneath it, holding the tile's y channels. Three
+buttons sit between them:
 
-It refilters 400\,ms after the last keystroke rather than on every one. These
-files carry hundreds of channels --- 585 in one of the dialects this reads ---
-so a letter is several hundred rows hidden or shown and a relayout of the list,
-and the answer between two letters of the same word is not one anybody reads.
-It is the same delay, for the same reason, that the \tab{text} panel uses
-before it commits a caption.
+\begin{center}
+\small
+\begin{tabular}{@{}p{0.12\textwidth}p{0.80\textwidth}@{}}
+\toprule
+\textbf{Button} & \textbf{What it does} \\
+\midrule
+$\bigtriangledown$ & Plots every name selected in \emph{Available}. \\
+$\bigtriangleup$ & Stops plotting every name selected in \emph{Plotted}. \\
+\code{\texttimes} & Plots nothing on this tile. \\
+\bottomrule
+\end{tabular}
+\end{center}
 
-Right-clicking a channel offers \emph{Use as X axis} and \emph{Copy name}.
+The lists are stacked rather than side by side, which is what makes the two
+arrows read correctly: down means ``plot these'', up means ``take them off''.
+Double-clicking a name moves it the same way, and is the quickest route for
+one channel. Both lists take a multiple selection, with \key{Ctrl} and
+\key{Shift} as everywhere else, so a dozen names move in one gesture.
 
-The ticked channels of the active tile are listed \emph{first}, in the order
-they were ticked, and the rest follow in file order. That order is also the
-tile's y list, so it is the order the title names them in and the order the
-legend and the CSV export use.
+Two lists rather than one list of tick boxes. A tick box in a six-hundred-row
+list is a 13\,px target that has to be hit one row at a time, and the question
+``what is on this tile'' was answered by scrolling the whole list looking for
+ticks. Here it is answered by looking at the second list.
 
-Unticking a channel returns it to its place among the unselected ones, because
-the promotion is recomputed from the file order on every tick rather than
-applied to the list's own order --- which would have no way back, since once a
-name has been moved to the top, ``the order as given'' \emph{is} the promoted
-one.
+\emph{Available} stays in the file's own order --- the order the engineer
+reading that file expects --- whatever order names were taken off the tile in.
+\emph{Plotted} is in drawing order, which is the order names were added to it,
+and that order is the tile's y list: it decides what the title names first, the
+order of the legend rows and the column order of the CSV export. To move a
+channel later in that order, take it off and add it again.
 
-The filter only hides rows: a selected name that does not match stays selected
-and stays at the top, hidden until the filter lets it through.
+Each list has its own filter box, each with its own clear button. A filter
+matches against the channel name, uppercased; if the text contains \code{*} or
+\code{?} it is a wildcard pattern, otherwise a substring test. Filtering hides
+rows and changes nothing else --- a plotted channel the filter is not showing
+is still plotted, and an available one still available.
+
+Each refilters 400\,ms after the last keystroke rather than on every one.
+These files carry hundreds of channels --- 585 in one of the dialects this
+reads --- so a letter is several hundred rows hidden or shown and a relayout of
+the list, and the answer between two letters of the same word is not one
+anybody reads. It is the same delay, for the same reason, that the \tab{text}
+panel uses before it commits a caption.
+
+Right-clicking a channel in either list offers \emph{Use as X axis} and
+\emph{Copy name}; \tab{compute} is where a channel is given a readable name.
 
 \begin{aoenote}{Displayed default versus committed default}
 Refreshing the panel displays a sensible x channel --- the first whose name
@@ -937,6 +1025,20 @@ beneath the field reads \emph{Valid} or carries the core's parse error.
 Validation evaluates nothing --- it parses and resolves identifiers only --- so
 it is cheap enough to run while you type.
 
+The expression field completes channel names as you type. From the second
+letter of a word it offers the channels whose names begin with it, ignoring
+case --- the file's own channels and the computed ones alike --- and choosing
+one replaces \emph{the word under the cursor} rather than the whole field, so
+completing in the middle of a long formula works. One letter is not enough to
+offer on: it matches most of a 585-channel file, which is a list to scroll
+rather than a suggestion.
+
+It offers only names. Function names are in the reference behind \emph{Help},
+and a list mixing both would make the half you were after harder to reach. The
+popup appears only for what you type: loading a definition back into the field
+with \emph{Edit selected} fills it from the program, and a popup dropping over
+a formula you asked to edit would be in the way.
+
 Once created, the parameter behaves exactly like a channel read from the file.
 It appears in \tab{params}, in \tab{iso}, in the \tab{inspect} tables, in the CSV
 export, and it can be referenced by other formulas. \emph{Edit selected} loads a
@@ -949,15 +1051,22 @@ MACH\_SQ, and ENERGY which depended on it}.
 The \emph{Help} button opens the complete syntax reference, which is also
 reproduced in Chapter~\ref{ch:formula}.
 
-\section{DIFF --- the difference between two runs}
+\section{DIFF --- comparing two runs, and comparing two files}
 \label{sec:diff}
 
+The tab has two halves, and they answer two sizes of the same question.
+\emph{Difference}, at the top, draws one channel's difference between two runs
+you choose --- the rest of this section. \emph{Whole files}, below it, compares
+two entire files against a table of thresholds and reports everything that
+moved too far; that is Chapter~\ref{ch:compare}.
+
 Two runs that look alike at tile scale can differ by three per cent somewhere in
-the middle, and the eye cannot find where. This panel puts that difference where
-it belongs: on the y axis, at the x it happened.
+the middle, and the eye cannot find where. The first half puts that difference
+where it belongs: on the y axis, at the x it happened.
 
 Choose a parameter and two runs. The tile then draws $A - B$ against the tile's
-own x axis, which is still chosen in PARAMS.
+own x axis, which is chosen here as well --- the same setting \tab{params}
+shows, writable from either, so asking this one question needs no other tab.
 
 One parameter and two runs, and no more. The question a difference answers is
 ``where do these two part company, and by how much'', and a tile holding four
@@ -989,9 +1098,10 @@ not drawn: DIFF is the more specific instruction about what the tile is for.
 width and marker come from STYLE as usual, keyed on the channel, so a difference
 of \code{ALPHA} is drawn in the colour \code{ALPHA} has.
 
-The tile is titled $\Delta$\code{ALT between two runs = f(TIME)}, and the legend
-row names both runs --- with their files when the two differ, without them when
-they do not.
+The tile is titled $\Delta$\code{ALT between two runs = f(TIME)}. The legend
+row takes two lines --- the channel, then the two runs, with their files when
+the two differ --- because on a tile a quarter of a page wide, all of that on
+one line runs past the plot it is labelling.
 
 It reads four channels and no more: x and the parameter, from each of the two
 runs. They are collected into the same batched, multi-threaded preload as
@@ -1002,15 +1112,6 @@ Nothing is drawn when the two runs share no x at all, when one of them does not
 carry the channel, or when A and B are the same run. The panel says which of
 those it is, because a difference that cannot be drawn looks exactly like one
 that is drawn and happens to be zero.
-
-\begin{aoenote}{Aliases, and where they went}
-Up to 2.2.3 this panel's place was taken by ALIAS, which gave a channel a second
-name. COMPUTE does the same job with \code{Load factor = NZ} and does it in one
-place, so the panel was removed in 2.3.0 and this one took its space. The core
-still resolves aliases and a workspace carrying them still loads --- they are
-reported on load exactly as before --- but nothing in the interface creates one
-any more.
-\end{aoenote}
 
 \section{ISO --- filtering runs by a value they hold constant}
 \label{sec:iso}
@@ -1688,6 +1789,279 @@ steal the caret. Notes can also be dragged directly on the plot in Select mode,
 and the spin boxes follow; clicking outside every note passes the click through,
 so empty space still selects the tile.
 
+\chapter{Comparing two files}
+\label{ch:compare}
+
+A run-to-run difference answers one question about two runs you already
+suspect. This answers a different one, about everything at once: given two
+whole files --- yesterday's build and today's, the reference case and the
+candidate --- has anything moved further than it was allowed to, and where?
+
+The shape of it is four steps. You name the two files and a configuration that
+says which channels matter and by how much they may differ. The program checks
+that the two files can be compared at all, compares every matched run of every
+channel the configuration names, and puts what it found in a report window.
+Nothing is plotted until you ask for it on a line of that report; when you do,
+it generates pages of tiles that overlay both files with the crossings shaded.
+
+All of it is in the lower half of the \tab{diff} tab, and all of it is saved in
+the workspace.
+
+\section{Setting it up}
+
+\textbf{File A} and \textbf{File B} are two of the files open in \tab{data}.
+File A is the reference: differences are measured at its x values, and it is
+the one the other is read against.
+
+\textbf{Thresholds\ldots} chooses the configuration file. The extension is not
+checked --- a \code{.txt} file with the right structure is accepted, which is
+what the people who maintain these tables tend to have. It is read the moment
+you choose it, so a file that is not one of these says so while you are still
+looking at the dialog, and the group names it declares appear immediately as a
+list of colour swatches.
+
+\textbf{Group colours} is that list. Every group in the configuration gets a
+swatch, pre-filled from grey, red, orange and green in the order the groups
+appear, and clicking one opens the colour picker. These are the colours the
+report and the shaded bands are drawn in, and they are a \emph{choice} ---
+nothing in the program reads a group's name. A group called BLACK is an
+identifier that happens to be a colour word, and it is drawn in whatever you
+pick for it.
+
+\textbf{Run diff} does the work. \textbf{Show report} reopens the report of
+the last comparison, at any time. Underneath, once pages have been generated,
+a combo lists them and goes to one.
+
+\begin{aoenote}{Why every run is ticked before the comparison runs}
+A generated page is a page like any other, and it is read through the same
+\tab{data} and \tab{iso} filters as the rest. A run left unticked three tabs
+ago would come out as a blank tile on a page you asked for because that run was
+flagged --- which is the least helpful answer the program could give. So
+pressing \emph{Run diff} ticks every run of every open file and admits every
+ISO value first. The comparison is about every run in the two files, and the
+filters are set to say so.
+\end{aoenote}
+
+\section{What must be true before anything is compared}
+
+Three things are checked, and each one is a separate message, because they send
+you to different places:
+
+\begin{itemize}
+\item the two files hold the \textbf{same number of runs};
+\item their \textbf{run identifiers match one to one}, and no identifier
+      appears twice in either file;
+\item the \textbf{same channels} are present.
+\end{itemize}
+
+If any of them fails, a warning says which and the comparison does not run. A
+non-regression check that half-ran and reported what it managed is worse than
+one that did not run.
+
+Runs are paired by \textbf{identifier}, never by position. Run 3 of one build
+is often run 7 of the next --- solvers finish in the order they finish --- and
+a comparison that paired them by position would report every run as broken
+while telling you nothing.
+
+\section{The configuration}
+\label{sec:diffconfig}
+
+The file is YAML of one particular shape: a list of groups, each with a list of
+\code{algoconfs}, each of those naming the channels it covers, the threshold,
+and optionally the x axis to compare along.
+
+\begin{aoecode}
+ - group_name: "BLACK"
+   algoconfs:
+     - variables: "ALFA"
+       x: "TIME"
+       threshold: 25
+     - variables: "Q1;TETA;BETA"
+       threshold: 10
+
+ - group_name: "AMBER"
+   algoconfs:
+     - variables: "ALFA"
+       threshold: 10
+     - variables: "Q1;TETA;BETA"
+       threshold: 5
+\end{aoecode}
+
+The rules:
+
+\begin{itemize}
+\item \code{variables} is split on semicolons, and each name becomes a rule of
+      its own with the same threshold.
+\item \code{x} is the channel the comparison runs along, and defaults to
+      \code{TIME}.
+\item \code{threshold} is a number, integer or decimal.
+\item \textbf{Keys this program does not know are ignored}, at any level and to
+      any depth. That is what makes a real file --- full of fields about things
+      other than this --- readable as it stands.
+\item If the same group and channel appear twice, the last one wins. These
+      files are edited by hand, and a repeat is a correction.
+\item Blank lines, \code{\#} comments, and the \code{-{}-{}-} and \code{\ldots}
+      document markers are skipped.
+\end{itemize}
+
+Only the channels the configuration names are compared. A rule set is a
+statement about which channels matter; comparing the other five hundred would
+turn the report into a list of everything that moved.
+
+\begin{aoenote}{It is read without PyYAML}
+The shape above is narrow enough to read directly, and that is deliberate: the
+machines this runs on reach the package index one negotiated wheel at a time,
+and a feature that needed a new dependency would be a feature nobody could
+install. What is read is exactly the shape above. Anchors, flow collections,
+multi-line scalars and nested lists have no meaning in it and are refused
+rather than half-understood --- a file that needs them is not this file. A
+structural problem is reported with its line number.
+\end{aoenote}
+
+\section{What counts as a violation}
+
+For each matched run and each channel a rule names, the two series are read and
+subtracted, and a sample is a violation where
+
+\[ \lvert A - B \rvert > \text{threshold} \]
+
+strictly: a difference exactly equal to the threshold is not a violation. A
+\textbf{flag} is raised for a (run, channel, group) when at least one sample
+violates it. A sample where either file has no number is not a difference
+anybody measured, and is skipped.
+
+\textbf{The two files need not be sampled alike.} Where their x grids differ,
+File B is read at File A's x values by linear interpolation, over the stretch
+of x the two have in common. Nothing outside that stretch is compared and
+nothing outside it can raise a flag: extrapolating would report a difference
+that was never recorded. If the two share no x at all, that run and channel are
+reported as not compared rather than passed.
+
+\subsection{Priority, and what gets shaded}
+\label{sec:diffpriority}
+
+Priority is the threshold \emph{value}: a higher number is the more serious
+group. Nothing else decides it --- not the order the groups appear in, not
+their names.
+
+A deviation large enough to cross a high threshold has crossed every lower one
+too, so a channel is usually flagged for several groups at once. The report
+lists all of them, worst first. The \emph{shading} does not: at each sample
+only the highest-priority violated group is drawn, so the bands never stack and
+the colour you see is the worst thing happening there. Contiguous samples owned
+by the same group merge into one band.
+
+The specification's own example: if RED (threshold 4) is violated on $[2,4]$
+and BLACK (threshold 6) on $[3,5]$, the shading reads RED on $[2,3)$ and BLACK
+on $[3,5]$.
+
+\begin{aoenote}{A group can be flagged and have nothing shaded}
+If a deviation is above the higher threshold everywhere it is above the lower
+one, the higher group owns every one of those samples and the lower has nothing
+left to draw. It is still listed in the report, because it was exceeded, and a
+report that hid it would be hiding a fact about the data. The band is a drawing
+decision; the flag is the measurement.
+\end{aoenote}
+
+\section{The report}
+\label{sec:diffreport}
+
+The report opens by itself when a comparison finishes without an error, in a
+window of its own rather than in the tab. A non-regression result is read once,
+carefully, and then acted on or dismissed; a tab would put it behind whichever
+tab was opened next, while a window can be left open beside the plots it
+generated. It is not modal --- the point of plotting a line is to look at the
+plots.
+
+One line per run that raised at least one flag. Runs with nothing to say are
+not listed, and a clean comparison says so in one sentence.
+
+\begin{aoecode}
+RUN_001: ALFA(BLACK), ALFA(AMBER), BETA(AMBER), Q1(BLACK), Q1(AMBER)
+RUN_004: ALFA(AMBER)
+\end{aoecode}
+
+Each group name is drawn in the colour chosen for it in the tab. Long lines
+wrap rather than pushing out a horizontal scrollbar: a run flagged on eighteen
+channels has a line of thirty entries.
+
+Every line carries a \emph{Plot} button, and double-clicking the line does the
+same thing. \textbf{Nothing is plotted until you press it.} Forty flagged runs
+at sixteen tiles a page is not something to do on anybody's behalf; plotting is
+one explicit act on one line, and the window can be closed without generating
+anything at all.
+
+Anything that could not be compared is listed beneath, named by run and
+channel: a missing x channel, two runs that share no x range, a channel that
+could not be read. A comparison reports what it skipped rather than passing it
+silently.
+
+\section{The pages it generates}
+\label{sec:diffpages}
+
+Pressing \emph{Plot} on a line generates pages named \code{DIFF (1)},
+\code{DIFF (2)} and so on, each a $4 \times 4$ grid. One tile per flagged
+channel, in the order the report lists them --- worst group first, so the first
+tile of the first page is the worst news. Sixteen channels fill a page and the
+seventeenth starts another; plotting a second run continues the numbering
+rather than starting again, so the pages of a comparison read as one sequence.
+
+Each tile overlays the same channel of the same run as the two files recorded
+it, in two fixed colours, with the violated regions washed in behind the curves
+in their group's colour. The legend names both series on their own lines:
+
+\begin{aoecode}
+regression_a.aoe - RUN_001 - BETA
+regression_b.aoe - RUN_001 - BETA
+\end{aoecode}
+
+The two colours are fixed rather than taken from the palette, because on a page
+of sixteen overlays the question is always ``which of these two is which'', and
+the answer should not change from tile to tile. \tab{style} can restyle them
+like any other curve; zoom, pan, the scale locks, the annotations and the
+exports all work as they do everywhere else.
+
+A generated tile names its \emph{run identifier} and its two files, not run
+indices, and it carries its own bands. Three things follow from that. The
+shading is the verdict as computed, not something re-derived on every pan. A
+workspace reopened a month later shows the bands it was saved with, with no
+file to re-read and no configuration to re-parse. And the tiles draw whatever
+is ticked in \tab{data}: the overlay was generated to answer one question about
+one run, and narrowing the filters afterwards must not blank the page that
+answered it.
+
+Running a second comparison removes the pages the previous one generated, so
+one set of pages is never read as the answer to another question.
+
+\section{What the workspace keeps}
+
+Saved: the two files, the path of the configuration \emph{and the rules read
+from it}, the group colours, the report, and the generated pages with their
+bands. Reopening restores all of it without recomputing anything.
+
+The rules are saved as well as the path on purpose. A threshold table is
+maintained by whoever owns the thresholds and is edited in place; a report has
+to go on meaning what it meant when it was computed, not what the file on disk
+says today.
+
+\section{Trying it}
+
+\code{sample/} holds a pair built for this, generated with the executable
+(\S\ref{sec:samples}): \code{regression\_a.aoe}, \code{regression\_b.aoe} and
+\code{regression\_thresholds.yaml}. Twenty channels, four runs under the same
+identifiers in a different order in each file, the second file sampled more
+coarsely than the first so the interpolation is exercised, and deviations
+engineered in known places --- one run clean, one flagged on eighteen channels,
+one on five, one on a single channel. Add both files in \tab{data}, name them
+as A and B, choose the configuration, and press \emph{Run diff}.
+
+\begin{aoelimit}{Two groups with the same threshold have no order}
+Priority is the threshold value, so two groups sharing one are tied and which
+of them gets shaded is not defined. The program does not pick for you: it
+warns, naming the channel and the groups, when the configuration is read and
+again in the report. Giving one of them a different threshold is the fix.
+\end{aoelimit}
+
 \chapter{Pages, grids and tiles}
 
 \textbf{Duplicate} copies the whole page, tiles and all: the copy is named
@@ -1886,19 +2260,18 @@ is loaded one file at a time.
 not destroy a layout, and reusing one workspace against another study --- remove
 the old file, add the new one --- keeps every tile's axes.
 
-Closing a study leaves its computed parameters and aliases defined. That is
-deliberate: opening the next study should not throw away the formulas and the
-readable names set up for it. It does mean that two different questions have to
-be asked separately.
+Closing a study leaves its computed parameters defined. That is deliberate:
+opening the next study should not throw away the formulas set up for it. It does
+mean that two different questions have to be asked separately.
 
 \code{Session.parameters} answers ``what names may the user write'', and lists
-the union of file headers, computed channels and aliases --- so it is
+the file headers together with the computed channels --- so it is
 \emph{non-empty} even with nothing open. \code{plottable\_parameters} answers
-``what can carry an axis'', and is empty while no file is open: a formula over
-columns that are not loaded evaluates to nothing, and an alias resolves to a
-channel no file carries. Everything that chooses a channel on the user's behalf
-reads the second, so that removing one study and adding another cannot re-point
-every tile's x axis at whichever alias or formula sorted first.
+``what can carry an axis'', and is empty while no file is open, because a
+formula over columns that are not loaded evaluates to nothing. Everything that
+chooses a channel on the user's behalf reads the second, so that removing one
+study and adding another cannot re-point every tile's x axis at whichever
+formula sorted first.
 
 A tile whose x channel is genuinely absent from the new study is still
 re-pointed, and the status bar still says so.
@@ -1936,33 +2309,43 @@ says so rather than writing an empty file.
 
 A workspace is a single JSON file with the extension \code{.aoews}. It carries
 the list of open files by absolute path, the names you gave those files and their
-runs, every computed parameter, every alias, every ISO filter with its intervals
+runs, every computed parameter, every ISO filter with its intervals
 and ticks, every page with its visible tiles and their complete state --- both
 encodings included --- the run selection, the whole style registry, the markers,
-the shaded areas, the variable-wide scale constraints, the theme and the mouse
-mode. What it deliberately does not carry is any derived answer --- which runs
-the ISO filters admit describes the files that were open when it was written, and
-is recomputed against whatever is open when it is read.
+the shaded areas, the variable-wide scale constraints, the arrangement of the
+tab rail, the file comparison with its thresholds, colours and report, the theme
+and the mouse mode. What it deliberately does not carry is any derived answer
+--- which runs the ISO filters admit describes the files that were open when it
+was written, and is recomputed against whatever is open when it is read.
 
 The schema is at version~3. Files also record \code{app\_version}, which is the
 build that wrote them and is informational only.
 
-\subsection{Save, and Save as}
+\subsection{New, Save, and Save as}
 
-There are two buttons, not one with a modifier, because which file is being
+\emph{New workspace} (\key{Ctrl+N}) starts again from nothing: no files, one
+empty page, no filters, no comparison. The theme and the interface size are
+view preferences and stay as you had them.
+
+There are two save buttons, not one with a modifier, because which file is being
 written is the thing that gets got wrong. \emph{Save workspace} (\key{Ctrl+S})
 overwrites the current workspace, asking for a path only if there is not one yet.
 \emph{Save workspace as\ldots} (\key{Ctrl+Shift+S}) always asks, and then
 continues in the new file --- leaving the one you came from exactly as it was on
 disk. That is how a variant is made.
 
+\emph{New}, \emph{Load} and closing the window all ask the same question
+first, and only when there is something to lose: \emph{Save}, \emph{Discard}
+or \emph{Cancel}. \emph{Save} on a workspace that has no file yet opens the
+dialog, and cancelling \emph{that} cancels the whole action --- the one place
+where carrying on regardless would turn a save into a discard.
+
 Three places say which file you are in. The window title carries its name, with a
 leading asterisk while there are unsaved changes. The \emph{Save} tooltip names
 the file it would overwrite in full, or says that there is no workspace file yet
 and it will ask. And the status line after a save repeats the path and what went
 with it --- \emph{Workspace saved to C:\textbackslash study\textbackslash
-sweep.aoews (including 2 formula(s), 1 alias(es), 4 renamed run(s), 3 ISO
-filter(s))}.
+sweep.aoews (including 2 formula(s), 4 renamed run(s), 3 ISO filter(s))}.
 
 \subsection{Names given to files and runs}
 
@@ -1996,13 +2379,11 @@ opened and before anything reads a name, so the first paint already shows them.
 
 Loading reads the file, then does everything that touches the core on a worker
 thread: clears the session, opens each file, applies the saved display names,
-installs the aliases, and re-creates the computed parameters. Any missing
-sidecars are started afterwards, in another process, once the workspace is on
-screen.
+and re-creates the computed parameters. Any missing sidecars are started
+afterwards, in another process, once the workspace is on screen.
 
-Aliases are installed before the formulas, since a formula may be written in
-terms of one. The formulas are then installed in as many passes as it takes,
-repeating until a pass installs nothing new. A single pass is not enough: a JSON
+The formulas are installed in as many passes as it takes, repeating until a
+pass installs nothing new. A single pass is not enough: a JSON
 object has no dependency order, so a formula defined in terms of another would be
 refused --- correctly, as an unknown name --- and silently dropped. Repeating
 settles any acyclic chain, and what is left over genuinely cannot be defined
@@ -2011,8 +2392,8 @@ against this data.
 Nothing here stops the workspace loading. Whatever resolves is in place, and one
 dialog titled \emph{Workspace loaded with differences} then lists what could not
 be: files that could not be opened, formulas that could not be defined and why,
-aliases whose channel is absent (kept, in case it returns), ISO filters on
-parameters none of these files carry, and ISO filters that no run satisfies.
+ISO filters on parameters none of these files carry, and ISO filters that no run
+satisfies.
 
 JSON was chosen over an ad-hoc delimited format because such a format breaks the
 moment a file path or a parameter name contains the delimiter, and cannot be
@@ -2069,7 +2450,7 @@ able to use it.
 Since \appver{} the application starts a copy of itself instead:
 
 \begin{aoecode}
-aoeviewer --build-cache run_001.aoe run_002.hdf5
+visimu --build-cache run_001.aoe run_002.hdf5
 \end{aoecode}
 
 detached, with no console window on Windows, once the file is already open and
@@ -2651,9 +3032,9 @@ files called \code{results.aoe} in different directories do not share a cache.
 \toprule
 \textbf{Platform} & \textbf{Per-user cache directory} \\
 \midrule
-Windows & \code{\%LOCALAPPDATA\%\textbackslash aoeViewer\textbackslash cache}, falling back to \code{\%APPDATA\%}, then \code{\%TEMP\%} \\
-macOS & \code{\$HOME/Library/Caches/aoeviewer} \\
-Linux and others & \code{\$XDG\_CACHE\_HOME/aoeviewer}, else \code{\$HOME/.cache/aoeviewer} \\
+Windows & \code{\%LOCALAPPDATA\%\textbackslash visimu\textbackslash cache}, falling back to \code{\%APPDATA\%}, then \code{\%TEMP\%} \\
+macOS & \code{\$HOME/Library/Caches/visimu} \\
+Linux and others & \code{\$XDG\_CACHE\_HOME/visimu}, else \code{\$HOME/.cache/visimu} \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -2995,7 +3376,7 @@ A tile with twenty-five runs of half a million samples cannot hand two and a
 half million points to a plotting library and stay interactive. Nor can it keep
 every thousandth sample: stride sampling silently deletes every spike between
 the samples it keeps, and on flight-test data that is exactly the part an
-engineer is looking for. aoeViewer therefore uses min/max bucketing.
+engineer is looking for. visimu therefore uses min/max bucketing.
 
 The visible index span is divided into exactly \code{max\_points} buckets by
 index, so bucket sizes differ by at most one sample. Within each bucket the
@@ -3487,12 +3868,12 @@ rather than a privileged one.
 
 Everything the interface can read, a script can read, through the same core and
 with the same performance. Importing the package is deliberately cheap: the
-exports are lazy, so importing \code{aoeviewer} pulls in neither NumPy nor the
+exports are lazy, so importing \code{visimu} pulls in neither NumPy nor the
 core library, which is what lets \code{-version}, \code{-help} and
 \code{-selftest} work on a machine where the core has not been built.
 
 \begin{aoecode}
-from aoeviewer import Session, FileHandle, SimulationHandle, IsoGroup, CoreError
+from visimu import Session, FileHandle, SimulationHandle, IsoGroup, CoreError
 \end{aoecode}
 
 \section{The one rule}
@@ -3584,7 +3965,7 @@ An \code{IsoGroup} is a named interval: \code{name}, \code{low}, \code{high},
 
 \begin{aoecode}
 import numpy as np
-from aoeviewer import Session, CoreError
+from visimu import Session, CoreError
 
 with Session() as session:
     handle = session.add_file("study/sweep.aoe")
@@ -3633,7 +4014,7 @@ any size, call \code{build\_cache()} once; the graphical application does this
 automatically above 8\,MB, but a script gets no sidecar unless it asks.
 
 \begin{aoenote}{Useful extras in \code{\_core}}
-Beyond the fa\c{c}ade, \code{aoeviewer.\_core} exposes \code{library\_path()},
+Beyond the fa\c{c}ade, \code{visimu.\_core} exposes \code{library\_path()},
 the \code{Pin} type with its \code{sorted} flag and \code{bounds()},
 \code{pin\_of(array)} to recover the pin behind a view, the array adapters, and
 the module-level \code{VERSION} and \code{WORKER\_COUNT}.
@@ -3706,13 +4087,13 @@ and re-read is a column parsed twice.
 
 \subsection{The program will not start}
 
-Run \code{python -m aoeviewer -selftest}. It checks each dependency separately
+Run \code{python -m visimu -selftest}. It checks each dependency separately
 and then the core, so the first \code{FAIL} names the problem. If the core is
 the failure, the error lists every directory that was searched; build it, or
-point \code{AOEVIEWER\_CORE} at the library. On Windows, a load failure that
+point \code{VISIMU\_CORE} at the library. On Windows, a load failure that
 looks like a missing dependency suggests running \code{objdump -p} against the
 DLL to see what it wants. Whatever happens, the traceback is in
-\code{aoeviewer.log}, whose location is reported by \code{-version}.
+\code{visimu.log}, whose location is reported by \code{-version}.
 
 \subsection{A file opens but shows nothing}
 
@@ -3788,36 +4169,91 @@ was plotting against.
 
 \chapter{Keyboard shortcuts and gestures}
 
+The \emph{Help} button in the toolbar shows this list in the program, beside a
+line on what each tab is for.
+
+\section{Keys}
+
 \begin{center}
 \small
-\begin{longtable}{@{}p{0.42\textwidth}p{0.52\textwidth}@{}}
+\begin{longtable}{@{}p{0.30\textwidth}p{0.64\textwidth}@{}}
 \toprule
-\textbf{Keys or gesture} & \textbf{Action} \\
+\textbf{Keys} & \textbf{Action} \\
 \midrule
 \endfirsthead
 \toprule
-\textbf{Keys or gesture} & \textbf{Action} \\
+\textbf{Keys} & \textbf{Action} \\
 \midrule
 \endhead
-\key{Ctrl+L} & Load workspace \\
+\key{Ctrl+N} & New workspace --- offers to save the open one first \\
+\key{Ctrl+L} & Load workspace --- offers to save the open one first \\
 \key{Ctrl+S} & Save workspace (overwrites the current file) \\
 \key{Ctrl+Shift+S} & Save workspace as --- asks, then continues in the new file \\
 \key{Ctrl+0} & Auto-fit every tile \\
 \key{Ctrl+-} / \key{Ctrl+=} & Interface size: smaller, larger \\
-\emph{Light} / \emph{Dark} in the toolbar & Switch the theme (no shortcut) \\
 \key{Ctrl+1} \ldots \key{Ctrl+4} & Mouse mode: Select, Inspect, Pan, Zoom \\
+\key{$\uparrow$} / \key{$\downarrow$} & Previous or next tab in the rail \\
+\midrule
+\key{D} & \tab{data} \\
+\key{P} & \tab{params} \\
+\key{C} & \tab{compute} \\
+\key{F} & \tab{diff} \\
+\key{O} & \tab{iso} \\
+\key{S} & \tab{style} \\
+\key{A} & \tab{scale} \\
+\key{Y} & \tab{sync} \\
+\key{3} & \tab{3d} \\
+\key{I} & \tab{inspect} \\
+\key{R} & \tab{area} \\
+\key{M} & \tab{markers} \\
+\key{T} & \tab{text} \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+The tab letters are bare keys, with no modifier, and each is shown on its tab
+when the pointer is over the rail. A bare letter cannot be allowed to steal a
+keystroke meant for a field, so the keys are ignored whenever the focus is in
+a text box, a spin box, an editable combo or a text area, and whenever a modal
+dialog is up. The theme has no shortcut: \emph{Light} / \emph{Dark} in the
+toolbar is the only way, because a theme switch is not something to hit by
+accident.
+
+\section{Gestures}
+
+\begin{center}
+\small
+\begin{longtable}{@{}p{0.42\textwidth}p{0.52\textwidth}@{}}
+\toprule
+\textbf{Gesture} & \textbf{Action} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Gesture} & \textbf{Action} \\
+\midrule
+\endhead
 Click a tile & make it the active tile \\
-Double-click a tile & auto-fit that tile alone \\
-Double-click a row in \tab{data} & rename that file or run \\
-Double-click a row in \tab{compute} & load that definition for editing \\
-Click a file row's arrow in \tab{data} & open or close its runs; the choice is remembered \\
-Right-click in \tab{data} & plot all or no runs of a file; rename; reload from disk; copy the full path \\
-Right-click in \tab{params} & create an alias; use as x axis; copy the name \\
-Right-click in \tab{iso} & group, ungroup, select all or none, use this filter, remove the filter \\
+Double-click a tile & activate it, fit it, and bring \tab{params} forward \\
+Double right-click on a tile & fit every tile on the page \\
+Drag in Zoom & zoom the area, the x axis or the y axis, by the shape of the drag \\
+\key{Ctrl}+drag or right-drag in Zoom & apply the same x range to every tile on the page \\
+Wheel in Zoom & zoom about the pointer \\
+Drag in Pan & move the view \\
 Drag in Inspect & measure a slope (shorter than 6\,px counts as a click) \\
+Click a curve in Inspect & read every channel of that run at that x \\
 Drag a marker or band edge in Select & move it \\
 Drag the legend & place it freely; the corner becomes \emph{custom} \\
 Drag a caption in Select & move it within its tile \\
+Drag a tab name up or down & rearrange the rail \\
+Wheel over the tab names & previous or next tab \\
+Double-click a row in \tab{data} & rename that file or run \\
+Double-click a name in \tab{params} & plot it, or stop plotting it \\
+Double-click a row in \tab{compute} & load that definition for editing \\
+Double-click a line in the comparison report & generate the pages for that run \\
+Click a file row's arrow in \tab{data} & open or close its runs; the choice is remembered \\
+Right-click in \tab{data} & plot all or no runs of a file; rename; reload from disk; copy the full path \\
+Right-click in \tab{params} & use as x axis; copy the name \\
+Right-click in \tab{iso} & group, ungroup, select all or none, use this filter, remove the filter \\
 Drag on a 3D tile in Pan & rotate \\
 Middle-drag or \key{Shift}+drag on a 3D tile & translate \\
 Right-drag or \key{Ctrl}+drag on a 3D tile & zoom \\
@@ -3834,8 +4270,8 @@ Wheel on a 3D tile in Zoom & zoom \\
 \toprule
 \textbf{Variable} & \textbf{Effect} \\
 \midrule
-\code{AOEVIEWER\_CORE} & Path to the core library, or to a directory containing it. Searched first, before every built-in location \\
-\code{AOEVIEWER\_LOG\_DIR} & Directory for \code{aoeviewer.log} \\
+\code{VISIMU\_CORE} & Path to the core library, or to a directory containing it. Searched first, before every built-in location \\
+\code{VISIMU\_LOG\_DIR} & Directory for \code{visimu.log} \\
 \code{AOE\_CACHE} & Set to \code{0}, \code{false}, \code{no} or \code{off} to disable sidecar caching entirely. Read once per process \\
 \code{AOE\_CACHE\_DIR} & Overrides the per-user directory used for sidecars and for HDF5 layout files \\
 \bottomrule
@@ -3851,10 +4287,9 @@ two-space indentation. The schema is at version~3.
 \begin{aoecode}
 {
   "version": 3,
-  "app_version": "2.3.0",
-  "files":    ["/abs/path/run_a.aoe"],
+  "app_version": "2.4.0",
+  "files":    ["/abs/path/run_a.aoe", "/abs/path/run_b.aoe"],
   "computed": {"LOAD_FACTOR": "NZ * 9.80665"},
-  "aliases":  {"Angle of attack": "ALPHA"},
   "file_names": {"/abs/path/run_a.aoe": "Nominal climb"},
   "sim_names":  {"/abs/path/run_a.aoe":
                    {"run_a.aoe::SIM_001::0": "Cold day"}},
@@ -3890,7 +4325,32 @@ two-space indentation. The schema is at version~3.
   "dark_mode": true,
   "ui_scale": 1.0,
   "panel_order": ["DATA", "PARAMS", "DIFF", "STYLE"],
-  "mouse_mode": 0
+  "mouse_mode": 0,
+
+  "diff_file_a": 0,
+  "diff_file_b": 1,
+  "diff_config_path": "/abs/path/thresholds.yaml",
+  "diff_rules": [
+    {"group": "BLACK", "param": "BETA", "x_param": "TIME",
+     "threshold": 10.0},
+    {"group": "AMBER", "param": "BETA", "x_param": "TIME",
+     "threshold": 5.0}
+  ],
+  "diff_group_colors": {"BLACK": "#9aa3ad", "AMBER": "#e59b3a"},
+  "diff_report": {
+    "file_a": 0, "file_b": 1,
+    "name_a": "regression_a.aoe", "name_b": "regression_b.aoe",
+    "flags": [
+      {"run_id": "RUN_001", "param": "BETA", "x_param": "TIME",
+       "violations": [
+         {"group": "BLACK", "threshold": 10.0,
+          "regions": [[15.0, 20.0]]},
+         {"group": "AMBER", "threshold": 5.0,
+          "regions": [[10.0, 15.0], [20.0, 25.0]]}
+       ]}
+    ],
+    "warnings": []
+  }
 }
 \end{aoecode}
 
@@ -3899,17 +4359,30 @@ Chapter~\ref{ch:pages}, including its captions and both encodings. Only the
 visible tiles of a page are written; loading pads the list back up to
 twenty-five.
 
-\code{ui\_scale} is absent from every workspace written before 2.1.2, and from
-one written by hand; 1.0 is the size those were laid out at, and a value
-outside the range is clamped rather than refused so that a workspace from a
-future version with a wider range still opens.
+\code{ui\_scale} is the interface size as a multiple of the base type scale. A
+value outside the supported range is clamped rather than refused, and one
+absent altogether opens at 1.0.
 
-\code{panel\_order} is the arrangement of the tab rail, as panel names, and is
-absent from everything written before \appver{}; those open in the order the
-window builds the panels in. A name this version does not have is ignored ---
-\tab{alias}, which 2.2.x had and this version does not --- and one it has that
-the list does not mention keeps its place at the end, so the tabs the two
-versions share are arranged either way and nothing is ever lost from the rail.
+\code{panel\_order} is the arrangement of the tab rail, as panel names. A name
+this version does not have is ignored, and one it has that the list does not
+mention keeps its place at the end --- so the rail is arranged as far as the
+file says and nothing is ever lost from it.
+
+The \code{diff\_*} keys are the file comparison (Chapter~\ref{ch:compare}).
+\code{diff\_file\_a} and \code{diff\_file\_b} index \code{"files"}.
+\code{diff\_rules} is the configuration \emph{as read}, which is why the path
+alone is not enough: the file on disk is maintained by whoever owns the
+thresholds, and a saved report has to go on meaning what it meant when it was
+computed. \code{diff\_report} holds the flags, each violation carrying its
+group, its threshold and the x regions where that group had priority ---
+already reduced, so nothing is recomputed on load. Each is checked on the way
+in and a malformed one costs the \tab{diff} tab its contents rather than
+costing the workspace its pages.
+
+A tile generated by the comparison carries \code{fdiff\_run} (the run
+\emph{identifier}), \code{fdiff\_param}, \code{fdiff\_file\_a},
+\code{fdiff\_file\_b} and \code{fdiff\_bands}, a list of
+\code{[group, low, high]}.
 
 \code{file\_names} and \code{sim\_names} are optional and written only when
 something was renamed (\S\ref{sec:workspaces}). \code{app\_version} records
@@ -3920,10 +4393,9 @@ object keys are strings: round-tripping \code{0.75} through an object hands back
 \code{"0.75"}, which would silently stop matching the value it is about.
 Non-finite keys are dropped, so the file stays portable JSON.
 
-The loader sets only the attributes it recognises and ignores the rest, which is
-how a workspace carrying a field this version has retired still loads, how the
-unread \code{legend\_show\_style} field is tolerated, and how one that names no
-\emph{Style by} opens at \emph{None}. The \code{"version"} key is written but nothing
+The loader sets only the attributes it recognises and ignores the rest, which
+is what makes a hand-edited workspace, or one written by another build, open as
+far as it can be understood. The \code{"version"} key is written but nothing
 branches on it.
 
 Not saved: the active tile index, the tile clipboard, the memory limit, the
@@ -3957,6 +4429,9 @@ Marker size & \tab{style} & 6.0 (range 1.0--20.0) \\
 Legend corner & \tab{style} & top-left \\
 Legend parts & \tab{style} & Parameter only \\
 Axis locks & \tab{scale} & off \\
+Group colours & \tab{diff} & grey, red, orange, green, in the order the groups appear \\
+Comparison x axis & threshold file & \code{TIME} when an entry does not name one \\
+Generated page grid & \tab{diff} & $4 \times 4$ \\
 Align runs on an event & \tab{sync} & off \\
 ISO groups & \tab{iso} & 3 \\
 Azimuth, tilt & \tab{3d} & $45^\circ$, $25^\circ$ \\
@@ -4015,6 +4490,12 @@ is coalescing --- a newer queued request replaces an older one.
 
 \textbf{Markers and areas are not drawn on three-dimensional tiles.} This is a
 deliberate restriction rather than an oversight, but it is a restriction.
+
+\textbf{Two threshold groups with the same number are tied.} Priority in the
+file comparison is the threshold value, so two groups sharing one have no order
+between them and which gets shaded is undefined. The program warns rather than
+choosing silently --- when the configuration is read, and again in the report
+--- but it cannot resolve it; see \S\ref{sec:diffpriority}.
 
 \textbf{Classic Mac line endings are not supported.} Lines are split on the line
 feed, with carriage returns trimmed, so a file using lone carriage returns reads

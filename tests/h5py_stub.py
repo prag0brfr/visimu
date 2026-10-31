@@ -7,7 +7,7 @@ target machine costs a manual download of it and its whole transitive closure
 HDF5 reader would be the one unreviewed path in the program, tested only on the
 machine that can least easily run tests.
 
-So this models the small surface `aoeviewer/hdf5.py` uses: a file that can be
+So this models the small surface `visimu/hdf5.py` uses: a file that can be
 written and reopened, groups that nest, 1-D datasets with a dtype, a shape and
 attributes, and `visititems`. It keeps its trees in memory, keyed by path, and
 writes the real HDF5 signature to disk so the reader's own sniffing works

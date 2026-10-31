@@ -1,7 +1,7 @@
 # Author: Paulo R. A. Gilz
 """Tests for reading result files stored as HDF5.
 
-Two halves. The first exercises the layout detection in `aoeviewer.hdf5`
+Two halves. The first exercises the layout detection in `visimu.hdf5`
 against a stand-in for h5py, so it runs on a machine where h5py is not
 installed -- which is every machine this project has been developed on, and
 possibly the target one too. The second pushes a file through the core and
@@ -26,7 +26,7 @@ import numpy as np
 
 import h5py_stub
 
-from aoeviewer import hdf5
+from visimu import hdf5
 
 
 CHANNELS = ["ALFA", "CG", "MACH", "MASSE", "Q1", "TETA", "TIME", "VC", "ZP"]
@@ -73,7 +73,7 @@ class Hdf5Mixin:
         # checks -- cannot tell two of them apart, and a test would be served
         # the previous test's tree. Nothing here is testing that behaviour, so
         # each test starts from nothing held.
-        from aoeviewer import hdf5 as hdf5_module
+        from visimu import hdf5 as hdf5_module
 
         hdf5_module.release()
         self.addCleanup(hdf5_module.release)
@@ -86,7 +86,7 @@ class Hdf5Mixin:
 
     def forget_layout(self, target):
         """Drop any written-down layout for this path."""
-        from aoeviewer import hdf5 as hdf5_module
+        from visimu import hdf5 as hdf5_module
 
         hdf5_module.release(target)
         cache = hdf5_module._layout_cache_path(target)
@@ -225,7 +225,7 @@ class LayoutDetectionTests(Hdf5Mixin, unittest.TestCase):
 
 def core_available():
     try:
-        from aoeviewer import Session  # noqa: F401
+        from visimu import Session  # noqa: F401
     except Exception:
         return False
     return True
@@ -236,7 +236,7 @@ class PushedFileTests(Hdf5Mixin, unittest.TestCase):
     """The array route: what the core makes of a file it did not parse."""
 
     def open_session(self, path):
-        from aoeviewer import Session
+        from visimu import Session
 
         session = Session()
         self.addCleanup(session.close)
@@ -390,7 +390,7 @@ class LazyPushTests(Hdf5Mixin, unittest.TestCase):
         self.addCleanup(setattr, hdf5, "read_first_values", self._real_read_first)
 
     def open_session(self, name="lazy.hdf5"):
-        from aoeviewer import Session
+        from visimu import Session
 
         target = self.write_channel_groups(name)
         session = Session()
@@ -493,7 +493,7 @@ class PushedSidecarTests(Hdf5Mixin, unittest.TestCase):
     """The sidecar written from pushed columns, and the open that uses it."""
 
     def session(self):
-        from aoeviewer import Session
+        from visimu import Session
 
         session = Session()
         self.addCleanup(session.close)
@@ -815,7 +815,7 @@ class LayoutCacheTests(Hdf5Mixin, unittest.TestCase):
                          target + hdf5.LAYOUT_SUFFIX)
 
     def test_the_session_opens_a_cached_file_without_walking_it(self):
-        from aoeviewer import Session
+        from visimu import Session
 
         target = self.tree("session.hdf5")
         warm = Session()
@@ -992,7 +992,7 @@ class DeclaredSchemaTests(Hdf5Mixin, unittest.TestCase):
                          "it enumerated dataset names it did not need")
 
     def test_the_samples_are_the_right_ones(self):
-        from aoeviewer import Session
+        from visimu import Session
 
         target = self.write_declared("values.hdf5")
         session = Session()
@@ -1005,7 +1005,7 @@ class DeclaredSchemaTests(Hdf5Mixin, unittest.TestCase):
                 column, (np.arange(76) + index).astype(np.float32)), index)
 
     def test_the_run_names_reach_the_application(self):
-        from aoeviewer import Session
+        from visimu import Session
 
         target = self.write_declared("names.hdf5")
         session = Session()

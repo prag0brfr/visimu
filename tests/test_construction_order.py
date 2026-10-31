@@ -29,11 +29,13 @@ Parsing rather than importing is the point: this must work with no Qt present.
 from __future__ import annotations
 
 import ast
+import io
 import os
+import re
 import unittest
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_PACKAGE = os.path.join(_ROOT, "python", "aoeviewer")
+_PACKAGE = os.path.join(_ROOT, "python", "visimu")
 
 
 def _python_files():
@@ -265,6 +267,391 @@ class TestInspectWiring(unittest.TestCase):
 
     def test_choosing_the_mode_shows_the_panel(self):
         self.assertIn("_show_panel", self._source("MainWindow", "set_mouse_mode"))
+
+
+class TestTheOldNameIsGone(unittest.TestCase):
+    """The application is called visimu, and nothing is called the old name.
+
+    Spelled in halves throughout, so that this file -- which has to name the
+    thing it is forbidding -- is not itself the one occurrence that makes the
+    test fail.
+
+    What is deliberately *not* renamed: the AOE result format and its
+    extensions (.aoe, .aoec, .aoews), the core library (aoecore), and the
+    AOE_CXX / AOE_PYTHON build variables. Those name the data format this
+    reads, which belongs to the files and not to the program.
+    """
+
+    OLD = "aoe" + "viewer"
+
+    SKIP_DIRS = {".git", "build", "dist", "__pycache__", ".pytest_cache"}
+    SKIP_EXT = {".pdf", ".aux", ".toc", ".out", ".log", ".ico", ".png",
+                ".pyc", ".so", ".dll", ".dylib", ".exe",
+                ".aoe", ".aoec", ".aoews"}
+
+    def files(self, readable_only=False):
+        """Every file in the tree, build output aside.
+
+        readable_only drops the ones there is no point reading -- a PDF, an
+        icon, a compiled library. Their *names* are still checked: a document
+        called after the old application is exactly the kind of leftover this
+        is for.
+        """
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        for folder, dirs, names in os.walk(root):
+            dirs[:] = [d for d in dirs if d not in self.SKIP_DIRS]
+            for name in sorted(names):
+                if (readable_only
+                        and os.path.splitext(name)[1].lower() in self.SKIP_EXT):
+                    continue
+                yield os.path.join(root, folder, name)
+
+    def test_no_file_is_named_after_it(self):
+        for path in self.files():
+            self.assertNotIn(self.OLD, os.path.basename(path).lower(),
+                             "%s is still named after the old application"
+                             % os.path.basename(path))
+
+    def test_no_file_mentions_it(self):
+        here = os.path.abspath(__file__)
+        offenders = []
+        for path in self.files(readable_only=True):
+            if os.path.abspath(path) == here:
+                continue            # this file names it in order to forbid it
+            try:
+                body = io.open(path, encoding="utf-8", newline="").read()
+            except (UnicodeDecodeError, OSError):
+                continue
+            if self.OLD in body.lower():
+                offenders.append(os.path.relpath(path, os.path.dirname(here)))
+        self.assertEqual(offenders, [],
+                         "the old name is still written in: %s"
+                         % ", ".join(sorted(offenders)))
+
+    def test_the_package_is_importable_under_the_new_name(self):
+        import visimu
+
+        self.assertTrue(visimu.__version__)
+        self.assertNotIn(self.OLD, visimu.__name__.lower())
+
+
+class TestEveryQtNameIsImported(unittest.TestCase):
+    """A name used but never imported is a NameError on the user's machine.
+
+    The suite cannot see it: the Qt stubs hand back a class for any attribute
+    asked of them, so an un-imported QToolButton resolves to *something* in
+    every test and raises only in a real build. That is exactly what happened
+    -- the PARAMS panel's move buttons shipped with no import and the
+    executable died on the panel's first line.
+
+    So the modules are read rather than run: every Qt-looking name they use
+    has to be bound at module level, by an import or a definition.
+    """
+
+    def modules(self):
+        root = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "python", "visimu")
+        for folder, _dirs, files in os.walk(root):
+            if "__pycache__" in folder:
+                continue
+            for name in sorted(files):
+                if name.endswith(".py"):
+                    yield os.path.join(folder, name)
+
+    @staticmethod
+    def bound_names(tree):
+        """Everything the module binds at its top level."""
+        names = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    names.add((alias.asname or alias.name).split(".")[0])
+            elif isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    names.add(alias.asname or alias.name)
+            elif isinstance(node, (ast.ClassDef, ast.FunctionDef)):
+                names.add(node.name)
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        names.add(target.id)
+            elif isinstance(node, ast.AnnAssign):
+                if isinstance(node.target, ast.Name):
+                    names.add(node.target.id)
+        return names
+
+    def test_no_qt_name_is_used_without_being_imported(self):
+        pattern = re.compile(r"^Q[A-Z]\w+$")
+        for path in self.modules():
+            source = io.open(path, encoding="utf-8").read()
+            tree = ast.parse(source)
+            bound = self.bound_names(tree)
+            used = {node.id for node in ast.walk(tree)
+                    if isinstance(node, ast.Name)
+                    and isinstance(node.ctx, ast.Load)
+                    and pattern.match(node.id)}
+            missing = sorted(used - bound)
+            self.assertEqual(missing, [],
+                             "%s uses %s without importing it"
+                             % (os.path.basename(path), ", ".join(missing)))
+
+    def test_the_other_names_the_ui_leans_on_are_imported_too(self):
+        """Qt, Signal, pg and np: the same trap, without the Q prefix."""
+        for path in self.modules():
+            source = io.open(path, encoding="utf-8").read()
+            tree = ast.parse(source)
+            bound = self.bound_names(tree)
+            used = {node.id for node in ast.walk(tree)
+                    if isinstance(node, ast.Name)
+                    and isinstance(node.ctx, ast.Load)
+                    and node.id in ("Qt", "Signal", "pg", "np")}
+            missing = sorted(used - bound)
+            self.assertEqual(missing, [],
+                             "%s uses %s without importing it"
+                             % (os.path.basename(path), ", ".join(missing)))
+
+
+class TestTheToolbarGroups(unittest.TestCase):
+    """One bar, four groups, left to right: the workspace, Export, Mouse,
+    Interface -- and Interface against the right edge.
+
+    The order is read off the source because a toolbar is built once, in one
+    method, and the order of the calls *is* the order on screen.
+    """
+
+    def bar(self):
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        path = os.path.join(here, "python", "visimu", "ui", "main_window.py")
+        body = io.open(path, encoding="utf-8").read()
+        start = body.index("def _build_toolbar")
+        return body[start:body.index("\n    def ", start + 10)]
+
+    def test_the_groups_are_in_order(self):
+        bar = self.bar()
+        places = [
+            ('add("New workspace"', "New"),
+            ('add("Load workspace"', "Load"),
+            ("self.save_action", "Save"),
+            ("self.save_as_action", "Save as"),
+            ('QLabel(" Export ")', "the Export label"),
+            ('add("Image"', "Image"),
+            ('add("CSV"', "CSV"),
+            ('QLabel(" Mouse ")', "the Mouse label"),
+            ("self.mode_group = QActionGroup", "the mouse modes"),
+            ('add(\n            "Help"', "Help"),
+            ('QLabel(" Interface ")', "the Interface label"),
+            ('add("Theme"', "Theme"),
+            ('add(\n            "Smaller"', "Smaller"),
+            ('add(\n            "Larger"', "Larger"),
+        ]
+        last = -1
+        for needle, name in places:
+            where = bar.find(needle)
+            self.assertGreater(where, -1, "%s is not on the bar" % name)
+            self.assertGreater(where, last, "%s is out of order" % name)
+            last = where
+
+    def test_the_workspace_group_carries_no_label(self):
+        """It is the first thing on the bar; a caption on it would be the one
+        label with nothing to tell apart from."""
+        bar = self.bar()
+        before = bar[:bar.index('add("New workspace"')]
+        self.assertNotIn("QLabel", before)
+
+    def test_the_interface_group_is_flush_right(self):
+        """The stretch goes in after the mouse modes, so everything from the
+        Interface label on is against the right edge."""
+        bar = self.bar()
+        self.assertLess(bar.index("self.mode_actions[MouseMode.SELECT]"),
+                        bar.index("Policy.Expanding"))
+        self.assertLess(bar.index("Policy.Expanding"),
+                        bar.index('QLabel(" Interface ")'))
+
+    def test_help_sits_just_left_of_the_interface_group(self):
+        """Behind its own rule, and not under the Interface caption: it
+        belongs to no group."""
+        bar = self.bar()
+        self.assertLess(bar.index('"Help"'), bar.index('QLabel(" Interface ")'))
+        self.assertGreater(bar.index('"Help"'), bar.index("Policy.Expanding"))
+        between = bar[bar.index('"Help"'):bar.index('QLabel(" Interface ")')]
+        self.assertIn("addSeparator()", between)
+
+    def test_the_old_interface_label_is_not_still_in_the_middle(self):
+        bar = self.bar()
+        self.assertEqual(bar.count('QLabel(" Interface ")'), 1)
+        self.assertEqual(bar.count("Policy.Expanding"), 1)
+
+
+class TestNewWorkspace(unittest.TestCase):
+    """New, Load and Close all offer to save first, through one prompt.
+
+    One prompt because the question is the same one, and because Cancel has to
+    mean Cancel in all three: the thing the user was doing does not happen.
+    """
+
+    def source(self, method):
+        """One method's text. Handles the last method in the file, which has
+        no next `def` to stop at."""
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        path = os.path.join(here, "python", "visimu", "ui", "main_window.py")
+        body = io.open(path, encoding="utf-8").read()
+        start = body.index("def " + method)
+        end = body.find("\n    def ", start + 10)
+        return body[start:end if end > 0 else len(body)]
+
+    @staticmethod
+    def code(body):
+        """The method without its docstring, so a sentence about the code is
+        not mistaken for the code."""
+        parts = body.split('"""')
+        return parts[0] + "".join(parts[2:]) if len(parts) > 2 else body
+
+    def test_all_three_ask_before_discarding(self):
+        for method in ("new_workspace", "load_workspace_dialog", "closeEvent"):
+            self.assertIn("_may_discard_workspace", self.source(method),
+                          "%s does not offer to save" % method)
+
+    def test_cancel_stops_the_thing_that_asked(self):
+        after = self.code(self.source("new_workspace")).split(
+            "_may_discard_workspace")[1]
+        self.assertIn("return", after[:80])
+        self.assertIn("event.ignore()", self.code(self.source("closeEvent")))
+
+    def test_a_cancelled_save_as_counts_as_cancel(self):
+        """Answering Yes and then cancelling the file dialog leaves the work
+        unsaved; carrying on would throw away what the user just tried to
+        keep."""
+        body = self.code(self.source("_may_discard_workspace"))
+        self.assertIn("if self.state.dirty:",
+                      body.split("self.save_workspace()")[1])
+
+    def test_a_clean_workspace_is_not_asked_about(self):
+        body = self.source("_may_discard_workspace")
+        self.assertIn("if not self.state.dirty:", body)
+        self.assertIn("return True", body)
+
+    def test_new_starts_from_a_default_state_and_rebinds_it(self):
+        """The panels and tiles each hold a reference to the state object, so
+        a new one has to reach all of them in the same turn."""
+        body = self.source("new_workspace")
+        self.assertIn("self.state = AppState()", body)
+        self.assertIn("self._rebind_state()", body)
+        self.assertIn("self.refresh_all()", body)
+        self.assertIn("self._update_window_title()", body)
+
+    def test_new_closes_the_files_too(self):
+        """A workspace names the files it was built over, so a blank one names
+        none."""
+        body = self.source("new_workspace")
+        self.assertIn("self.session.clear()", body)
+
+    def test_new_waits_for_a_preload_before_clearing(self):
+        """session.clear() drops the datasets a running preload is reading."""
+        body = self.code(self.source("new_workspace"))
+        self.assertLess(body.index("self.tasks.wait_for_idle()"),
+                        body.index("self.session.clear()"))
+
+    def test_new_has_a_shortcut_and_an_icon(self):
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        path = os.path.join(here, "python", "visimu", "ui", "main_window.py")
+        body = io.open(path, encoding="utf-8").read()
+        self.assertIn('add("New workspace", self.new_workspace, "new", "Ctrl+N"',
+                      body)
+        icons = io.open(os.path.join(here, "python", "visimu", "ui",
+                                     "icons.py"), encoding="utf-8").read()
+        self.assertIn('"new": _draw_new,', icons)
+
+
+class TestTheBuildScripts(unittest.TestCase):
+    """One command builds the core and packages the executable.
+
+    The two halves have to happen in that order and in one run: the
+    executable embeds the Python front end but loads the core library at run
+    time, so packaging without building first ships yesterday's core inside
+    today's bundle.
+    """
+
+    def read(self, name):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with io.open(os.path.join(root, name), encoding="utf-8",
+                     newline="") as handle:
+            return handle.read()
+
+    def test_the_shell_script_has_unix_line_endings(self):
+        """A CR at the end of every line makes /bin/sh fail on the first
+        compound statement, reporting a syntax error in code that is correct.
+        It is the one file in this tree that cannot be CRLF, which is exactly
+        why it is easy to convert by accident.
+        """
+        body = self.read("build.sh")
+        self.assertNotIn("\r", body, "build.sh must keep LF line endings")
+
+    def test_the_batch_file_has_windows_line_endings(self):
+        self.assertIn("\r\n", self.read("build.bat"))
+
+    def test_both_build_everything_by_default(self):
+        """No argument means the core and the single-file executable: that is
+        the job, and it was two commands."""
+        shell = self.read("build.sh")
+        self.assertIn("BUILD_EXE=1", shell)
+        self.assertIn('EXE_ARGS="--onefile"', shell)
+        self.assertIn("build_exe.py", shell)
+
+        batch = self.read("build.bat")
+        self.assertIn("set BUILD_EXE=1", batch)
+        self.assertIn("set EXE_MODE=--onefile", batch)
+        self.assertIn("build_exe.py", batch)
+
+    def test_both_can_still_build_the_core_alone(self):
+        """Packaging takes a minute against a couple of seconds for the core,
+        so building it to run the C++ tests against must stay cheap."""
+        shell = self.read("build.sh")
+        self.assertIn("core|lib|dll|so)", shell)
+        self.assertIn("BUILD_EXE=0", shell)
+
+        batch = self.read("build.bat")
+        self.assertIn('if /I "%1"=="core" set BUILD_EXE=0', batch)
+
+    def test_the_python_tests_do_not_package_an_executable(self):
+        """They need the library, not a bundle."""
+        shell = self.read("build.sh")
+        start = shell.index("    pytest)")
+        block = shell[start:shell.index(";;", start)]
+        self.assertIn('"$0" core', block)
+
+    def test_packaging_comes_after_the_core_in_both(self):
+        """The order that matters, read as the order of the two commands in
+        the file: the compiler invocation, then build_exe.py."""
+        for name, compiler in (("build.sh", "$CXX\" $CXXFLAGS -DAOE_BUILD_SHARED"),
+                               ("build.bat", "-DAOE_BUILD_SHARED")):
+            body = self.read(name)
+            self.assertLess(body.index(compiler), body.index("build_exe.py --onefile")
+                            if "build_exe.py --onefile" in body
+                            else body.rindex("build_exe.py"), name)
+
+    def test_packaging_is_a_branch_and_not_the_fall_through(self):
+        """So that `core` really does skip it rather than running it with no
+        arguments."""
+        self.assertIn('if [ "$BUILD_EXE" -eq 1 ]; then', self.read("build.sh"))
+        self.assertIn("if !BUILD_EXE! EQU 1 goto :package",
+                      self.read("build.bat"))
+
+    def test_the_folder_variant_passes_no_onefile(self):
+        shell = self.read("build.sh")
+        start = shell.index("    exe-folder|exedir|folder)")
+        self.assertIn('EXE_ARGS=""', shell[start:shell.index(";;", start)])
+
+        batch = self.read("build.bat")
+        self.assertIn('if /I "%1"=="exe-folder" set EXE_MODE=', batch)
+
+    def test_the_old_two_step_advice_is_gone_from_the_scripts(self):
+        """They used to end by telling the user to run build_exe.py himself,
+        which is the second command this change exists to remove."""
+        for name in ("build.sh", "build.bat"):
+            body = self.read(name)
+            self.assertNotIn("build the standalone executable (one folder)",
+                             body, name)
 
 
 class TestDrawPathWiring(unittest.TestCase):

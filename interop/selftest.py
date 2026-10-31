@@ -337,8 +337,8 @@ def run(scratch):
         [sys.executable, harness, "--aoe", twin, "--other", listing,
          "--reader", "readers.example_reader:read"],
         capture_output=True, text=True, cwd=HERE)
-    check("harness reports a missing aoeviewer clearly",
-          "Could not import aoeviewer" in (result.stdout + result.stderr)
+    check("harness reports a missing visimu clearly",
+          "Could not import visimu" in (result.stdout + result.stderr)
           or result.returncode in (0, 1),
           (result.stdout + result.stderr)[-200:])
 

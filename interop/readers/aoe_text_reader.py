@@ -4,7 +4,7 @@
 Its purpose is not to replace the core's parser -- the core reads .aoe faster
 than this ever will.  Its purpose is to be the reference implementation of the
 reader protocol, and to prove the harness: grading this reader against the same
-file read through ``aoeviewer.Session`` must come back "equivalent", because
+file read through ``visimu.Session`` must come back "equivalent", because
 both sides are reading the same bytes.  If it does not, the harness is wrong,
 and that is worth knowing before an unknown format is graded with it.
 

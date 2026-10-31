@@ -1,5 +1,5 @@
 # Author: Paulo R. A. Gilz
-"""Entry point: ``python -m aoeviewer`` and the frozen executable."""
+"""Entry point: ``python -m visimu`` and the frozen executable."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import traceback
 def _bootstrap_path() -> None:
     """Make the package importable when run from a source checkout.
 
-    Running ``python python/aoeviewer/__main__.py`` directly puts the *module's*
+    Running ``python python/visimu/__main__.py`` directly puts the *module's*
     directory on sys.path rather than the package's parent, so the package
     itself is not importable. Frozen builds do not need this.
     """
@@ -55,12 +55,12 @@ def selftest() -> int:
     the log and on stdout. Each import is attempted separately so one failure
     does not hide the state of the rest.
     """
-    from aoeviewer.logging_setup import get_logger, log_path
+    from visimu.logging_setup import get_logger, log_path
 
     log = get_logger("selftest")
     failures = 0
 
-    _emit("aoeViewer self-test")
+    _emit("visimu self-test")
     _emit("  frozen      : {0}".format(bool(getattr(sys, "frozen", False))))
     _emit("  executable  : {0}".format(sys.executable))
     _emit("  bundle dir  : {0}".format(getattr(sys, "_MEIPASS", "(not frozen)")))
@@ -92,7 +92,7 @@ def selftest() -> int:
     # it fails in an entirely different way (a missing dependent DLL rather
     # than a missing module).
     try:
-        from aoeviewer import _core
+        from visimu import _core
 
         _emit("  OK    {0:<20} {1} from {2}".format(
             "core", _core.VERSION, _core.library_path()))
@@ -139,7 +139,7 @@ def main(argv=None) -> int:
     _bootstrap_path()
 
     parser = argparse.ArgumentParser(
-        prog="aoeviewer", description="Viewer for AOE simulation result files."
+        prog="visimu", description="Viewer for AOE simulation result files."
     )
     parser.add_argument("files", nargs="*", help="result files to open at startup")
     parser.add_argument("--version", action="store_true", help="print versions and exit")
@@ -164,9 +164,15 @@ def main(argv=None) -> int:
 
     # Set up logging before anything else can fail, so a failure during import
     # or startup still leaves a file behind.
-    from aoeviewer.logging_setup import log_path, setup as setup_logging
+    from visimu.logging_setup import log_path, setup as setup_logging
 
     setup_logging()
+
+    # Temporary: the zoom trace says in the log that it is on, so a log sent
+    # back without it is obvious at a glance.
+    from visimu import zoomtrace
+
+    zoomtrace.banner()
 
     if args.selftest:
         return selftest()
@@ -175,15 +181,15 @@ def main(argv=None) -> int:
     # both because it has no use for it and because a machine that cannot
     # start a GUI can still perfectly well write a sidecar.
     if args.build_cache:
-        from aoeviewer.cachebuild import main as build_caches
+        from visimu.cachebuild import main as build_caches
 
         return build_caches([os.path.abspath(p) for p in args.files])
 
     if args.version:
-        from aoeviewer import __version__
-        from aoeviewer import _core
+        from visimu import __version__
+        from visimu import _core
 
-        _emit("aoeviewer   {0}".format(__version__))
+        _emit("visimu   {0}".format(__version__))
         _emit("core        {0}".format(_core.VERSION))
         _emit("core lib    {0}".format(_core.library_path()))
         _emit("workers     {0}".format(_core.WORKER_COUNT))
@@ -201,15 +207,15 @@ def _run_gui(args) -> int:
     # should work even if Qt is missing or the display is unavailable.
     from PySide6.QtWidgets import QApplication
 
-    from aoeviewer.ui.main_window import MainWindow
+    from visimu.ui.main_window import MainWindow
 
-    QApplication.setApplicationName("aoeViewer")
-    QApplication.setOrganizationName("aoeViewer")
+    QApplication.setApplicationName("visimu")
+    QApplication.setOrganizationName("visimu")
 
     app = QApplication(sys.argv)
     _apply_window_icon(app)
 
-    from aoeviewer.logging_setup import install_qt_handler
+    from visimu.logging_setup import install_qt_handler
 
     install_qt_handler()
     window = MainWindow(initial_files=[os.path.abspath(p) for p in args.files])
@@ -245,7 +251,7 @@ def _apply_window_icon(app) -> None:
 
 def _icon_candidates():
     """Where the .ico might be, frozen or from a checkout."""
-    name = "aoeviewer.ico"
+    name = "visimu.ico"
     bundle = getattr(sys, "_MEIPASS", None)
     if bundle:
         yield os.path.join(bundle, name)
@@ -267,17 +273,17 @@ def _report_startup_failure(path) -> int:
     report = traceback.format_exc()
 
     try:
-        from aoeviewer.logging_setup import get_logger
+        from visimu.logging_setup import get_logger
 
         get_logger("startup").critical("startup failed\n%s", report)
     except Exception:
         pass
 
-    _emit("aoeViewer could not start.\n")
+    _emit("visimu could not start.\n")
     _emit(report)
     if path:
         _emit("Full details written to: {0}".format(path))
-    _emit("\nRun 'aoeviewer --selftest' for a component-by-component report.")
+    _emit("\nRun 'visimu --selftest' for a component-by-component report.")
 
     try:
         from PySide6.QtWidgets import QApplication, QMessageBox
@@ -285,8 +291,8 @@ def _report_startup_failure(path) -> int:
         app = QApplication.instance() or QApplication(sys.argv)
         box = QMessageBox()
         box.setIcon(QMessageBox.Critical)
-        box.setWindowTitle("aoeViewer could not start")
-        box.setText("aoeViewer could not start.")
+        box.setWindowTitle("visimu could not start")
+        box.setText("visimu could not start.")
         box.setInformativeText(
             "Details were written to:\n{0}".format(path or "(no log file)")
         )

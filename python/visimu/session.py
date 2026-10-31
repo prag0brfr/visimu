@@ -539,10 +539,15 @@ class Session:
         """Define a computed channel. Raises CoreError with the parse message."""
         if not lib.aoe_set_computed(self._handle, encode(name), encode(expression)):
             raise CoreError(self.last_error or "invalid expression")
+        # The ISO values of a computed channel are computed from it, so a
+        # redefinition makes them stale -- and the same name can be given a
+        # different formula at any time.
+        self._iso_cache.clear()
 
     def remove_computed(self, name: str) -> List[str]:
         """Remove a computed channel; returns it plus every dependant removed."""
         count = lib.aoe_remove_computed(self._handle, encode(name))
+        self._iso_cache.clear()          # see set_computed
         return [decode(lib.aoe_removed_name(self._handle, i)) for i in range(count)]
 
     def is_computed(self, name: str) -> bool:
@@ -837,6 +842,18 @@ class Session:
             try:
                 column = headers.index(name)
             except ValueError:
+                # Not a channel this file stores. A computed one is the case
+                # that matters: it is not in the headers and never will be, and
+                # answering NaN for every run meant an ISO filter on a computed
+                # channel admitted nothing at all -- NaN reads as "this run has
+                # no value", so every run was excluded while the ISO tab, which
+                # gets its value list from the core, listed the values quite
+                # correctly. A filter that lists 1 and then hides everything
+                # holding 1 is the shape of that bug.
+                for candidate in (resolved, name):
+                    if candidate and self.is_computed(candidate):
+                        return self._pushed_computed_iso_values(
+                            file_index, candidate, len(layout.run_keys))
                 return np.full(len(layout.run_keys), np.nan, dtype=np.float32)
 
         key = (file_index, column)
@@ -850,6 +867,44 @@ class Session:
             except (ValueError, OSError) as exc:
                 _log.warning("could not read %s: %s", path, exc)
                 values = np.full(len(layout.run_keys), np.nan, dtype=np.float32)
+        self._iso_cache[key] = values
+        return values.copy()
+
+    def _pushed_computed_iso_values(self, file_index: int, name: str,
+                                    count: int) -> np.ndarray:
+        """One value per run for a channel this file computes rather than holds.
+
+        Element zero of the computed channel, per run, which is what the core
+        answers for a file it parsed itself: a formula over a whole run --
+        max(NZ), or a difference between its ends -- is constant across the
+        run, so its first sample *is* the run's value.
+
+        It costs more than the stored case, which reads one element of one
+        dataset per run: a computed channel has to be evaluated, and that reads
+        whatever columns the formula names. There is no cheaper correct answer
+        -- the value does not exist anywhere until it is computed -- so it is
+        cached like the stored one, and the cache is dropped whenever the files
+        or the definitions change.
+        """
+        key = (file_index, "computed", name)
+        cached = self._iso_cache.get(key)
+        if cached is not None:
+            return cached.copy()
+
+        values = np.full(max(0, int(count)), np.nan, dtype=np.float32)
+        for sim_index in range(values.size):
+            try:
+                column = self.channel(file_index, sim_index, name)
+            except CoreError:
+                continue
+            if column is not None and column.size:
+                first = float(column[0])
+                # A formula that cannot be evaluated for a run gives nothing
+                # rather than a wrong number, and nothing is what NaN means
+                # here: that run is not admitted by a filter on this channel.
+                if first == first:
+                    values[sim_index] = first
+
         self._iso_cache[key] = values
         return values.copy()
 

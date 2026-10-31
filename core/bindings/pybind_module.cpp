@@ -2,7 +2,7 @@
 //
 // OPTIONAL pybind11 module.
 //
-// This is NOT the binding the application uses. aoeViewer talks to the core
+// This is NOT the binding the application uses. visimu talks to the core
 // through the plain C ABI in aoe_c_api.h via ctypes, because that needs no
 // third-party build dependency and works with any CPython -- which matters on
 // machines where pybind11 cannot be installed.
@@ -46,7 +46,7 @@ py::array_t<float> view_channel(aoe::Session& session, py::object owner, int fil
 }  // namespace
 
 PYBIND11_MODULE(aoecore_py, m) {
-    m.doc() = "Native bindings for the aoeViewer core (optional; ctypes is the default).";
+    m.doc() = "Native bindings for the visimu core (optional; ctypes is the default).";
 
     py::class_<aoe::IsoGroup>(m, "IsoGroup")
         .def(py::init<>())
